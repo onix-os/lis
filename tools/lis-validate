@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""lis-validate — schema + semantic validation for LIS documents.
+
+Usage: lis-validate FILE [FILE...]
+Exit code 0 when every document is valid, 1 otherwise.
+
+Implements the normative checklist of SPEC.md §19 on top of the JSON Schema:
+reference resolution, one `rest` per disk, exactly one root mountpoint,
+firmware/loader coherence, snapshot/desktop constraints, plaintext-secret
+heuristics.
+"""
+
+import json
+import pathlib
+import sys
+
+try:
+    import jsonschema
+except ImportError:  # pragma: no cover
+    sys.exit("lis-validate needs the 'jsonschema' python package (pip install jsonschema)")
+
+HERE = pathlib.Path(__file__).resolve().parent
+SCHEMA = HERE.parent / "schema" / "lis-0.1.schema.json"
+
+
+def load_document(path: pathlib.Path):
+    text = path.read_text()
+    if path.suffix in (".yaml", ".yml") or path.name.endswith(".lis.yaml"):
+        import yaml  # optional dependency, only for YAML authoring
+
+        return yaml.safe_load(text)
+    return json.loads(text)
+
+
+def semantic_errors(doc: dict) -> list[str]:
+    errs: list[str] = []
+    storage = doc.get("storage", {}) or {}
+    target = doc.get("target", {}) or {}
+
+    disk_ids = {d["id"] for d in target.get("disks", [])}
+    part_ids = set()
+    rest_per_disk: dict[str, int] = {}
+    root_providers = 0
+
+    def note_fs(mountpoint, subvolumes):
+        # A filesystem provides "/" via its own mountpoint OR a subvolume;
+        # both on the same filesystem are one root, not two.
+        nonlocal root_providers
+        subs = [s.get("mountpoint") for s in subvolumes or []]
+        if mountpoint == "/" or "/" in subs:
+            root_providers += 1
+
+    for part in storage.get("partitions", []):
+        if part.get("disk") not in disk_ids:
+            errs.append(f"partition references undeclared disk '{part.get('disk')}'")
+        if pid := part.get("id"):
+            if pid in part_ids:
+                errs.append(f"duplicate partition id '{pid}'")
+            part_ids.add(pid)
+        if part.get("size") == "rest":
+            rest_per_disk[part.get("disk")] = rest_per_disk.get(part.get("disk"), 0) + 1
+        role = part.get("role")
+        implied = {"root": "/", "esp": None}.get(role)
+        note_fs(part.get("mountpoint") or implied, part.get("subvolumes"))
+    for disk, n in rest_per_disk.items():
+        if n > 1:
+            errs.append(f"disk '{disk}' has {n} partitions sized 'rest' (max one)")
+
+    crypt_ids = set()
+    for crypt in storage.get("encryption", []) or []:
+        if crypt.get("over") not in part_ids:
+            errs.append(f"encryption '{crypt.get('id')}' is over unknown id '{crypt.get('over')}'")
+        crypt_ids.add(crypt.get("id"))
+
+    referable = part_ids | crypt_ids
+    for group in storage.get("lvm", []) or []:
+        for dev in group.get("devices", []):
+            if dev not in referable and not dev.startswith("md:"):
+                errs.append(f"lvm '{group.get('name')}' references unknown device '{dev}'")
+        rests = 0
+        for vol in group.get("volumes", []):
+            if vol.get("size") == "rest":
+                rests += 1
+            note_fs(vol.get("mountpoint"), vol.get("subvolumes"))
+        if rests > 1:
+            errs.append(f"lvm '{group.get('name')}' has {rests} volumes sized 'rest' (max one)")
+    for raid in storage.get("raid", []) or []:
+        for dev in raid.get("devices", []) + (raid.get("spares") or []):
+            if dev not in referable:
+                errs.append(f"raid '{raid.get('name')}' references unknown device '{dev}'")
+
+    if storage and root_providers != 1:
+        errs.append(f"expected exactly one filesystem mounted at '/', found {root_providers}")
+
+    boot = doc.get("boot", {}) or {}
+    firmware = target.get("firmware", "auto")
+    if boot.get("loader") == "systemd-boot" and firmware == "bios":
+        errs.append("boot.loader systemd-boot requires uefi firmware")
+
+    snapshots = storage.get("snapshots", {}) or {}
+    if snapshots.get("enabled"):
+        root_is_btrfs = False
+        for part in storage.get("partitions", []):
+            fss = part.get("fs")
+            mnt = part.get("mountpoint") or ("/" if part.get("role") == "root" else None)
+            subs = [s.get("mountpoint") for s in part.get("subvolumes") or []]
+            if fss == "btrfs" and (mnt == "/" or "/" in subs):
+                root_is_btrfs = True
+        for group in storage.get("lvm", []) or []:
+            for vol in group.get("volumes", []):
+                subs = [s.get("mountpoint") for s in vol.get("subvolumes") or []]
+                if vol.get("fs") == "btrfs" and (vol.get("mountpoint") == "/" or "/" in subs):
+                    root_is_btrfs = True
+        if not root_is_btrfs:
+            errs.append("storage.snapshots requires a btrfs root")
+
+    role = (doc.get("software", {}) or {}).get("role", "")
+    desktop = doc.get("desktop")
+    if desktop is not None and not role.startswith("desktop:"):
+        errs.append("desktop section requires software.role desktop:*")
+    users = {u["name"]: u for u in doc.get("users", [])}
+    if desktop and (auto := desktop.get("autologin")):
+        user = users.get(auto)
+        if user is None:
+            errs.append(f"desktop.autologin names unknown user '{auto}'")
+        elif (user.get("password") or {}).get("locked"):
+            errs.append(f"desktop.autologin user '{auto}' has a locked password")
+
+    for user in users.values():
+        h = (user.get("password") or {}).get("hash", "")
+        if h and not h.startswith("$"):
+            errs.append(f"user '{user['name']}' password.hash is not a crypt(3) hash")
+    for wifi in (doc.get("network", {}) or {}).get("wifi", []) or []:
+        if "psk" in wifi:
+            errs.append(f"wifi '{wifi.get('ssid')}' carries a plaintext psk (use psk_hash)")
+
+    return errs
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print(__doc__.strip(), file=sys.stderr)
+        return 1
+    schema = json.loads(SCHEMA.read_text())
+    validator = jsonschema.Draft202012Validator(schema)
+    failed = False
+    for arg in sys.argv[1:]:
+        path = pathlib.Path(arg)
+        try:
+            doc = load_document(path)
+        except Exception as err:  # noqa: BLE001 — report parse failures per file
+            print(f"✗ {path}: unreadable: {err}")
+            failed = True
+            continue
+        errors = [f"{e.json_path}: {e.message}" for e in validator.iter_errors(doc)]
+        errors += semantic_errors(doc if isinstance(doc, dict) else {})
+        if errors:
+            failed = True
+            print(f"✗ {path}")
+            for e in errors:
+                print(f"    {e}")
+        else:
+            print(f"✓ {path}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

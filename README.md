@@ -98,13 +98,22 @@ partitioning plan + `pacstrap` + config files. Same file, same machine, either d
 
 ## Status
 
-**v0.1.0-draft.** The spec is being developed alongside its first two implementations:
+**v0.1.0-draft** — with working implementations on both sides of the contract:
 
-- **frontend**: the [nox](https://github.com/bresilla/nixos) installer TUI emits LIS
-- **applier**: LIS → NixOS (disko.nix + configuration.nix generation)
-
-An applier for Arch (LIS → archinstall configuration) is the planned second target,
-chosen because the mapping is nearly mechanical.
+- **producer**: the [nox](https://github.com/bresilla/nixos) installer TUI writes
+  `host/generated/system.lis.json` at every config generation, and resumes a
+  previous session's answers from it on startup.
+- **applier**: `nox lis-apply --file system.lis.json` consumes a LIS document and
+  generates the NixOS config (disko.nix, host.nix, user.nix) from it — no disk is
+  touched; applying the generated config stays a separate, confirmed step.
+- **translator**: [`tools/lis2archinstall.py`](tools/lis2archinstall.py) converts
+  a LIS document into archinstall's `user_configuration.json` +
+  `user_credentials.json` (plain-partition subset; warns on anything it must drop,
+  `--strict` makes dropped intent fatal).
+- **validator**: [`tools/lis-validate`](tools/lis-validate) checks documents
+  against the JSON Schema *and* the SPEC §19 semantic rules (reference
+  resolution, exactly-one-root, firmware/loader coherence, no plaintext
+  secrets, …). CI runs it on every example.
 
 ## Non-goals
 

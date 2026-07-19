@@ -1,0 +1,64 @@
+{
+  "lis": "0.1.0",
+  "meta": {
+    "name": "tron",
+    "description": "Two disks pooled into one LVM volume group; btrfs volumes carved from the pool. The shape the nox installer emits.",
+    "generator": "nox 0.1.0"
+  },
+  "target": {
+    "arch": "x86_64",
+    "firmware": "uefi",
+    "disks": [
+      { "id": "sda", "match": { "path": "/dev/sda" } },
+      { "id": "sdb", "match": { "path": "/dev/sdb" } }
+    ]
+  },
+  "storage": {
+    "wipe": true,
+    "partitions": [
+      { "disk": "sda", "role": "esp", "size": "1024MiB" },
+      { "disk": "sda", "id": "p-sda-0", "role": "raw", "size": "3814GiB", "fs": "none" },
+      { "disk": "sdb", "id": "p-sdb-0", "role": "raw", "size": "931GiB", "fs": "none" }
+    ],
+    "lvm": [
+      {
+        "name": "pool",
+        "devices": ["p-sda-0", "p-sdb-0"],
+        "volumes": [
+          {
+            "name": "root",
+            "size": "100GiB",
+            "fs": "btrfs",
+            "mountpoint": "/",
+            "subvolumes": [
+              { "name": "@home", "mountpoint": "/home" },
+              { "name": "@nix", "mountpoint": "/nix" }
+            ]
+          },
+          { "name": "swap", "size": "8GiB", "fs": "swap" },
+          { "name": "doc", "size": "rest", "fs": "btrfs", "mountpoint": "/doc" }
+        ]
+      }
+    ]
+  },
+  "boot": { "loader": "systemd-boot" },
+  "system": { "hostname": "tron", "timezone": "Europe/Amsterdam" },
+  "users": [
+    {
+      "name": "bresilla",
+      "admin": true,
+      "groups": ["wheel", "corner", "networkmanager", "video", "audio"],
+      "password": { "hash": "$6$examplesaltvalue$examplehashvalue" },
+      "dotfiles": { "repo": "https://github.com/bresilla/dot.git" }
+    }
+  ],
+  "network": { "ssh": { "enabled": true } },
+  "software": { "role": "server" },
+  "x-nixos": {
+    "role": "server",
+    "secrets": false,
+    "remote": "nixos@192.168.122.107",
+    "network_cleanup": true,
+    "bin_ensure": true
+  }
+}

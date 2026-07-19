@@ -1,0 +1,31 @@
+name: validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install jsonschema pyyaml
+      - name: schema is a valid JSON Schema
+        run: |
+          python -c "
+          import json, jsonschema
+          schema = json.load(open('schema/lis-0.1.schema.json'))
+          jsonschema.Draft202012Validator.check_schema(schema)
+          print('schema ok')"
+      - name: examples validate (schema + semantics)
+        run: python tools/lis-validate examples/*.lis.*
+      - name: archinstall translator smoke test
+        run: |
+          python tools/lis2archinstall.py examples/server-btrfs.lis.json --out /tmp/arch
+          python -m json.tool /tmp/arch/user_configuration.json > /dev/null
+          python -m json.tool /tmp/arch/user_credentials.json > /dev/null
+          echo "translator output parses"
