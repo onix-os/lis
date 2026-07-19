@@ -29,6 +29,11 @@ jobs:
           python -m json.tool /tmp/arch/user_configuration.json > /dev/null
           python -m json.tool /tmp/arch/user_credentials.json > /dev/null
           echo "translator output parses"
+      - name: autoinstall translator smoke test
+        run: |
+          python tools/lis2autoinstall.py examples/server-lvm-pool.lis.json --out /tmp/ubu
+          python -c "import yaml; d = yaml.safe_load(open('/tmp/ubu/user-data')); assert d['autoinstall']['version'] == 1; assert any(c['type'] == 'lvm_volgroup' for c in d['autoinstall']['storage']['config'])"
+          echo "autoinstall output parses"
 
   rust:
     runs-on: ubuntu-latest

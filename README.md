@@ -110,6 +110,11 @@ partitioning plan + `pacstrap` + config files. Same file, same machine, either d
   a LIS document into archinstall's `user_configuration.json` +
   `user_credentials.json` (plain-partition subset; warns on anything it must drop,
   `--strict` makes dropped intent fatal).
+- **translator (ubuntu)**: [`tools/lis2autoinstall.py`](tools/lis2autoinstall.py)
+  converts a LIS document into an Ubuntu autoinstall **cloud-init NoCloud seed**
+  (`user-data` + `meta-data`, ready for a `CIDATA` volume) — including full
+  curtin storage config with LVM, hashed passwords in `identity`, and
+  `scripts.firstboot` mapped onto cloud-init `runcmd`.
 - **rust crate**: [`bindings/rust`](bindings/rust) is the reference
   implementation — a typed model of every spec section with JSON emit/parse and
   the SPEC §19 validation. Depend on it with

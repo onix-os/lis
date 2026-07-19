@@ -69,6 +69,7 @@ Legend: ✔ = in LIS v0.1 · ✚ = **added to LIS v0.1 by this survey** · ◌ =
 | LUKS key escrow | Kickstart `--escrowcert` | ◌ |
 | Accessibility profiles | d-i, Fedora | ◌ |
 | Cloud/image build configs | mkosi, Ignition, cloud-init | ✗ non-goal |
+| LIS → Ubuntu autoinstall seed (CIDATA) | tools/lis2autoinstall.py | ✚ translator |
 | Post-boot config management | Ansible/cloud-init | ✗ non-goal |
 
 ## Notes on the deliberate exclusions
