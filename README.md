@@ -110,6 +110,10 @@ partitioning plan + `pacstrap` + config files. Same file, same machine, either d
   a LIS document into archinstall's `user_configuration.json` +
   `user_credentials.json` (plain-partition subset; warns on anything it must drop,
   `--strict` makes dropped intent fatal).
+- **rust crate**: [`bindings/rust`](bindings/rust) is the reference
+  implementation — a typed model of every spec section with JSON emit/parse and
+  the SPEC §19 validation. Depend on it with
+  `lis = { git = "https://github.com/onix-os/lis" }`; nox uses it directly.
 - **validator**: [`tools/lis-validate`](tools/lis-validate) checks documents
   against the JSON Schema *and* the SPEC §19 semantic rules (reference
   resolution, exactly-one-root, firmware/loader coherence, no plaintext

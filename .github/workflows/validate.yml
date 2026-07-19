@@ -29,3 +29,11 @@ jobs:
           python -m json.tool /tmp/arch/user_configuration.json > /dev/null
           python -m json.tool /tmp/arch/user_credentials.json > /dev/null
           echo "translator output parses"
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: reference crate tests
+        run: cargo test --manifest-path bindings/rust/Cargo.toml
