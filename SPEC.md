@@ -55,8 +55,10 @@ report the substitution.
 ### 2.4 Secrets
 
 Passwords MUST be crypt(3) hashes; WPA keys MUST be PSK hashes; registration
-tokens and other secret material MUST be **references** (`{ "from": "file:…" }` or
-`{ "from": "env:…" }`), resolved by the applier at apply time. A document MUST
+tokens and other secret material MUST be **references** (`{ "from": "file:…" }`,
+`{ "from": "env:…" }`, or `{ "from": "seed:…" }` — the last resolving against a
+LIS seed volume, see `docs/delivery.md` §4), resolved by the applier at apply
+time. A document MUST
 never contain plaintext secrets — documents are meant to be committed, shared, and
 templated.
 
@@ -499,6 +501,7 @@ How the *run* behaves, not what the system is. (Kickstart `reboot`, autoinstall
 {
   "on_finish": "reboot",
   "on_error": "fail",
+  "unattended": false,
   "interactive": ["storage"],
   "answers": { "overwrite_disk": "yes" }
 }
@@ -506,6 +509,9 @@ How the *run* behaves, not what the system is. (Kickstart `reboot`, autoinstall
 
 - `on_finish`: `reboot` | `poweroff` | `stay` (default `stay`).
 - `on_error`: `fail` (default) | `prompt`.
+- `unattended` (default `false`): the document half of the two-key consent
+  rule for zero-prompt destructive runs — the delivery channel must supply
+  the other half (`docs/delivery.md` §3).
 - `interactive[]`: section names the frontend MAY re-ask interactively even though
   the document provides values; everything else is unattended.
 - `answers`: predefined answers to applier-defined questions, by question id.
@@ -526,7 +532,12 @@ Extensions MUST NOT change the meaning of core sections — they add, never over
 
 ## 18. Applier report
 
-An applier SHOULD emit a machine-readable report after applying:
+After a successful apply, the applier SHOULD record the applied document on
+the installed system at `/var/lib/lis/system.lis.json` (mode 0600, secret
+references unresolved) — the machine's *birth certificate*
+(`docs/delivery.md` §7).
+
+An applier SHOULD also emit a machine-readable report:
 
 ```json
 { "lis": "0.1.0", "applied": true, "distro": "nixos",
@@ -551,3 +562,11 @@ A document is invalid if any of these fail:
 9. `storage.snapshots.enabled` requires a btrfs root.
 10. `desktop` requires a `desktop:*` role; `desktop.autologin` must name an
     unlocked user.
+
+## 20. Delivery
+
+How installers *find* a document — the `LISDATA` seed volume (with its two
+levels: `authorized_keys` trust seeds and `system.lis.json` intent seeds),
+`lis.url=`/`lis.device=` kernel parameters, the search order, piggybacking on
+`CIDATA`/`OEMDRV`, and the two-key consent rule — is specified in
+[`docs/delivery.md`](docs/delivery.md).

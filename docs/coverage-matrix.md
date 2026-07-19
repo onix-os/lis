@@ -70,6 +70,10 @@ Legend: ✔ = in LIS v0.1 · ✚ = **added to LIS v0.1 by this survey** · ◌ =
 | Accessibility profiles | d-i, Fedora | ◌ |
 | Cloud/image build configs | mkosi, Ignition, cloud-init | ✗ non-goal |
 | LIS → Ubuntu autoinstall seed (CIDATA) | tools/lis2autoinstall.py | ✚ translator |
+| Config auto-discovery from labeled volume | OEMDRV (Anaconda), CIDATA (cloud-init) | ✚ `LISDATA` seed, docs/delivery.md |
+| Remote/attended provisioning bootstrap | none (LIS first) | ✚ delivery level 1: authorized_keys + await + mDNS |
+| Consent model for unattended wipe | none — OEMDRV just runs | ✚ two-key rule (doc + channel) |
+| Record applied config on target | anaconda-ks.cfg (with secrets!) | ✚ birth certificate, secrets as refs |
 | Post-boot config management | Ansible/cloud-init | ✗ non-goal |
 
 ## Notes on the deliberate exclusions

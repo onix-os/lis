@@ -1103,6 +1103,9 @@
           "additionalProperties": {
             "type": "string"
           }
+        },
+        "unattended": {
+          "type": "boolean"
         }
       }
     }
@@ -1201,7 +1204,7 @@
       "properties": {
         "from": {
           "type": "string",
-          "pattern": "^(file|env):.+$"
+          "pattern": "^(file|env|seed):.+$"
         }
       }
     }

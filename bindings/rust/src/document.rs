@@ -928,6 +928,9 @@ pub struct Script {
 pub struct Installer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_finish: Option<OnFinish>,
+    /// The document half of the delivery two-key consent rule (delivery §3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unattended: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_error: Option<OnError>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

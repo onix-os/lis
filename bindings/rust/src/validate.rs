@@ -197,11 +197,14 @@ fn validate_non_storage(doc: &Document, issues: &mut Vec<Issue>, _has_storage: b
     }
     if let Some(registration) = &doc.registration {
         if let Some(token) = &registration.token {
-            if !token.from.starts_with("file:") && !token.from.starts_with("env:") {
+            if !["file:", "env:", "seed:"]
+                .iter()
+                .any(|p| token.from.starts_with(p))
+            {
                 issue(
                     issues,
                     "$.registration.token.from",
-                    "must be a file: or env: reference",
+                    "must be a file:, env:, or seed: reference",
                 );
             }
         }
