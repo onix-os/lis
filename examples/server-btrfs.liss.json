@@ -1,0 +1,66 @@
+{
+  "liss": "0.1.0",
+  "meta": {
+    "name": "tron",
+    "description": "Headless server: btrfs root with subvolumes, swap partition, one admin user.",
+    "generator": "nox 0.1.0"
+  },
+  "target": {
+    "arch": "x86_64",
+    "firmware": "uefi",
+    "disks": [{ "id": "main", "match": { "largest": true } }]
+  },
+  "storage": {
+    "wipe": true,
+    "partitions": [
+      { "disk": "main", "role": "esp", "size": "1GiB" },
+      { "disk": "main", "role": "swap", "size": "8GiB", "fs": "swap" },
+      {
+        "disk": "main",
+        "id": "p-root",
+        "role": "root",
+        "size": "rest",
+        "fs": "btrfs",
+        "mount_options": ["compress=zstd"],
+        "subvolumes": [
+          { "name": "@", "mountpoint": "/" },
+          { "name": "@home", "mountpoint": "/home" },
+          { "name": "@doc", "mountpoint": "/doc" }
+        ]
+      }
+    ]
+  },
+  "boot": { "loader": "systemd-boot", "timeout": 3 },
+  "system": {
+    "hostname": "tron",
+    "timezone": "Europe/Amsterdam",
+    "locale": "en_US.UTF-8",
+    "keymap": { "console": "us" }
+  },
+  "users": [
+    { "name": "root", "password": { "locked": true } },
+    {
+      "name": "bresilla",
+      "admin": true,
+      "shell": "zsh",
+      "groups": ["video", "audio"],
+      "password": { "hash": "$6$examplesaltvalue$hashedpasswordwouldgohere" },
+      "dotfiles": { "repo": "https://github.com/bresilla/dot.git" }
+    }
+  ],
+  "network": {
+    "manager": "auto",
+    "ssh": { "enabled": true, "password_auth": false, "permit_root": "no" },
+    "firewall": { "enabled": true, "allow_services": ["ssh"] }
+  },
+  "software": {
+    "role": "server",
+    "packages": ["git", "htop"],
+    "services": { "enable": ["sshd"] }
+  },
+  "x-nixos": {
+    "flake": true,
+    "repo": "https://github.com/bresilla/nixos",
+    "secrets": false
+  }
+}

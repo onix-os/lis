@@ -1,0 +1,399 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://liss.dev/schema/liss-0.1.schema.json",
+  "title": "LISS — Linux Installation Specification Standard v0.1",
+  "type": "object",
+  "required": ["liss"],
+  "properties": {
+    "liss": { "type": "string", "pattern": "^0\\.1\\.[0-9]+$" },
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "generator": { "type": "string" },
+        "created": { "type": "string", "format": "date-time" }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "arch": { "enum": ["x86_64", "aarch64", "riscv64"] },
+        "firmware": { "enum": ["uefi", "bios", "auto"] },
+        "disks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "match"],
+            "properties": {
+              "id": { "$ref": "#/$defs/handle" },
+              "match": {
+                "type": "object",
+                "additionalProperties": false,
+                "minProperties": 1,
+                "properties": {
+                  "path": { "type": "string" },
+                  "serial": { "type": "string" },
+                  "model": { "type": "string" },
+                  "wwn": { "type": "string" },
+                  "min_size": { "$ref": "#/$defs/size" },
+                  "max_size": { "$ref": "#/$defs/size" },
+                  "type": { "enum": ["ssd", "hdd", "nvme"] },
+                  "smallest": { "const": true },
+                  "largest": { "const": true }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "wipe": { "type": "boolean", "default": false },
+        "partitions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["disk", "size"],
+            "properties": {
+              "disk": { "$ref": "#/$defs/handle" },
+              "id": { "$ref": "#/$defs/handle" },
+              "role": { "enum": ["esp", "boot", "root", "swap", "data", "raw"] },
+              "size": { "$ref": "#/$defs/sizeOrRest" },
+              "fs": { "$ref": "#/$defs/fs" },
+              "label": { "type": "string" },
+              "mountpoint": { "$ref": "#/$defs/mountpoint" },
+              "mount_options": { "type": "array", "items": { "type": "string" } },
+              "subvolumes": { "$ref": "#/$defs/subvolumes" }
+            }
+          }
+        },
+        "encryption": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "over"],
+            "properties": {
+              "id": { "$ref": "#/$defs/handle" },
+              "over": { "$ref": "#/$defs/handle" },
+              "type": { "enum": ["luks2", "luks1"], "default": "luks2" },
+              "key": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "passphrase": { "const": true },
+                  "keyfile": { "type": "string" }
+                }
+              },
+              "unlock": {
+                "type": "array",
+                "items": { "enum": ["passphrase", "keyfile", "tpm2", "fido2"] }
+              }
+            }
+          }
+        },
+        "lvm": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "devices", "volumes"],
+            "properties": {
+              "name": { "$ref": "#/$defs/handle" },
+              "devices": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/handle" } },
+              "volumes": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["name", "size"],
+                  "properties": {
+                    "name": { "$ref": "#/$defs/handle" },
+                    "size": { "$ref": "#/$defs/sizeOrRest" },
+                    "fs": { "$ref": "#/$defs/fs" },
+                    "label": { "type": "string" },
+                    "mountpoint": { "$ref": "#/$defs/mountpoint" },
+                    "mount_options": { "type": "array", "items": { "type": "string" } },
+                    "subvolumes": { "$ref": "#/$defs/subvolumes" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "raid": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "level", "devices"],
+            "properties": {
+              "name": { "$ref": "#/$defs/handle" },
+              "level": { "enum": [0, 1, 5, 6, 10] },
+              "devices": { "type": "array", "minItems": 2, "items": { "$ref": "#/$defs/handle" } }
+            }
+          }
+        },
+        "swap": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "zram": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": { "size": { "$ref": "#/$defs/sizeOrPercent" } }
+            },
+            "file": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "size"],
+              "properties": {
+                "path": { "$ref": "#/$defs/mountpoint" },
+                "size": { "$ref": "#/$defs/size" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "boot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "loader": { "enum": ["systemd-boot", "grub", "auto"] },
+        "timeout": { "type": "integer", "minimum": 0 },
+        "kernel": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "variant": { "enum": ["default", "lts", "hardened", "realtime", "zen"] },
+            "params": { "type": "array", "items": { "type": "string" } },
+            "modules": { "type": "array", "items": { "type": "string" } },
+            "blacklist": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "system": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hostname": { "type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$" },
+        "timezone": { "type": "string" },
+        "locale": { "type": "string" },
+        "extra_locales": { "type": "array", "items": { "type": "string" } },
+        "keymap": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "console": { "type": "string" },
+            "layout": { "type": "string" },
+            "variant": { "type": "string" }
+          }
+        },
+        "init": { "enum": ["systemd", "openrc", "runit", "s6", "auto"] },
+        "security": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "module": { "enum": ["auto", "selinux", "apparmor", "none"] } }
+        }
+      }
+    },
+    "users": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z_][a-z0-9_-]*$" },
+          "uid": { "type": "integer", "minimum": 0 },
+          "comment": { "type": "string" },
+          "admin": { "type": "boolean" },
+          "shell": { "type": "string" },
+          "groups": { "type": "array", "items": { "type": "string" } },
+          "password": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "hash": { "type": "string", "pattern": "^\\$(6|y|2b|7)\\$" },
+              "locked": { "type": "boolean" }
+            }
+          },
+          "ssh_authorized_keys": { "type": "array", "items": { "type": "string" } },
+          "dotfiles": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["repo"],
+            "properties": {
+              "repo": { "type": "string", "format": "uri" },
+              "method": { "enum": ["raw", "stow", "chezmoi"] }
+            }
+          }
+        }
+      }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "manager": { "enum": ["auto", "networkmanager", "systemd-networkd", "iwd"] },
+        "interfaces": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["match"],
+            "properties": {
+              "match": {
+                "type": "object",
+                "additionalProperties": false,
+                "minProperties": 1,
+                "properties": {
+                  "name": { "type": "string" },
+                  "mac": { "type": "string" }
+                }
+              },
+              "dhcp4": { "type": "boolean" },
+              "dhcp6": { "type": "boolean" },
+              "addresses": { "type": "array", "items": { "type": "string" } },
+              "gateway": { "type": "string" },
+              "dns": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "wifi": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["ssid"],
+            "properties": {
+              "ssid": { "type": "string" },
+              "psk_hash": { "type": "string" },
+              "hidden": { "type": "boolean" }
+            }
+          }
+        },
+        "firewall": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "allow_services": { "type": "array", "items": { "type": "string" } },
+            "allow_ports": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^[0-9]+(-[0-9]+)?/(tcp|udp)$" }
+            }
+          }
+        },
+        "ssh": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "password_auth": { "type": "boolean" },
+            "permit_root": { "enum": ["no", "prohibit-password", "yes"] }
+          }
+        }
+      }
+    },
+    "software": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "type": "string",
+          "pattern": "^(minimal|server|desktop:(gnome|kde|hyprland|sway|xfce))$"
+        },
+        "packages": { "type": "array", "items": { "type": "string" } },
+        "services": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enable": { "type": "array", "items": { "type": "string" } },
+            "disable": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "flatpak": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "drivers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "gpu": { "enum": ["auto", "nvidia", "nvidia-open", "amdgpu", "intel", "none"] },
+        "microcode": { "enum": ["auto", "intel", "amd", "none"] }
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "content"],
+        "properties": {
+          "path": { "$ref": "#/$defs/mountpoint" },
+          "mode": { "type": "string", "pattern": "^0[0-7]{3}$" },
+          "owner": { "type": "string" },
+          "content": { "type": "string" },
+          "encoding": { "enum": ["plain", "base64"] }
+        }
+      }
+    },
+    "scripts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pre": { "$ref": "#/$defs/scriptList" },
+        "post": { "$ref": "#/$defs/scriptList" }
+      }
+    }
+  },
+  "patternProperties": {
+    "^x-[a-z0-9-]+$": { "type": "object" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "handle": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$" },
+    "size": { "type": "string", "pattern": "^[0-9]+(MiB|GiB|TiB)$" },
+    "sizeOrPercent": { "type": "string", "pattern": "^([0-9]+(MiB|GiB|TiB)|[0-9]{1,3}%)$" },
+    "sizeOrRest": { "type": "string", "pattern": "^([0-9]+(MiB|GiB|TiB)|[0-9]{1,3}%|rest)$" },
+    "mountpoint": { "type": "string", "pattern": "^/" },
+    "fs": { "enum": ["ext4", "btrfs", "xfs", "f2fs", "vfat", "swap", "none"] },
+    "subvolumes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "mountpoint"],
+        "properties": {
+          "name": { "type": "string" },
+          "mountpoint": { "$ref": "#/$defs/mountpoint" },
+          "mount_options": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "scriptList": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["content"],
+        "properties": {
+          "interpreter": { "type": "string" },
+          "chroot": { "type": "boolean" },
+          "content": { "type": "string" }
+        }
+      }
+    }
+  }
+}

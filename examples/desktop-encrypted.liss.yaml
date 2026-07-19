@@ -1,0 +1,63 @@
+# LISS authoring in YAML — converts 1:1 to canonical JSON.
+liss: "0.1.0"
+meta:
+  name: laptop
+  description: Encrypted GNOME laptop with zram swap.
+
+target:
+  arch: x86_64
+  firmware: uefi
+  disks:
+    - id: main
+      match: { type: nvme, smallest: true }
+
+storage:
+  wipe: true
+  partitions:
+    - { disk: main, role: esp, size: 1GiB }
+    - { disk: main, id: p-luks, role: raw, size: rest, fs: none }
+  encryption:
+    - id: crypt-root
+      over: p-luks
+      type: luks2
+      key: { passphrase: true }
+      unlock: [tpm2, passphrase]
+  lvm:
+    - name: pool
+      devices: [crypt-root]
+      volumes:
+        - { name: root, size: rest, fs: btrfs, mountpoint: /,
+            subvolumes: [ { name: "@", mountpoint: / },
+                          { name: "@home", mountpoint: /home } ] }
+  swap:
+    zram: { size: 50% }
+
+boot:
+  loader: systemd-boot
+  kernel: { variant: default, params: [quiet, splash] }
+
+system:
+  hostname: drift
+  timezone: Europe/Amsterdam
+  locale: en_US.UTF-8
+  keymap: { console: us, layout: us }
+
+users:
+  - name: bresilla
+    admin: true
+    shell: zsh
+    password: { hash: "$y$j9T$examplesalt$examplehash" }
+
+network:
+  manager: networkmanager
+  wifi:
+    - { ssid: home, psk_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
+
+software:
+  role: desktop:gnome
+  packages: [firefox, git]
+  flatpak: [org.signal.Signal]
+
+drivers:
+  gpu: intel
+  microcode: auto
