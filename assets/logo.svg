@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="LIS logo: an oak tree whose roots end in three nodes">
+  <!-- lis (Albanian: oak) — one trunk, many roots -->
+  <g fill="#4f9d69">
+    <circle cx="128" cy="76"  r="50"/>
+    <circle cx="86"  cy="100" r="38"/>
+    <circle cx="170" cy="100" r="38"/>
+    <circle cx="102" cy="60"  r="34"/>
+    <circle cx="154" cy="60"  r="34"/>
+  </g>
+  <!-- highlight leaves -->
+  <g fill="#6cbf84">
+    <circle cx="106" cy="52" r="16"/>
+    <circle cx="150" cy="88" r="14"/>
+    <circle cx="80"  cy="104" r="12"/>
+  </g>
+  <!-- trunk -->
+  <path fill="#7d5a44" d="M116 112
+           L140 112
+           C140 148 146 166 156 190
+           L100 190
+           C110 166 116 148 116 112 Z"/>
+  <!-- roots: one trunk feeding three nodes -->
+  <g stroke="#8b93a7" stroke-width="7" stroke-linecap="round" fill="none">
+    <path d="M128 190 V 220"/>
+    <path d="M112 190 C 104 204 90 211 76 216"/>
+    <path d="M144 190 C 152 204 166 211 180 216"/>
+  </g>
+  <g fill="#8b93a7">
+    <circle cx="128" cy="230" r="8"/>
+    <circle cx="66"  cy="220" r="8"/>
+    <circle cx="190" cy="220" r="8"/>
+  </g>
+</svg>
