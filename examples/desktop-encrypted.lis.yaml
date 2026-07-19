@@ -1,5 +1,5 @@
-# LISS authoring in YAML — converts 1:1 to canonical JSON.
-liss: "0.1.0"
+# LIS authoring in YAML — converts 1:1 to canonical JSON.
+lis: "0.1.0"
 meta:
   name: laptop
   description: Encrypted GNOME laptop with zram swap.

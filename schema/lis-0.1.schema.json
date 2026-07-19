@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://liss.dev/schema/liss-0.1.schema.json",
-  "title": "LISS — Linux Installation Specification Standard v0.1",
+  "$id": "https://onix-os.github.io/lis/schema/lis-0.1.schema.json",
+  "title": "LIS — Linux Installation Specification v0.1",
   "type": "object",
-  "required": ["liss"],
+  "required": ["lis"],
   "properties": {
-    "liss": { "type": "string", "pattern": "^0\\.1\\.[0-9]+$" },
+    "lis": { "type": "string", "pattern": "^0\\.1\\.[0-9]+$" },
     "meta": {
       "type": "object",
       "additionalProperties": false,

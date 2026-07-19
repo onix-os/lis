@@ -1,11 +1,11 @@
 # Prior art
 
 Every major distro family already has a declarative(ish) install format. None of
-them cross distro boundaries. LISS borrows deliberately from each.
+them cross distro boundaries. LIS borrows deliberately from each.
 
 ## Per-distro automation formats
 
-| Format | Distro | Encoding | What LISS takes from it |
+| Format | Distro | Encoding | What LIS takes from it |
 |---|---|---|---|
 | [Kickstart](https://pykickstart.readthedocs.io/) | RHEL/Fedora (Anaconda) | own directive language | `%post` script escape hatch; proof that install automation is 25+ years old |
 | [preseed](https://wiki.debian.org/DebianInstaller/Preseed) | Debian (d-i) | debconf answers | cautionary tale: answering *installer prompts* instead of describing the *system* couples the file to one installer forever |
@@ -22,10 +22,10 @@ them cross distro boundaries. LISS borrows deliberately from each.
 | [cloud-init](https://cloudinit.readthedocs.io/) | first-boot configuration | **the existence proof**: one YAML format consumed by every distro and every cloud. Won by being useful to consume, not by decree. Does not do installation. |
 | [Ignition](https://coreos.github.io/ignition/rationale/) / [Butane](https://coreos.github.io/butane/) | image-based first boot (CoreOS/Flatcar) | strict versioned JSON schema; the human-YAML → canonical-JSON compiler split; `files` as a primitive; declarative-or-fail attitude |
 | [systemd-repart](https://www.freedesktop.org/software/systemd/man/latest/repart.d.html) | declarative partitioning | partition *roles* rather than explicit numbers |
-| [UAPI Group](https://uapi-group.org/specifications/) — Discoverable Partitions Spec | partition semantics | GPT type UUIDs per role; LISS `role` maps onto DPS types |
+| [UAPI Group](https://uapi-group.org/specifications/) — Discoverable Partitions Spec | partition semantics | GPT type UUIDs per role; LIS `role` maps onto DPS types |
 | [OpenSUSE Agama's storage `match`](https://agama-project.github.io/) | device selection | deterministic disk matching by serial/model/size instead of `/dev/sdX` lottery |
 
-## The gap LISS fills
+## The gap LIS fills
 
 - Kickstart/preseed/autoinstall/Agama/archinstall each describe an installation —
   **for exactly one installer**. The knowledge encoded in a Kickstart file is
@@ -36,14 +36,14 @@ them cross distro boundaries. LISS borrows deliberately from each.
 
 Nothing today lets one frontend (wizard, web UI, fleet tool) target many distros,
 or lets one machine description be re-used when switching distros. That interop
-layer — the file *between* the wizard and the installer — is LISS.
+layer — the file *between* the wizard and the installer — is LIS.
 
 ## Lessons applied
 
 1. **Describe the system, not the dialog** (anti-preseed).
 2. **Defaults, not prompts** (autoinstall's rule).
 3. **Versioned schema + local validation** (Ignition, Agama).
-4. **Human format compiles to canonical format** (Butane → Ignition; LISS YAML → JSON).
+4. **Human format compiles to canonical format** (Butane → Ignition; LIS YAML → JSON).
 5. **Deterministic device matching** (Agama `match`, never `/dev/sda` by faith).
 6. **Roles over magic numbers** (systemd-repart, UAPI DPS).
 7. **Win by being useful to consume** (cloud-init): ship working appliers, not RFCs.

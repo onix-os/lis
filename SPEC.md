@@ -1,4 +1,4 @@
-# LISS — Linux Installation Specification Standard
+# LIS — Linux Installation Specification
 
 **Version 0.1.0-draft**
 
@@ -9,9 +9,9 @@ described in RFC 2119.
 
 Two roles are defined:
 
-- **Producer** — software that writes a LISS document (an installer frontend, a
+- **Producer** — software that writes a LIS document (an installer frontend, a
   generator, a text editor).
-- **Applier** — software that consumes a LISS document and produces an installed
+- **Applier** — software that consumes a LIS document and produces an installed
   system on a specific distribution.
 
 ## 2. Document format
@@ -21,16 +21,16 @@ Two roles are defined:
   1:1 onto the canonical JSON (no anchors/aliases semantics, no non-string keys).
   Appliers MAY accept only JSON; converters are trivial and producers SHOULD offer
   JSON output.
-- The recommended file extension is `.liss.json` / `.liss.yaml` / `.liss.toml`.
+- The recommended file extension is `.lis.json` / `.lis.yaml` / `.lis.toml`.
 - A document MUST validate against the published JSON Schema for its version.
 
 ### 2.1 Versioning
 
-The top-level `liss` key is REQUIRED and holds a semantic version of the spec the
+The top-level `lis` key is REQUIRED and holds a semantic version of the spec the
 document targets:
 
 ```json
-{ "liss": "0.1.0" }
+{ "lis": "0.1.0" }
 ```
 
 - Appliers MUST declare the versions they accept and MUST reject documents with a
@@ -56,7 +56,7 @@ report the substitution.
 
 ```json
 {
-  "liss": "0.1.0",
+  "lis": "0.1.0",
   "meta":     { },
   "target":   { },
   "storage":  { },
@@ -72,8 +72,8 @@ report the substitution.
 }
 ```
 
-Only `liss` is required. Every omitted section means "applier default". An empty
-document is a valid (if useless) LISS file; appliers supply their distro's defaults
+Only `lis` is required. Every omitted section means "applier default". An empty
+document is a valid (if useless) LIS file; appliers supply their distro's defaults
 for anything unstated — the Ubuntu-autoinstall model, not the preseed model.
 
 ## 4. `meta` — provenance
@@ -281,7 +281,7 @@ Swap is either a partition/volume with `fs: swap`, or:
 
 ## 11. `software`
 
-The hardest section to standardize; LISS keeps the portable core small and pushes
+The hardest section to standardize; LIS keeps the portable core small and pushes
 the rest to extensions.
 
 ```json
@@ -347,7 +347,7 @@ Extensions MUST NOT change the meaning of core sections — they add, never over
 An applier SHOULD emit a machine-readable report after applying:
 
 ```json
-{ "liss": "0.1.0", "applied": true, "distro": "nixos",
+{ "lis": "0.1.0", "applied": true, "distro": "nixos",
   "substitutions": [ { "path": "/boot/loader", "wanted": "auto", "chose": "systemd-boot" } ],
   "warnings": [], "log": "…" }
 ```
@@ -356,7 +356,7 @@ An applier SHOULD emit a machine-readable report after applying:
 
 A document is invalid if any of these fail:
 
-1. `liss` version present and supported.
+1. `lis` version present and supported.
 2. Validates against the JSON Schema for that version.
 3. All disk/partition/volume references resolve; no dangling `id`s.
 4. At most one `size: "rest"` per disk; sizes fit the matched device when sizes are

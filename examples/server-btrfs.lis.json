@@ -1,5 +1,5 @@
 {
-  "liss": "0.1.0",
+  "lis": "0.1.0",
   "meta": {
     "name": "tron",
     "description": "Headless server: btrfs root with subvolumes, swap partition, one admin user.",
