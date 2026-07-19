@@ -31,16 +31,24 @@ storage:
                           { name: "@home", mountpoint: /home } ] }
   swap:
     zram: { size: 50% }
+  snapshots: { enabled: true, tool: auto, boot_menu: true }
 
 boot:
   loader: systemd-boot
+  os_prober: true
+  secure_boot: auto
   kernel: { variant: default, params: [quiet, splash] }
+  initramfs: { generator: auto, include_modules: [nvme] }
 
 system:
   hostname: drift
   timezone: Europe/Amsterdam
+  hwclock: localtime            # Windows lives on the other disk
+  time: { ntp: true, provider: auto }
   locale: en_US.UTF-8
   keymap: { console: us, layout: us }
+  telemetry: "off"
+
 
 users:
   - name: bresilla
@@ -58,6 +66,18 @@ software:
   packages: [firefox, git]
   flatpak: [org.signal.Signal]
 
+desktop:
+  display_manager: gdm
+  autologin: bresilla
+  audio: pipewire
+  bluetooth: true
+  printing: true
+
 drivers:
   gpu: intel
   microcode: auto
+  firmware: auto
+
+installer:
+  on_finish: reboot
+  interactive: [storage]
