@@ -12,20 +12,20 @@ by an installer frontend (a TUI, a GUI, a web form, a script — anything) and c
 by a distro-specific **applier** that turns it into a real system.
 
 ```
-┌─────────────┐   ┌─────────────┐   ┌──────────────┐
-│  nox TUI    │   │ web wizard  │   │ hand-written │      frontends
-└──────┬──────┘   └──────┬──────┘   └──────┬───────┘      (produce LIS)
-       └───────────────  ▼  ───────────────┘
+┌─────────────┐   ┌─────────────┐   ┌───────────────┐
+│   CLI/TUI   │   │   GUI/WEB   │   │ hand-written  │      frontends
+└──────┬──────┘   └──────┬──────┘   └───────┬───────┘      (produce LIS)
+       └───────────────  ▼  ────────────────┘
                  ╔═══════════════╗
-                 ║  system.lis  ║                        the standard
+                 ║  system.lis   ║                         the standard
                  ╚═══════╤═══════╝
-       ┌───────────────  ▼  ───────────────┐
-┌──────┴──────┐   ┌──────┴──────┐   ┌──────┴───────┐
-│ NixOS       │   │ Arch        │   │ Debian       │      appliers
-│ applier     │   │ applier     │   │ applier      │      (consume LIS)
-│ → disko.nix │   │ → pacstrap  │   │ → debootstrap│
-│ → config.nix│   │ → archinstall│  │ → preseed    │
-└─────────────┘   └─────────────┘   └──────────────┘
+       ┌───────────────  ▼  ────────────────┐
+┌──────┴──────┐   ┌──────┴───────┐   ┌──────┴───────┐
+│ NixOS       │   │ Arch         │   │ Debian       │      appliers
+│ applier     │   │ applier      │   │ applier      │      (consume LIS)
+│ → disko.nix │   │ → pacstrap   │   │ → debootstrap│
+│ → config.nix│   │ → archinstall│   │ → preseed    │
+└─────────────┘   └──────────────┘   └──────────────┘
 ```
 
 ## Why
@@ -89,10 +89,70 @@ standard.
 An applier on NixOS turns this into `disko.nix` + `configuration.nix`; on Arch into a
 partitioning plan + `pacstrap` + config files. Same file, same machine, either distro.
 
+## Delivery — the LIS seed
+
+A document describes an installation; the **seed** is how the file physically
+reaches the machine. Anaconda has `OEMDRV` (plug in a labeled USB stick, the
+installer finds the kickstart), cloud-init has `CIDATA`. LIS has `LISDATA` —
+a volume with that label, holding a handful of well-known files:
+
+```
+LISDATA/
+├── system.lis.json    the intent   — what to install          (level 2)
+├── authorized_keys    the trust    — who may install remotely (level 1)
+├── unattended         the consent  — empty marker: no prompts
+└── secrets/…          material referenced as  { "from": "seed:secrets/…" }
+```
+
+The two levels are the interesting part:
+
+**Level 1 — trust.** A seed with only `authorized_keys` turns any booted
+installer into a machine that *waits*: it brings up the network, starts sshd
+with those keys authorized, announces itself on the LAN via mDNS
+(`_lis-installer._tcp`), and does nothing else. An operator's frontend — a
+TUI on a laptop — discovers the waiting machine, connects, probes its disks
+and hardware, and the human drives the install interactively *over the
+wire*, producing the LIS document live. One generic stick provisions any
+number of machines forever, because the per-machine decisions happen at the
+operator's side, not on the stick. Boot three machines from the same USB
+key, see all three appear in your frontend, install each one differently.
+
+**Level 2 — intent.** A seed carrying `system.lis.json` is a concrete
+install order. Whether it runs hands-free depends on consent — which is
+deliberately a **two-key rule**:
+
+1. the *document* must say `installer.unattended: true`, **and**
+2. the *seed* must carry the empty `unattended` marker file
+   (for network delivery: `lis.unattended=1` on the kernel command line).
+
+Documents get copied, committed, and shared — so a document alone can never
+authorize wiping a machine it was never meant for. The second key lives on
+the physical object someone deliberately prepared and plugged into *this*
+machine. Missing either key, the installer loads the document as prefilled
+answers and stops for a human. (Compare OEMDRV, where a discovered kickstart
+with wipe instructions simply executes.)
+
+Both levels compose: a seed with the document *and* keys applies the
+document while keeping SSH open as the operator's escape hatch to watch or
+abort. Secrets never enter the document — `seed:` references resolve against
+the stick, so `system.lis.json` stays shareable while tokens stay physical.
+
+Beyond the stick, installers also accept `lis.url=` and `lis.device=` kernel
+parameters (PXE fleets), search in a fixed order (`lis.url=` → `lis.device=`
+→ `LISDATA` → `system.lis.json` piggybacked on a `CIDATA` or `OEMDRV`
+volume → await/interactive), and must fail on ambiguity rather than guess.
+After a successful install, the applier records the document on the target
+at `/var/lib/lis/system.lis.json` — the machine's **birth certificate**:
+every LIS-installed system can answer *"how were you built?"*, and
+reinstalling it is: take the file, make a seed.
+
+Full normative text: [`docs/delivery.md`](docs/delivery.md).
+
 ## Repository layout
 
 - [`SPEC.md`](SPEC.md) — the specification (v0.1.0-draft)
 - [`schema/lis-0.1.schema.json`](schema/lis-0.1.schema.json) — JSON Schema (draft 2020-12)
+- [`docs/delivery.md`](docs/delivery.md) — the seed convention (delivery, discovery, consent)
 - [`examples/`](examples/) — complete documents, JSON and YAML
 - [`docs/prior-art.md`](docs/prior-art.md) — what exists, what LIS learned from each
 
@@ -106,25 +166,12 @@ partitioning plan + `pacstrap` + config files. Same file, same machine, either d
 - **applier**: `nox lis-apply --file system.lis.json` consumes a LIS document and
   generates the NixOS config (disko.nix, host.nix, user.nix) from it — no disk is
   touched; applying the generated config stays a separate, confirmed step.
-- **translator**: [`tools/lis2archinstall.py`](tools/lis2archinstall.py) converts
-  a LIS document into archinstall's `user_configuration.json` +
-  `user_credentials.json` (plain-partition subset; warns on anything it must drop,
-  `--strict` makes dropped intent fatal).
-- **translator (ubuntu)**: [`tools/lis2autoinstall.py`](tools/lis2autoinstall.py)
-  converts a LIS document into an Ubuntu autoinstall **cloud-init NoCloud seed**
-  (`user-data` + `meta-data`, ready for a `CIDATA` volume) — including full
-  curtin storage config with LVM, hashed passwords in `identity`, and
-  `scripts.firstboot` mapped onto cloud-init `runcmd`.
+- **translators**: [`tools/`](tools/) holds converters to archinstall and
+  Ubuntu autoinstall configurations.
 - **rust crate**: [`bindings/rust`](bindings/rust) is the reference
   implementation — a typed model of every spec section with JSON emit/parse and
   the SPEC §19 validation. Depend on it with
   `lis = { git = "https://github.com/onix-os/lis" }`; nox uses it directly.
-- **delivery**: [`docs/delivery.md`](docs/delivery.md) — the **LIS seed**: a
-  `LISDATA`-labeled volume that carries either trust (`authorized_keys` → the
-  installer awaits a remote frontend) or intent (`system.lis.json` → prefilled
-  or fully unattended), with a two-key consent rule for destructive runs,
-  `seed:` secret references, `lis.url=`/`lis.device=` kernel params, and
-  piggybacking on `CIDATA`/`OEMDRV` volumes.
 - **validator**: [`tools/lis-validate`](tools/lis-validate) checks documents
   against the JSON Schema *and* the SPEC §19 semantic rules (reference
   resolution, exactly-one-root, firmware/loader coherence, no plaintext
