@@ -19,6 +19,7 @@
 //! ```
 
 mod document;
+pub mod nixos;
 mod size;
 mod validate;
 
