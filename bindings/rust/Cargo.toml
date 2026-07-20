@@ -1,11 +1,18 @@
 [package]
-name = "lis"
+name = "lis-spec"
 version = "0.1.0"
 edition = "2021"
-description = "Reference implementation of LIS — the Linux Installation Specification: typed document model, JSON emit/parse, and semantic validation"
+description = "Reference implementation of LIS — the Linux Installation Specification: typed document model, JSON emit/parse, semantic validation, and the default NixOS translator"
 repository = "https://github.com/onix-os/lis"
+license = "MIT"
 keywords = ["linux", "installer", "specification", "declarative"]
 categories = ["config", "os"]
+
+# The crate imports as `lis` even though the package is `lis-spec`
+# (the bare name is taken on crates.io).
+[lib]
+name = "lis"
+path = "src/lib.rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
