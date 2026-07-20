@@ -168,14 +168,14 @@ Full normative text: [`docs/delivery.md`](docs/delivery.md).
   touched; applying the generated config stays a separate, confirmed step.
 - **translators**: [`tools/`](tools/) holds converters to archinstall and
   Ubuntu autoinstall configurations.
+- **translator (nixos)**: [`tools/lis2nixos.py`](tools/lis2nixos.py) turns a
+  document into the classic trio — `disko.nix`, `hardware.nix`,
+  `configuration.nix` — using plain NixOS options only. Opinionated flakes
+  bring their own translators; the default acts as default.
 - **rust crate**: [`bindings/rust`](bindings/rust) is the reference
   implementation — a typed model of every spec section with JSON emit/parse and
   the SPEC §19 validation. Depend on it with
-  `lis = { git = "https://github.com/onix-os/lis" }`; nox uses it directly.
-- **default nixos translator**: `lis2nixos` (in the crate) turns a document
-  into the classic trio — `disko.nix`, `hardware.nix`, `configuration.nix` —
-  using plain NixOS options only. Opinionated flakes bring their own
-  translators; the default acts as default.
+  `lis-spec = { git = "https://github.com/onix-os/lis" }`; nox uses it directly.
 - **validator**: [`tools/lis-validate`](tools/lis-validate) checks documents
   against the JSON Schema *and* the SPEC §19 semantic rules (reference
   resolution, exactly-one-root, firmware/loader coherence, no plaintext

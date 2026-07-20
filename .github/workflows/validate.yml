@@ -29,6 +29,12 @@ jobs:
           python -m json.tool /tmp/arch/user_configuration.json > /dev/null
           python -m json.tool /tmp/arch/user_credentials.json > /dev/null
           echo "translator output parses"
+      - name: nixos translator smoke test
+        run: |
+          python tools/lis2nixos.py examples/server-lvm-pool.lis.json --out /tmp/nixos
+          test -s /tmp/nixos/disko.nix && test -s /tmp/nixos/hardware.nix && test -s /tmp/nixos/configuration.nix
+          grep -q lvm_pv /tmp/nixos/disko.nix
+          echo "lis2nixos output ok"
       - name: autoinstall translator smoke test
         run: |
           python tools/lis2autoinstall.py examples/server-lvm-pool.lis.json --out /tmp/ubu
@@ -42,10 +48,3 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: reference crate tests
         run: cargo test --manifest-path bindings/rust/Cargo.toml
-      - name: default nixos translator smoke test
-        run: |
-          cargo run --manifest-path bindings/rust/Cargo.toml --bin lis2nixos -- \
-            examples/server-lvm-pool.lis.json --out /tmp/nixos
-          test -s /tmp/nixos/disko.nix && test -s /tmp/nixos/hardware.nix && test -s /tmp/nixos/configuration.nix
-          grep -q lvm_pv /tmp/nixos/disko.nix
-          echo "lis2nixos output ok"

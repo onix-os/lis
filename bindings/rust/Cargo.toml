@@ -2,7 +2,7 @@
 name = "lis-spec"
 version = "0.1.0"
 edition = "2021"
-description = "Reference implementation of LIS — the Linux Installation Specification: typed document model, JSON emit/parse, semantic validation, and the default NixOS translator"
+description = "Reference implementation of LIS — the Linux Installation Specification: typed document model, JSON emit/parse, and semantic validation"
 repository = "https://github.com/onix-os/lis"
 license = "MIT"
 keywords = ["linux", "installer", "specification", "declarative"]
