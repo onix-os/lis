@@ -100,6 +100,15 @@ def translate(doc: dict) -> tuple[dict, dict]:
     desktop = doc.get("desktop", {}) or {}
     network = doc.get("network", {}) or {}
 
+    # Process packages + apps
+    pkgs = list(software.get("packages", []))
+    for app in software.get("apps", []):
+        if isinstance(app, str):
+            pkgs.append(app)
+        elif isinstance(app, dict):
+            if name := (app.get("package") or app.get("name")):
+                pkgs.append(name)
+
     config: dict = {
         "archinstall-language": "English",
         "hostname": system.get("hostname", "archlinux"),
@@ -114,7 +123,7 @@ def translate(doc: dict) -> tuple[dict, dict]:
             boot.get("loader", "auto"), "Systemd-boot"),
         "kernels": [KERNEL_MAP.get((boot.get("kernel", {}) or {}).get("variant", "default"),
                                    "linux")],
-        "packages": software.get("packages", []),
+        "packages": pkgs,
         "services": (software.get("services", {}) or {}).get("enable", []),
         "swap": True,
         "silent": False,
@@ -140,15 +149,23 @@ def translate(doc: dict) -> tuple[dict, dict]:
     for section in ("registration", "proxy", "mirror"):
         if doc.get(section):
             warn(f"section '{section}' not translated")
+    if doc.get("keys"):
+        warn("hardware key matrix (keys[]) not translated into archinstall JSON; enrollment requires systemd-cryptenroll in custom-commands")
     for key in doc:
         if key.startswith("x-") and key != "x-arch":
             pass  # foreign extensions are ignored by design
 
-    # Users: archinstall credentials take plaintext passwords; LIS only has
-    # hashes, so accounts are created passwordless and the hash is applied by
-    # a post-install command (usermod -p).
+    # Users & script execution in custom-commands
     creds_users = []
     commands = []
+
+    # 1. Pre-install script hooks
+    scripts = doc.get("scripts", {}) or {}
+    for stage in ("pre_install", "pre", "post_storage"):
+        for item in scripts.get(stage, []):
+            if content := item.get("content"):
+                commands.append(content)
+
     for user in doc.get("users", []):
         if user["name"] == "root":
             continue
@@ -159,6 +176,19 @@ def translate(doc: dict) -> tuple[dict, dict]:
         })
         if h := (user.get("password") or {}).get("hash"):
             commands.append(f"usermod -p '{h}' {user['name']}")
+        
+        # User post_install scripts
+        if user_scripts := user.get("scripts", {}):
+            for script_item in user_scripts.get("post_install", []):
+                if content := script_item.get("content"):
+                    commands.append(f"su - {user['name']} -c {json.dumps(content)}")
+
+    # 2. Post-install & firstboot script hooks
+    for stage in ("post_install", "post", "pre_reboot", "on_success", "firstboot"):
+        for item in scripts.get(stage, []):
+            if content := item.get("content"):
+                commands.append(content)
+
     if commands:
         config["custom-commands"] = commands
     x_arch = doc.get("x-arch", {}) or {}

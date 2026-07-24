@@ -194,8 +194,20 @@ def translate(doc: dict) -> dict:
 
     if sc := storage_config(doc):
         auto["storage"] = {"config": sc}
-
+    
+    # Packages + software.apps
     packages = list(software.get("packages", []))
+    for app in software.get("apps", []):
+        if isinstance(app, str):
+            packages.append(app)
+        elif isinstance(app, dict):
+            if name := (app.get("package") or app.get("name")):
+                packages.append(name)
+            if fp := app.get("flatpak"):
+                if "flatpak" not in software:
+                    software["flatpak"] = []
+                software["flatpak"].append(fp)
+
     role = software.get("role", "")
     role_packages = {"desktop:gnome": "ubuntu-desktop", "desktop:kde": "kubuntu-desktop",
                      "desktop:xfce": "xubuntu-desktop"}
@@ -235,11 +247,25 @@ def translate(doc: dict) -> dict:
     if mirror_url := (doc.get("mirror", {}) or {}).get("url"):
         auto["apt"] = {"primary": [{"arches": ["default"], "uri": mirror_url}]}
 
-    if pre := scripts.get("pre"):
-        auto["early-commands"] = [s["content"] for s in pre]
-    late = [f"curtin in-target -- sh -c {json.dumps(s['content'])}"
-            if s.get("chroot") else s["content"]
-            for s in scripts.get("post", [])]
+    # 1. Early / Pre-install commands
+    early = []
+    for stage in ("pre_install", "pre", "post_storage"):
+        for s in scripts.get(stage, []):
+            if c := s.get("content"):
+                early.append(c)
+    if early:
+        auto["early-commands"] = early
+
+    # 2. Late / Post-install commands
+    late = []
+    for stage in ("post_install", "post", "pre_reboot", "on_success"):
+        for s in scripts.get(stage, []):
+            if c := s.get("content"):
+                if s.get("chroot"):
+                    late.append(f"curtin in-target -- sh -c {json.dumps(c)}")
+                else:
+                    late.append(c)
+
     # Extra users beyond the primary: created in-target.
     for user in users[1:]:
         hash_ = (user.get("password") or {}).get("hash", "!")
@@ -249,6 +275,14 @@ def translate(doc: dict) -> dict:
                + (" -s /usr/bin/" + user["shell"] if user.get("shell") else "")
                + f" {user['name']}")
         late.append(cmd)
+
+    # User post_install scripts
+    for user in users:
+        if user_scripts := user.get("scripts", {}):
+            for s in user_scripts.get("post_install", []):
+                if c := s.get("content"):
+                    late.append(f"curtin in-target -- su - {user['name']} -c {json.dumps(c)}")
+
     if late:
         auto["late-commands"] = late
 
@@ -260,13 +294,23 @@ def translate(doc: dict) -> dict:
 
     # First-boot work rides on cloud-init proper, next to autoinstall.
     cloud_config: dict = {"autoinstall": auto}
-    runcmd = [s["content"] for s in scripts.get("firstboot", [])]
+    runcmd = [s["content"] for stage in ("firstboot",) for s in scripts.get(stage, []) if s.get("content")]
+    
+    # User firstboot scripts
+    for user in users:
+        if user_scripts := user.get("scripts", {}):
+            for s in user_scripts.get("firstboot", []):
+                if c := s.get("content"):
+                    runcmd.append(f"su - {user['name']} -c {json.dumps(c)}")
+
     for app in software.get("flatpak", []):
         runcmd.append(f"flatpak install -y flathub {app}")
     if runcmd:
         # user-data for the *installed* system.
         auto["user-data"] = {"runcmd": runcmd}
 
+    if doc.get("keys"):
+        warn("hardware key matrix (keys[]) not translated into autoinstall; requires subiquity cryptenroll hooks")
     for section in ("registration",):
         if doc.get(section):
             warn(f"section '{section}' not translated (use ubuntu-pro token via user-data)")

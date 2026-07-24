@@ -373,9 +373,19 @@ def render_configuration(doc: dict) -> str:
         out += role_map[role]
     elif role not in ("", "minimal", "server"):
         warn(f"role {role!r} has no default-translator mapping")
-    if software.get("packages"):
+    
+    # Process software.packages + software.apps
+    pkgs_list = list(software.get("packages", []))
+    for app in software.get("apps", []):
+        if isinstance(app, str):
+            pkgs_list.append(app)
+        elif isinstance(app, dict):
+            if name := (app.get("package") or app.get("name")):
+                pkgs_list.append(name)
+
+    if pkgs_list:
         out += ["  # Package names pass through verbatim; unresolvable names fail the build.",
-                f"  environment.systemPackages = with pkgs; [ {' '.join(software['packages'])} ];"]
+                f"  environment.systemPackages = with pkgs; [ {' '.join(pkgs_list)} ];"]
     if software.get("exclude"):
         warn("software.exclude has no NixOS equivalent (roles are additive)")
     services = software.get("services", {}) or {}
@@ -421,8 +431,20 @@ def render_configuration(doc: dict) -> str:
                 out.append(f"  environment.etc.{nix_str(rest)}.mode = {nix_str(entry['mode'])};")
         else:
             warn(f"files[{entry['path']}] outside /etc is not expressible in configuration.nix")
-    if doc.get("scripts"):
-        warn("scripts are an installer concern; the default translator emits none")
+
+    # Script hooks & per-user scripts
+    scripts = doc.get("scripts", {}) or {}
+    has_scripts = any(scripts.get(stage) for stage in (
+        "pre_install", "pre", "post_storage", "post_install", "post",
+        "pre_reboot", "on_success", "on_error", "firstboot"
+    ))
+    user_scripts = any((u.get("scripts") or {}) for u in doc.get("users", []))
+    if has_scripts or user_scripts:
+        warn("script hooks are an installer/firstboot execution concern; the default NixOS translator emits configuration only")
+
+    # Keys matrix
+    if doc.get("keys"):
+        warn("hardware key matrix (keys[]) enrollment is handled by installer cryptenroll; emitted configuration assumes enrolled LUKS/PAM")
     if doc.get("registration"):
         warn("registration does not apply to NixOS (no-silent-drift: refused)")
     if (storage.get("snapshots", {}) or {}).get("enabled"):
