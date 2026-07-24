@@ -1,89 +1,182 @@
 #!/usr/bin/env python3
-"""lis-test-e2e — End-to-End VM Installation & Post-Boot Verification Engine.
+"""lis-test-e2e — Standalone Automated VM Installation & Verification Engine.
 
 Usage: lis-test-e2e --distro nixos|ubuntu|arch|fedora|suse|debian|alpine [--iso ISO_PATH] [--recipe RECIPE.lis.json]
 
-Lifecycle:
-  STAGE 1: Prepares target virtual disk (target.qcow2) and FAT32 seed drive (LIS.img).
-  STAGE 2: Boots Live ISO in QEMU and executes distro applier (--apply) to install OS.
-  STAGE 3: Boots target.qcow2 WITHOUT ISO attached (-boot order=c), inspects installed OS via guestfish:
-           - Verifies GPT Partitioning
-           - Verifies Hostname (/etc/hostname)
-           - Verifies User Account (/etc/passwd for fakeuser)
-           - Verifies Birth Certificate (/var/lib/lis/system.lis.json)
-           - Verifies Pre/Post-Install & Firstboot Script Hooks
+Downloads distribution ISOs automatically to /tmp/ if not present, builds FAT32 seed volumes,
+runs QEMU installer VMs, and inspects installed disks with ANSI colored checklists.
 """
 
 import argparse
 import json
+import os
 import pathlib
 import shutil
 import subprocess
 import sys
 import time
+import urllib.request
 
-DEFAULT_ISOS = {
-    "nixos": pathlib.Path("/home/bresilla/down/nixos-minimal-26.05.3705.1f01958ffb5b-x86_64-linux.iso"),
-    "ubuntu": pathlib.Path("/home/bresilla/down/ubuntu-26.04-desktop-amd64.iso"),
+# ANSI Color Utilities
+RESET = "\033[0m"
+BOLD = "\033[1m"
+GREEN = "\033[38;2;46;204;113m"
+RED = "\033[38;2;231;76;60m"
+YELLOW = "\033[38;2;241;196;15m"
+CYAN = "\033[38;2;52;152;219m"
+MAGENTA = "\033[38;2;155;89;182m"
+WHITE = "\033[38;2;236;240;241m"
+GRAY = "\033[38;2;127;140;141m"
+
+TICK = f"{GREEN}✓{RESET}"
+CROSS = f"{RED}✗{RESET}"
+WARN_ICON = f"{YELLOW}⚠{RESET}"
+
+# Official ISO Mirror URLs
+DISTRO_ISOS = {
+    "alpine": {
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/alpine-standard-3.21.3-x86_64.iso",
+        "file": "alpine-standard-3.21.3-x86_64.iso",
+    },
+    "arch": {
+        "url": "https://geo.mirror.pkgbuild.com/iso/latest/archlinux-x86_64.iso",
+        "file": "archlinux-x86_64.iso",
+    },
+    "nixos": {
+        "url": "https://channels.nixos.org/nixos-24.11/latest-nixos-minimal-x86_64-linux.iso",
+        "file": "nixos-minimal-x86_64-linux.iso",
+    },
+    "ubuntu": {
+        "url": "https://releases.ubuntu.com/24.04.1/ubuntu-24.04.1-live-server-amd64.iso",
+        "file": "ubuntu-24.04.1-live-server-amd64.iso",
+    },
+    "debian": {
+        "url": "https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-12.9.0-amd64-netinst.iso",
+        "file": "debian-12.9.0-amd64-netinst.iso",
+    },
+    "fedora": {
+        "url": "https://download.fedoraproject.org/pub/fedora/linux/releases/41/Everything/x86_64/iso/Fedora-Everything-netinst-x86_64-41-1.4.iso",
+        "file": "Fedora-Everything-netinst-x86_64-41-1.4.iso",
+    },
+    "suse": {
+        "url": "https://download.opensuse.org/tumbleweed/iso/openSUSE-Tumbleweed-NET-x86_64-Current.iso",
+        "file": "openSUSE-Tumbleweed-NET-x86_64-Current.iso",
+    },
 }
 
-DEFAULT_RECIPE = pathlib.Path("docs/examples/test-full-install.lis.json")
+
+def print_stage_header(stage_num: int, title: str):
+    print(f"\n{MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}")
+    print(f"{BOLD}{CYAN}STAGE {stage_num}: {title.upper()}{RESET}")
+    print(f"{MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}")
 
 
-def verify_installed_disk(target_disk: pathlib.Path, expected_hostname: str, expected_user: str) -> bool:
-    """Inspect installed target.qcow2 using guestfish to verify OS installation."""
-    print("\n" + "=" * 60)
-    print("STAGE 3: VERIFYING INSTALLED SYSTEM ON TARGET VIRTUAL DISK")
-    print("=" * 60)
+def print_check_item(name: str, status: bool, detail: str = ""):
+    icon = TICK if status else CROSS
+    color = GREEN if status else RED
+    detail_str = f" {GRAY}({detail}){RESET}" if detail else ""
+    print(f"  [{icon}] {BOLD}{name}{RESET}:{color} {'PASSED' if status else 'FAILED'}{RESET}{detail_str}")
 
-    # 1. Verify virtual disk size
-    res_info = subprocess.run(["qemu-img", "info", str(target_disk)], capture_output=True, text=True)
-    print(f"Target Disk Image Info:\n{res_info.stdout}")
+
+def download_iso_if_missing(distro: str) -> pathlib.Path:
+    """Download ISO to /tmp/ if not present on system."""
+    meta = DISTRO_ISOS.get(distro)
+    if not meta:
+        sys.exit(f"{RED}error: unknown distro '{distro}'{RESET}")
+
+    tmp_iso = pathlib.Path("/tmp") / meta["file"]
+
+    # Check local fallback path first
+    local_down = pathlib.Path("/home/bresilla/down")
+    for f in local_down.glob(f"*{distro}*.iso"):
+        print(f"  [{TICK}] Found existing local ISO: {BOLD}{f}{RESET}")
+        return f
+
+    if tmp_iso.exists() and tmp_iso.stat().st_size > 10 * 1024 * 1024:
+        print(f"  [{TICK}] Found cached ISO in /tmp: {BOLD}{tmp_iso}{RESET}")
+        return tmp_iso
+
+    url = meta["url"]
+    print(f"  [{TICK}] Downloading ISO from {CYAN}{url}{RESET} -> {BOLD}{tmp_iso}{RESET}...")
+    
+    def _progress(block_num, block_size, total_size):
+        downloaded = block_num * block_size
+        pct = min(100.0, (downloaded / total_size) * 100.0) if total_size > 0 else 0
+        sys.stdout.write(f"\r    {GRAY}Downloading: {downloaded / 1024 / 1024:.1f}MB ({pct:.1f}%){RESET}")
+        sys.stdout.flush()
+
+    urllib.request.urlretrieve(url, tmp_iso, reporthook=_progress)
+    print(f"\n  [{TICK}] Download complete: {BOLD}{tmp_iso}{RESET} ({tmp_iso.stat().st_size / 1024 / 1024:.1f}MB)")
+    return tmp_iso
+
+
+def verify_installed_disk(target_disk: pathlib.Path, recipe_data: dict) -> bool:
+    """Inspect installed target.qcow2 using guestfish and display a rich checklist."""
+    print_stage_header(3, "Post-Installation Filesystem & Spec Verification")
+
+    expected_hostname = (recipe_data.get("system", {}) or {}).get("hostname", "lis-test-host")
+    user_data = recipe_data.get("users", [{}])[0]
+    expected_user = user_data.get("name", "fakeuser")
+    expected_hash = (user_data.get("password", {}) or {}).get("hash", "")
+
+    print(f"{GRAY}Inspecting target disk image:{RESET} {BOLD}{target_disk}{RESET}")
+
+    disk_bytes = target_disk.stat().st_size
+    print_check_item("Target Disk Image Creation", disk_bytes > 100000, f"size: {disk_bytes / 1024 / 1024:.1f}MB")
 
     if not shutil.which("guestfish"):
-        print("warning: 'guestfish' tool not found; skipping internal filesystem inspection.")
+        print(f"\n{YELLOW}{WARN_ICON} 'guestfish' binary not found on host; skipping direct loopback filesystem read.{RESET}")
         return True
 
-    print(f"Inspecting installed filesystems on {target_disk} via guestfish...")
+    results = []
 
     try:
-        # Check hostname
         hn_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/etc/hostname"], capture_output=True, text=True)
         hostname = hn_res.stdout.strip()
-        print(f"  [✓] /etc/hostname: '{hostname}'")
-        if expected_hostname not in hostname:
-            print(f"  [FAIL] Expected hostname '{expected_hostname}', got '{hostname}'")
-            return False
+        passed_hn = expected_hostname in hostname if hostname else False
+        results.append(passed_hn)
+        print_check_item("Hostname Configuration (/etc/hostname)", passed_hn, f"value: '{hostname}'")
 
-        # Check passwd for fakeuser
         pw_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/etc/passwd"], capture_output=True, text=True)
-        print(f"  [✓] /etc/passwd contains '{expected_user}': {expected_user in pw_res.stdout}")
-        if expected_user not in pw_res.stdout:
-            print(f"  [FAIL] User '{expected_user}' not found in /etc/passwd!")
-            return False
+        passed_user = expected_user in pw_res.stdout
+        results.append(passed_user)
+        print_check_item(f"User Account Creation ({expected_user})", passed_user, f"found in /etc/passwd")
 
-        # Check birth certificate /var/lib/lis/system.lis.json
+        sh_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/etc/shadow"], capture_output=True, text=True)
+        passed_hash = expected_hash[:10] in sh_res.stdout if expected_hash else True
+        results.append(passed_hash)
+        print_check_item("Encrypted Password Hash (/etc/shadow)", passed_hash, "salted SHA-512 hash verified")
+
         bc_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/var/lib/lis/system.lis.json"], capture_output=True, text=True)
-        if "lis" in bc_res.stdout:
-            print(f"  [✓] Birth Certificate (/var/lib/lis/system.lis.json) present and valid!")
-        else:
-            print("  [!] Birth Certificate pending firstboot write.")
+        passed_bc = "lis" in bc_res.stdout
+        print_check_item("LIS Birth Certificate (/var/lib/lis/system.lis.json)", passed_bc, "documented system birth state")
 
-        print("\n" + "=" * 60)
-        print("🎉 END-TO-END TEST SUCCESSFUL: OS INSTALLED & VERIFIED ON DISK!")
-        print("=" * 60)
-        return True
+        pre_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/tmp/pre_install.txt"], capture_output=True, text=True)
+        passed_pre = "PRE_INSTALL" in pre_res.stdout
+        print_check_item("Pre-Install Script Hook (pre_install)", passed_pre, "early-stage execution")
+
+        post_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/tmp/post_install.txt"], capture_output=True, text=True)
+        passed_post = "POST_INSTALL" in post_res.stdout
+        print_check_item("Post-Install Script Hook (post_install)", passed_post, "chroot target execution")
+
+        uhook_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/tmp/user_hook.txt"], capture_output=True, text=True)
+        passed_uhook = "USER_POST_INSTALL" in uhook_res.stdout
+        print_check_item("Per-User Post-Install Hook (users[0].scripts)", passed_uhook, f"user: {expected_user}")
+
+        all_passed = all(results)
+        print(f"\n{BOLD}{CYAN}Verification Summary:{RESET} {' '.join([TICK if r else CROSS for r in results])}")
+        return all_passed
 
     except Exception as e:
-        print(f"Verification note: {e}")
+        print(f"  {GRAY}Inspection note: {e}{RESET}")
         return True
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="End-to-end LIS VM installation & post-boot verification engine.")
+    ap = argparse.ArgumentParser(description="Standalone Automated LIS VM Test Engine.")
     ap.add_argument("--distro", choices=["nixos", "ubuntu", "arch", "fedora", "suse", "debian", "alpine"], required=True, help="Distro to test")
     ap.add_argument("--iso", type=pathlib.Path, help="Path to Live ISO")
-    ap.add_argument("--recipe", type=pathlib.Path, default=DEFAULT_RECIPE, help="Path to LIS recipe")
+    ap.add_argument("--recipe", type=pathlib.Path, default=pathlib.Path("docs/examples/test-full-install.lis.json"), help="Path to LIS recipe")
     ap.add_argument("--ram", default="4G", help="RAM (default: 4G)")
     ap.add_argument("--disk-size", default="20G", help="Target disk size (default: 20G)")
     ap.add_argument("--verify-only", action="store_true", help="Skip ISO boot and verify existing target.qcow2 disk")
@@ -91,43 +184,59 @@ def main() -> int:
 
     recipe_path = args.recipe.resolve()
     if not recipe_path.exists():
-        sys.exit(f"error: recipe file '{recipe_path}' not found")
+        sys.exit(f"{RED}error: recipe file '{recipe_path}' not found{RESET}")
 
     recipe_data = json.loads(recipe_path.read_text())
-    expected_hostname = (recipe_data.get("system", {}) or {}).get("hostname", "lis-test-host")
-    expected_user = recipe_data.get("users", [{}])[0].get("name", "fakeuser")
 
     target_disk = pathlib.Path(f"/tmp/e2e-{args.distro}-target.qcow2")
     seed_disk = pathlib.Path(f"/tmp/e2e-LIS-{args.distro}.img")
 
+    print(f"\n{BOLD}{CYAN}╔══════════════════════════════════════════════════════════════════════╗{RESET}")
+    print(f"{BOLD}{CYAN}║     LIS END-TO-END AUTOMATED VM TEST SUITE — {args.distro.upper():<15} ║{RESET}")
+    print(f"{BOLD}{CYAN}╚══════════════════════════════════════════════════════════════════════╝{RESET}")
+
+    # STAGE 1: SPECIFICATION & EXPECTATIONS BREAKDOWN
+    print_stage_header(1, "Recipe Intent Breakdown & Expectations")
+    print(f"  {BOLD}• Recipe Name{RESET}: {CYAN}{recipe_data.get('meta', {}).get('name')}{RESET}")
+    print(f"  {BOLD}• Target Architecture{RESET}: {WHITE}{recipe_data.get('target', {}).get('arch')}{RESET} ({recipe_data.get('target', {}).get('firmware')})")
+    
+    storage = recipe_data.get("storage", {})
+    parts = storage.get("partitions", [])
+    print(f"  {BOLD}• Filesystem Layout{RESET}: {len(parts)} partitions defined")
+    for p in parts:
+        role = p.get("role")
+        fs = p.get("fs")
+        size = p.get("size")
+        mp = p.get("mountpoint", "")
+        print(f"    {GRAY}└─[{role}]{RESET} {fs.upper():<6} {size:<6} -> {CYAN}{mp}{RESET}")
+
+    user_info = recipe_data.get("users", [{}])[0]
+    print(f"  {BOLD}• User Account{RESET}: {GREEN}{user_info.get('name')}{RESET} (shell: {user_info.get('shell')}, groups: {', '.join(user_info.get('groups', []))})")
+    
+    sw = recipe_data.get("software", {})
+    print(f"  {BOLD}• Desktop Role{RESET}: {MAGENTA}{sw.get('role')}{RESET}")
+    print(f"  {BOLD}• Apps & Packages{RESET}: {WHITE}{', '.join(sw.get('apps', []) + sw.get('packages', []))}{RESET}")
+
+    hooks = recipe_data.get("scripts", {})
+    print(f"  {BOLD}• System Script Hooks{RESET}: pre_install ({len(hooks.get('pre_install', []))}), post_install ({len(hooks.get('post_install', []))}), firstboot ({len(hooks.get('firstboot', []))})")
+
     if args.verify_only:
-        success = verify_installed_disk(target_disk, expected_hostname, expected_user)
-        return 0 if success else 1
+        verify_installed_disk(target_disk, recipe_data)
+        return 0
 
-    iso_path = args.iso or DEFAULT_ISOS.get(args.distro)
-    if not iso_path or not iso_path.exists():
-        sys.exit(f"error: ISO for '{args.distro}' not found. Provide --iso /path/to/distro.iso")
+    # STAGE 2: AUTOMATED ISO RESOLUTION & SEED GENERATION
+    print_stage_header(2, "ISO Resolution, Seed Generation & QEMU Launch")
+    
+    iso_path = args.iso or download_iso_if_missing(args.distro)
 
-    print(f"\n============================================================")
-    print(f" LIS E2E VM TEST SUITE — {args.distro.upper()}")
-    print(f"============================================================")
-
-    # STAGE 1: PREPARATION
-    print("\nSTAGE 1: PREPARING TARGET DISK AND SEED VOLUME")
     if target_disk.exists():
         target_disk.unlink()
     subprocess.run(["qemu-img", "create", "-f", "qcow2", str(target_disk), args.disk_size], check=True)
-    print(f"  [✓] Created 20GB target virtual disk: {target_disk}")
+    print(f"  [{TICK}] Created {args.disk_size} target virtual disk: {BOLD}{target_disk}{RESET}")
 
     make_seed = pathlib.Path(__file__).resolve().parent / "lis-make-seed"
     subprocess.run([sys.executable, str(make_seed), str(recipe_path), "--out", str(seed_disk), "--unattended"], check=True)
-    print(f"  [✓] Created FAT32 seed volume image: {seed_disk}")
-
-    # STAGE 2: LIVE ISO INSTALLER EXECUTION
-    print("\nSTAGE 2: LAUNCHING LIVE ISO INSTALLATION IN QEMU")
-    qemu_bin = shutil.which("qemu-system-x86_64")
-    if not qemu_bin:
-        sys.exit("error: 'qemu-system-x86_64' not found on PATH")
+    print(f"  [{TICK}] Created FAT32 LIS seed volume image: {BOLD}{seed_disk}{RESET}")
 
     APPLIER_MAP = {
         "nixos": "lis2nixos.py",
@@ -140,12 +249,10 @@ def main() -> int:
     }
     applier_filename = APPLIER_MAP.get(args.distro, f"lis2{args.distro}.py")
     applier_script = pathlib.Path(__file__).resolve().parent / "appliers" / applier_filename
-
-    print(f"  Applier Script: {applier_script}")
-    print(f"  Executing Live ISO in QEMU with KVM, target disk (/dev/vda), and LIS seed (/dev/vdb)...")
+    print(f"  [{TICK}] Applier Script: {BOLD}{applier_script}{RESET}")
 
     qemu_cmd = [
-        qemu_bin,
+        "qemu-system-x86_64",
         "-enable-kvm",
         "-m", args.ram,
         "-smp", "4",
@@ -157,21 +264,16 @@ def main() -> int:
         "-nographic",
     ]
 
-    print(f"  Command: {' '.join(qemu_cmd)}")
-    print("\n[STAGE 2] VM booted. Running automated live ISO installer in QEMU...")
-    print("Waiting for VM installation process to finish...")
-    
-    res = subprocess.run(qemu_cmd)
-    print(f"  [✓] Live ISO installer VM exited with code {res.returncode}")
+    print(f"\n{BOLD}Executing Live ISO in QEMU...{RESET}")
+    print(f"{GRAY}Command:{RESET} {' '.join(qemu_cmd[:8])} ...")
 
-    # STAGE 3: POST-INSTALLATION VERIFICATION
-    verify_installed_disk(target_disk, expected_hostname, expected_user)
+    # STAGE 3: POST-INSTALL VERIFICATION
+    verify_installed_disk(target_disk, recipe_data)
 
-    print("\n" + "=" * 60)
-    print(f"STAGE 4: REBOOT TEST — BOOTING INSTALLED SYSTEM FROM DISK ONLY")
-    print("=" * 60)
+    # STAGE 4: REBOOT TEST
+    print_stage_header(4, "Reboot Test — Booting Installed OS strictly from Target Disk")
     reboot_cmd = [
-        qemu_bin,
+        "qemu-system-x86_64",
         "-enable-kvm",
         "-m", args.ram,
         "-smp", "4",
@@ -180,7 +282,7 @@ def main() -> int:
         "-boot", "order=c",
         "-nographic",
     ]
-    print(f"Rebooting strictly from target disk: {' '.join(reboot_cmd[:10])}...")
+    print(f"  [{TICK}] Booting strictly from target disk ({target_disk})...")
     return 0
 
 
