@@ -93,10 +93,11 @@ def render_agama(doc: dict) -> dict:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="Translate LIS document to openSUSE Agama profile and optionally apply directly.")
     ap.add_argument("file", type=pathlib.Path)
     ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path("."))
     ap.add_argument("--strict", action="store_true", help="exit non-zero if core intent dropped")
+    ap.add_argument("--apply", "-a", action="store_true", help="directly apply profile.json via Agama CLI on live system")
     args = ap.parse_args()
 
     doc = json.loads(args.file.read_text())
@@ -105,8 +106,23 @@ def main() -> int:
 
     profile = render_agama(doc)
     args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / "profile.json").write_text(json.dumps(profile, indent=2) + "\n")
-    print(f"wrote {args.out}/profile.json ({len(WARNINGS)} warning(s))")
+    profile_file = args.out / "profile.json"
+    profile_file.write_text(json.dumps(profile, indent=2) + "\n")
+    print(f"wrote {profile_file} ({len(WARNINGS)} warning(s))")
+
+    if args.apply:
+        import shutil
+        import subprocess
+        if not shutil.which("agama"):
+            sys.exit("error: --apply requested, but 'agama' binary is not found on PATH (are you running on openSUSE Agama LiveCD?)")
+        print(f"applying profile to Agama installer: {profile_file}")
+        res = subprocess.run(["agama", "config", "apply", str(profile_file)])
+        if res.returncode != 0:
+            return res.returncode
+        print("triggering Agama live installation...")
+        res = subprocess.run(["agama", "install"])
+        return res.returncode
+
     if args.strict and WARNINGS:
         return 1
     return 0

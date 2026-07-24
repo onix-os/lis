@@ -62,10 +62,11 @@ def render_alpine(doc: dict) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="Translate LIS document to Alpine answerfile and optionally apply directly.")
     ap.add_argument("file", type=pathlib.Path)
     ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path("."))
     ap.add_argument("--strict", action="store_true", help="exit non-zero if core intent dropped")
+    ap.add_argument("--apply", "-a", action="store_true", help="directly execute setup-alpine with answers on live system")
     args = ap.parse_args()
 
     doc = json.loads(args.file.read_text())
@@ -74,8 +75,20 @@ def main() -> int:
 
     ans = render_alpine(doc)
     args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / "answers").write_text(ans)
-    print(f"wrote {args.out}/answers ({len(WARNINGS)} warning(s))")
+    ans_file = args.out / "answers"
+    ans_file.write_text(ans)
+    print(f"wrote {ans_file} ({len(WARNINGS)} warning(s))")
+
+    if args.apply:
+        import shutil
+        import subprocess
+        if not shutil.which("setup-alpine"):
+            sys.exit("error: --apply requested, but 'setup-alpine' binary is not found on PATH (are you running on Alpine LiveCD?)")
+        cmd = ["setup-alpine", "-f", str(ans_file)]
+        print(f"executing Alpine installer: {' '.join(cmd)}")
+        res = subprocess.run(cmd)
+        return res.returncode
+
     if args.strict and WARNINGS:
         return 1
     return 0

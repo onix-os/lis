@@ -95,10 +95,11 @@ def render_preseed(doc: dict) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="Translate LIS document to Debian preseed and optionally apply directly.")
     ap.add_argument("file", type=pathlib.Path)
     ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path("."))
     ap.add_argument("--strict", action="store_true", help="exit non-zero if core intent dropped")
+    ap.add_argument("--apply", "-a", action="store_true", help="directly pass preseed.cfg to debconf-set-selections on live system")
     args = ap.parse_args()
 
     doc = json.loads(args.file.read_text())
@@ -107,8 +108,20 @@ def main() -> int:
 
     cfg = render_preseed(doc)
     args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / "preseed.cfg").write_text(cfg)
-    print(f"wrote {args.out}/preseed.cfg ({len(WARNINGS)} warning(s))")
+    cfg_file = args.out / "preseed.cfg"
+    cfg_file.write_text(cfg)
+    print(f"wrote {cfg_file} ({len(WARNINGS)} warning(s))")
+
+    if args.apply:
+        import shutil
+        import subprocess
+        if not shutil.which("debconf-set-selections"):
+            sys.exit("error: --apply requested, but 'debconf-set-selections' binary is not found on PATH (are you running on Debian Installer?)")
+        print(f"applying preseed choices to debconf: {cfg_file}")
+        with open(cfg_file, "r") as f:
+            res = subprocess.run(["debconf-set-selections"], stdin=f)
+            return res.returncode
+
     if args.strict and WARNINGS:
         return 1
     return 0

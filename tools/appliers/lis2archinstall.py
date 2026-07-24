@@ -199,11 +199,13 @@ def translate(doc: dict) -> tuple[dict, dict]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="Translate LIS document to archinstall and optionally apply directly.")
     ap.add_argument("file", type=pathlib.Path)
     ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path("."))
     ap.add_argument("--strict", action="store_true",
                     help="exit non-zero if any core intent was dropped")
+    ap.add_argument("--apply", "-a", action="store_true",
+                    help="directly execute archinstall on the live system with generated config")
     args = ap.parse_args()
 
     doc = json.loads(args.file.read_text())
@@ -211,10 +213,22 @@ def main() -> int:
         sys.exit(f"unsupported LIS version: {doc.get('lis')!r}")
     config, creds = translate(doc)
     args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / "user_configuration.json").write_text(json.dumps(config, indent=2) + "\n")
-    (args.out / "user_credentials.json").write_text(json.dumps(creds, indent=2) + "\n")
-    print(f"wrote {args.out}/user_configuration.json and user_credentials.json "
-          f"({len(WARNINGS)} warning(s))")
+    cfg_file = args.out / "user_configuration.json"
+    creds_file = args.out / "user_credentials.json"
+    cfg_file.write_text(json.dumps(config, indent=2) + "\n")
+    creds_file.write_text(json.dumps(creds, indent=2) + "\n")
+    print(f"wrote {cfg_file} and {creds_file} ({len(WARNINGS)} warning(s))")
+
+    if args.apply:
+        import shutil
+        import subprocess
+        if not shutil.which("archinstall"):
+            sys.exit("error: --apply requested, but 'archinstall' binary is not found on PATH (are you running on Arch LiveCD?)")
+        cmd = ["archinstall", "--config", str(cfg_file), "--creds", str(creds_file), "--silent"]
+        print(f"executing live installer: {' '.join(cmd)}")
+        res = subprocess.run(cmd)
+        return res.returncode
+
     if args.strict and WARNINGS:
         return 1
     return 0

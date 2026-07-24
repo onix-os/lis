@@ -357,11 +357,13 @@ def scalar(v) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="Translate LIS document to Ubuntu autoinstall and optionally apply directly.")
     ap.add_argument("file", type=pathlib.Path)
     ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path("."))
     ap.add_argument("--strict", action="store_true",
                     help="exit non-zero if any core intent was dropped")
+    ap.add_argument("--apply", "-a", action="store_true",
+                    help="directly copy autoinstall seed to live system subiquity path")
     args = ap.parse_args()
 
     doc = json.loads(args.file.read_text())
@@ -370,12 +372,28 @@ def main() -> int:
 
     cloud_config = translate(doc)
     args.out.mkdir(parents=True, exist_ok=True)
+    user_data_file = args.out / "user-data"
+    meta_data_file = args.out / "meta-data"
+    
     user_data = "#cloud-config\n" + to_yaml(cloud_config)
-    (args.out / "user-data").write_text(user_data)
+    user_data_file.write_text(user_data)
     hostname = (doc.get("system", {}) or {}).get("hostname", "ubuntu")
-    (args.out / "meta-data").write_text(f"instance-id: lis-{hostname}\nlocal-hostname: {hostname}\n")
-    print(f"wrote {args.out}/user-data and meta-data ({len(WARNINGS)} warning(s))")
-    print("seed it with: cloud-localds seed.img user-data meta-data   # label CIDATA")
+    meta_data_file.write_text(f"instance-id: lis-{hostname}\nlocal-hostname: {hostname}\n")
+    print(f"wrote {user_data_file} and {meta_data_file} ({len(WARNINGS)} warning(s))")
+
+    if args.apply:
+        import shutil
+        import subprocess
+        print("applying autoinstall configuration to live Subiquity environment...")
+        subiquity_dir = pathlib.Path("/var/log/autoinstall")
+        if subiquity_dir.exists():
+            shutil.copy(user_data_file, subiquity_dir / "user-data")
+            shutil.copy(meta_data_file, subiquity_dir / "meta-data")
+            print("copied seed files to /var/log/autoinstall/")
+        if shutil.which("subiquity"):
+            res = subprocess.run(["subiquity", "--autoinstall"])
+            return res.returncode
+
     if args.strict and WARNINGS:
         return 1
     return 0

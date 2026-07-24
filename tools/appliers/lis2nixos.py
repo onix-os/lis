@@ -465,11 +465,13 @@ def render_configuration(doc: dict) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="Translate LIS document to NixOS config and optionally apply directly.")
     ap.add_argument("file", type=pathlib.Path)
     ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path("."))
     ap.add_argument("--strict", action="store_true",
                     help="exit non-zero if any core intent was dropped")
+    ap.add_argument("--apply", "-a", action="store_true",
+                    help="directly partitioning via disko and run nixos-install on live system")
     args = ap.parse_args()
 
     doc = json.loads(args.file.read_text())
@@ -477,11 +479,32 @@ def main() -> int:
         sys.exit(f"unsupported LIS version: {doc.get('lis')!r}")
 
     args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / "disko.nix").write_text(render_disko(doc))
-    (args.out / "hardware.nix").write_text(render_hardware(doc))
-    (args.out / "configuration.nix").write_text(render_configuration(doc))
-    print(f"wrote {args.out}/disko.nix, hardware.nix, configuration.nix "
-          f"({len(WARNINGS)} warning(s))")
+    disko_file = args.out / "disko.nix"
+    hw_file = args.out / "hardware.nix"
+    config_file = args.out / "configuration.nix"
+
+    disko_file.write_text(render_disko(doc))
+    hw_file.write_text(render_hardware(doc))
+    config_file.write_text(render_configuration(doc))
+    print(f"wrote {disko_file}, {hw_file}, {config_file} ({len(WARNINGS)} warning(s))")
+
+    if args.apply:
+        import shutil
+        import subprocess
+        if not shutil.which("disko"):
+            sys.exit("error: --apply requested, but 'disko' binary is not found on PATH")
+        print(f"partitioning disks via disko: {disko_file}")
+        res = subprocess.run(["disko", "--mode", "disko", str(disko_file)])
+        if res.returncode != 0:
+            return res.returncode
+        
+        if shutil.which("nixos-install"):
+            print("installing NixOS system via nixos-install...")
+            res = subprocess.run(["nixos-install", "--no-root-passwd"])
+            return res.returncode
+        else:
+            print("disko formatting complete; run nixos-install to finish system installation")
+
     if args.strict and WARNINGS:
         return 1
     return 0

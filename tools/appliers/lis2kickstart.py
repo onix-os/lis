@@ -175,10 +175,11 @@ def render_kickstart(doc: dict) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="Translate LIS document to Kickstart and optionally apply directly.")
     ap.add_argument("file", type=pathlib.Path)
     ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path("."))
     ap.add_argument("--strict", action="store_true", help="exit non-zero if core intent dropped")
+    ap.add_argument("--apply", "-a", action="store_true", help="directly execute Anaconda installer with ks.cfg on live system")
     args = ap.parse_args()
 
     doc = json.loads(args.file.read_text())
@@ -187,8 +188,20 @@ def main() -> int:
 
     ks = render_kickstart(doc)
     args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / "ks.cfg").write_text(ks)
-    print(f"wrote {args.out}/ks.cfg ({len(WARNINGS)} warning(s))")
+    ks_file = args.out / "ks.cfg"
+    ks_file.write_text(ks)
+    print(f"wrote {ks_file} ({len(WARNINGS)} warning(s))")
+
+    if args.apply:
+        import shutil
+        import subprocess
+        if not shutil.which("anaconda"):
+            sys.exit("error: --apply requested, but 'anaconda' binary is not found on PATH (are you running on Fedora/RHEL LiveCD?)")
+        cmd = ["anaconda", "--kickstart", str(ks_file), "--cmdline", "--noninteractive"]
+        print(f"executing Anaconda installer: {' '.join(cmd)}")
+        res = subprocess.run(cmd)
+        return res.returncode
+
     if args.strict and WARNINGS:
         return 1
     return 0
