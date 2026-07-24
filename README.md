@@ -89,62 +89,32 @@ standard.
 An applier on NixOS turns this into `disko.nix` + `configuration.nix`; on Arch into a
 partitioning plan + `pacstrap` + config files. Same file, same machine, either distro.
 
-## Delivery — the LIS seed
+## Delivery — the LIS seed & `lis.json` boot manifest
 
-A document describes an installation; the **seed** is how the file physically
-reaches the machine. Anaconda has `OEMDRV` (plug in a labeled USB stick, the
-installer finds the kickstart), cloud-init has `CIDATA`. LIS has `LISDATA` —
-a volume with that label, holding a handful of well-known files:
+A document describes an installation (the recipe); the **seed** is how the installer locates, fetches, and authorizes it. LIS uses a volume labeled `LIS` holding a lightweight boot manifest named `lis.json`:
 
 ```
-LISDATA/
-├── system.lis.json    the intent   — what to install          (level 2)
+LIS/
+├── lis.json           the manifest — HOW to fetch the recipe & keys
 ├── authorized_keys    the trust    — who may install remotely (level 1)
 ├── unattended         the consent  — empty marker: no prompts
-└── secrets/…          material referenced as  { "from": "seed:secrets/…" }
+├── keys/…             local key files (GPG, binary keyfiles)
+└── secrets/…          material referenced as { "from": "seed:secrets/…" }
 ```
 
-The two levels are the interesting part:
+The boot manifest (`lis.json`) specifies flexible recipe resolution via `source`:
+* **Local or Disk**: `"source": { "type": "file", "path": "/recipes/server.lis.json" }` or disk matching.
+* **Network & NAS**: `"source": { "type": "nfs", "server": "nas.local", "export": "/deployments", "path": "node1.lis.json" }` (supports SMB, Git, S3, HTTPS).
+* **Remote Hook (`await`)**: `"source": { "type": "await", "protocol": "ssh" }` — turns the live ISO into an SSH server that waits for an operator's remote wizard to push the recipe.
+* **Fallback Priority Chains**: Specify an array of sources (e.g. NFS $\rightarrow$ local USB backup $\rightarrow$ SSH await $\rightarrow$ interactive TUI).
 
-**Level 1 — trust.** A seed with only `authorized_keys` turns any booted
-installer into a machine that *waits*: it brings up the network, starts sshd
-with those keys authorized, announces itself on the LAN via mDNS
-(`_lis-installer._tcp`), and does nothing else. An operator's frontend — a
-TUI on a laptop — discovers the waiting machine, connects, probes its disks
-and hardware, and the human drives the install interactively *over the
-wire*, producing the LIS document live. One generic stick provisions any
-number of machines forever, because the per-machine decisions happen at the
-operator's side, not on the stick. Boot three machines from the same USB
-key, see all three appear in your frontend, install each one differently.
-
-**Level 2 — intent.** A seed carrying `system.lis.json` is a concrete
-install order. Whether it runs hands-free depends on consent — which is
-deliberately a **two-key rule**:
-
+**The Two-Key Rule for Consent:** Whether an installation runs hands-free depends on consent:
 1. the *document* must say `installer.unattended: true`, **and**
-2. the *seed* must carry the empty `unattended` marker file
-   (for network delivery: `lis.unattended=1` on the kernel command line).
+2. the *seed volume* must carry the empty `unattended` marker file (or `lis.unattended=1` on kernel command line).
 
-Documents get copied, committed, and shared — so a document alone can never
-authorize wiping a machine it was never meant for. The second key lives on
-the physical object someone deliberately prepared and plugged into *this*
-machine. Missing either key, the installer loads the document as prefilled
-answers and stops for a human. (Compare OEMDRV, where a discovered kickstart
-with wipe instructions simply executes.)
+Missing either key, the installer loads the document as prefilled answers and pauses for human confirmation. Secrets stay on physical media (`seed:secrets/...`) or hardware tokens (`keys`), keeping recipes shareable.
 
-Both levels compose: a seed with the document *and* keys applies the
-document while keeping SSH open as the operator's escape hatch to watch or
-abort. Secrets never enter the document — `seed:` references resolve against
-the stick, so `system.lis.json` stays shareable while tokens stay physical.
-
-Beyond the stick, installers also accept `lis.url=` and `lis.device=` kernel
-parameters (PXE fleets), search in a fixed order (`lis.url=` → `lis.device=`
-→ `LISDATA` → `system.lis.json` piggybacked on a `CIDATA` or `OEMDRV`
-volume → await/interactive), and must fail on ambiguity rather than guess.
-After a successful install, the applier records the document on the target
-at `/var/lib/lis/system.lis.json` — the machine's **birth certificate**:
-every LIS-installed system can answer *"how were you built?"*, and
-reinstalling it is: take the file, make a seed.
+Beyond the stick, installers accept `lis.url=` and `lis.device=` kernel parameters, search in a fixed order (`lis.url=` $\rightarrow$ `lis.device=` $\rightarrow$ `LIS` $\rightarrow$ `LISDATA` $\rightarrow$ `CIDATA`/`OEMDRV` piggyback $\rightarrow$ await/interactive), and fail on ambiguity. After install, the applier records the birth certificate at `/var/lib/lis/system.lis.json` — so every LIS-installed system can answer *"how were you built?"*, and reinstalling it is: take the file, make a seed.
 
 Full normative text: [`docs/delivery.md`](docs/delivery.md).
 

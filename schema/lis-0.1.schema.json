@@ -30,6 +30,39 @@
         }
       }
     },
+    "keys": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "match": {
+            "type": "object"
+          },
+          "source": {
+            "$ref": "#/$defs/secretRef"
+          },
+          "pin_required": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
     "target": {
       "type": "object",
       "additionalProperties": false,
@@ -697,6 +730,21 @@
               "default",
               "nopasswd"
             ]
+          },
+          "scripts": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "post": {
+                "$ref": "#/$defs/scriptList"
+              },
+              "post_install": {
+                "$ref": "#/$defs/scriptList"
+              },
+              "firstboot": {
+                "$ref": "#/$defs/scriptList"
+              }
+            }
           }
         }
       }
@@ -1108,6 +1156,39 @@
           "type": "boolean"
         }
       }
+    },
+    "scripts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pre": {
+          "$ref": "#/$defs/scriptList"
+        },
+        "pre_install": {
+          "$ref": "#/$defs/scriptList"
+        },
+        "post_storage": {
+          "$ref": "#/$defs/scriptList"
+        },
+        "post": {
+          "$ref": "#/$defs/scriptList"
+        },
+        "post_install": {
+          "$ref": "#/$defs/scriptList"
+        },
+        "pre_reboot": {
+          "$ref": "#/$defs/scriptList"
+        },
+        "on_success": {
+          "$ref": "#/$defs/scriptList"
+        },
+        "on_error": {
+          "$ref": "#/$defs/scriptList"
+        },
+        "firstboot": {
+          "$ref": "#/$defs/scriptList"
+        }
+      }
     }
   },
   "patternProperties": {
@@ -1179,9 +1260,6 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "content"
-        ],
         "properties": {
           "interpreter": {
             "type": "string"
@@ -1191,6 +1269,15 @@
           },
           "content": {
             "type": "string"
+          },
+          "source": {
+            "$ref": "#/$defs/secretRef"
+          },
+          "on_failure": {
+            "enum": [
+              "fail",
+              "continue"
+            ]
           }
         }
       }
@@ -1204,7 +1291,7 @@
       "properties": {
         "from": {
           "type": "string",
-          "pattern": "^(file|env|seed):.+$"
+          "pattern": "^(file|env|seed|key):.+$"
         }
       }
     }

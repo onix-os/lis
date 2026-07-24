@@ -52,15 +52,16 @@ ZFS support). It MUST NOT substitute silently. A field explicitly marked
 `"preference": true` by the producer is exempt: the applier MAY substitute and MUST
 report the substitution.
 
-### 2.4 Secrets
+### 2.4 Secrets & secret references
 
 Passwords MUST be crypt(3) hashes; WPA keys MUST be PSK hashes; registration
-tokens and other secret material MUST be **references** (`{ "from": "file:…" }`,
-`{ "from": "env:…" }`, or `{ "from": "seed:…" }` — the last resolving against a
-LIS seed volume, see `docs/delivery.md` §4), resolved by the applier at apply
-time. A document MUST
-never contain plaintext secrets — documents are meant to be committed, shared, and
-templated.
+tokens, encryption keys, and other secret material MUST be **references**:
+- `{ "from": "seed:secrets/scc-token" }` — resolves against a `LIS` seed volume (`docs/delivery.md` §6).
+- `{ "from": "key:admin-yubikey" }` — resolves from a key object declared in the `keys` section (§18).
+- `{ "from": "file:/path/on/installer" }` — resolves from a local file path.
+- `{ "from": "env:SECRET_VAR" }` — resolves from environment variables.
+
+A document MUST never contain plaintext secrets — documents are meant to be committed, shared, and templated.
 
 ## 3. Top-level structure
 
@@ -68,6 +69,7 @@ templated.
 {
   "lis": "0.1.0",
   "meta":         { },
+  "keys":         [ ],
   "target":       { },
   "storage":      { },
   "boot":         { },
@@ -205,16 +207,16 @@ Partition, or a Windows partition that must shrink. A partition entry with
 ### 6.3 `encryption[]` — LUKS containers
 
 ```json
-{ "id": "crypt-root", "over": "p-root", "type": "luks2",
-  "key": { "passphrase": true },
-  "unlock": ["tpm2", "passphrase"] }
+{
+  "id": "crypt-root",
+  "over": "p-root",
+  "type": "luks2",
+  "key": { "ref": "root-keyfile" },
+  "unlock": ["admin-yubikey", "tpm2", "passphrase"]
+}
 ```
 
-`over` references a partition or aggregate volume `id`. `key` declares how the
-initial key is provided (`passphrase: true` = ask interactively at install;
-`keyfile: "<path-on-installer>"`), `unlock` the boot-time unlock order
-(`passphrase` | `keyfile` | `tpm2` | `fido2`). Filesystems/aggregates reference the
-container's `id` instead of the raw partition.
+`over` references a partition or aggregate volume `id`. `key` declares how the initial key is provided (referencing a `keys[].id` handle, `{ "passphrase": true }`, or a keyfile), `unlock` defines the boot-time unlock order referencing key objects (`"admin-yubikey"`), hardware engines (`"tpm2"`), or interactive fallbacks (`"passphrase"`). Filesystems/aggregates reference the container's `id` instead of the raw partition.
 
 ### 6.4 `aggregates` — LVM and RAID
 
@@ -333,7 +335,11 @@ boot menu.
     "groups": ["video", "audio"],
     "password": { "hash": "$6$rounds…" },
     "ssh_authorized_keys": [],
-    "dotfiles": { "repo": "https://github.com/bresilla/dot.git" } }
+    "dotfiles": { "repo": "https://github.com/bresilla/dot.git" },
+    "scripts": {
+      "post_install": [ { "interpreter": "/bin/sh", "content": "echo 'user setup in target chroot'" } ],
+      "firstboot":    [ { "interpreter": "/bin/sh", "content": "echo 'user setup on first boot'" } ]
+    } }
 ]
 ```
 
@@ -349,6 +355,9 @@ boot menu.
   Intent names oblige the applier to install the shell.
 - `dotfiles` is intent: clone the repo into the user's home by the applier's
   mechanism. `method` MAY name a convention (`raw` | `stow` | `chezmoi`).
+- `scripts`: per-user hook scripts executed for that user:
+  - `post_install` (or `chroot`): executed inside the target chroot in the context of the created user (or `$HOME`).
+  - `firstboot`: executed on first system boot during user initialization.
 
 ## 10. `network`
 
@@ -451,14 +460,33 @@ Small literal files only (the Ignition primitive). Binary content uses
 `"encoding": "base64"`.
 
 ```json
-{ "scripts": {
-    "pre":  [ { "interpreter": "/bin/sh", "content": "echo before partitioning" } ],
-    "post": [ { "chroot": true, "interpreter": "/bin/sh", "content": "echo inside target" } ],
-    "firstboot": [ { "interpreter": "/bin/sh", "content": "echo once, on first boot" } ] } }
+{
+  "scripts": {
+    "pre_install":   [ { "interpreter": "/bin/sh", "content": "echo 'before disks touched'" } ],
+    "post_storage":  [ { "interpreter": "/bin/sh", "source": { "from": "seed:scripts/inject-firmware.sh" } } ],
+    "post_install":  [ { "chroot": true, "interpreter": "/bin/sh", "content": "echo 'inside target OS'" } ],
+    "pre_reboot":    [ { "interpreter": "/bin/sh", "content": "echo 'cleanup before reboot'" } ],
+    "on_success":    [ { "interpreter": "/bin/sh", "content": "curl -X POST https://cmdb.local/notify" } ],
+    "on_error":      [ { "interpreter": "/bin/sh", "content": "curl -F 'log=@/var/log/lis.log' https://logs.local/upload" } ],
+    "firstboot":     [ { "interpreter": "/bin/sh", "content": "echo 'once on first target boot'" } ]
+  }
+}
 ```
-The escape hatch. Documents SHOULD prefer declarative sections. `pre` runs before
-disks are touched, `post` after all declarative work (in the target chroot when
-`chroot: true`), `firstboot` exactly once on the installed system's first boot.
+The escape hatch. Documents SHOULD prefer declarative sections. The 7 lifecycle hook points:
+1. `pre_install` (or `pre`): runs in the live installer environment before disks/storage are touched.
+2. `post_storage`: runs in the live installer environment right after partitions/LUKS are formatted and mounted at target root (`/target`).
+3. `post_install` (or `post`): runs after OS installation, package extraction, and file generation. Runs inside target chroot when `chroot: true` (default `true`), or in host context when `chroot: false`.
+4. `pre_reboot`: runs in the live installer environment after unmounting, right before rebooting or powering off.
+5. `on_success`: runs in the live installer environment when the installation completes with zero errors.
+6. `on_error`: runs in the live installer environment if any partitioning, package, or hook step fails.
+7. `firstboot`: runs exactly once on the installed target system during its first boot.
+
+### Script entry fields:
+- `interpreter`: executable path (default `/bin/sh`).
+- `content`: inline script string.
+- `source`: reference object (`{ "from": "seed:scripts/my-script.sh" }`, `{ "from": "file:..." }`, `{ "from": "https://..." }`).
+- `chroot`: boolean (default `true` for `post_install`, `false` for host hooks).
+- `on_failure`: `"fail"` (default, abort installation) | `"continue"` (log warning and proceed).
 
 ## 14. `proxy` and `mirror`
 
@@ -516,7 +544,54 @@ How the *run* behaves, not what the system is. (Kickstart `reboot`, autoinstall
   the document provides values; everything else is unattended.
 - `answers`: predefined answers to applier-defined questions, by question id.
 
-## 17. `x-*` extensions
+## 17. `keys` — Hardware & Cryptographic Key Matrix
+
+The top-level `keys` array declares first-class identity and key objects. A single key object can operate across both Phase 1 (installer detection/decryption) and Phase 2 (target system configuration):
+
+```json
+{
+  "keys": [
+    {
+      "id": "admin-yubikey",
+      "type": "yubikey_fido2",
+      "match": { "serial": "12345678" },
+      "purpose": [
+        "payload_decryption",
+        "disk_encryption",
+        "user_ssh_key",
+        "user_pam_auth"
+      ],
+      "pin_required": true
+    },
+    {
+      "id": "luks-keyfile",
+      "type": "keyfile",
+      "purpose": ["disk_encryption"],
+      "source": { "from": "seed:keys/luks-root.key" }
+    }
+  ]
+}
+```
+
+### 17.1 Fields
+
+| field | type | meaning |
+|---|---|---|
+| `id` | string | REQUIRED — document-unique handle for cross-referencing |
+| `type` | string | `yubikey_fido2` \| `yubikey_challenge` \| `tpm2` \| `gpg` \| `age` \| `keyfile` \| `passphrase` \| `ssh` |
+| `purpose` | string[] | Array of roles: `payload_decryption` \| `disk_encryption` \| `secret_decryption` \| `user_ssh_key` \| `user_pam_auth` \| `remote_auth` |
+| `match` | object | Hardware matching rules: `{ "serial": "...", "vendor": "..." }` |
+| `source` | object | Secret reference source: `{ "from": "seed:keys/..." }` |
+| `pin_required` | boolean | Indicates PIN prompt required for hardware token operations |
+
+### 17.2 Cross-referencing
+
+Other sections in the document reference keys by their `id`:
+- `storage.encryption[].unlock`: `["admin-yubikey", "tpm2"]`
+- `users[].ssh_keys`: `[{ "from": "key:admin-yubikey" }]`
+- `files[].content`: `{ "from": "seed:secrets/wg0.conf.age", "decrypt_with": "admin-yubikey" }`
+
+## 18. `x-*` extensions
 
 Any top-level key starting with `x-` is an extension namespace owned by the named
 project, passed verbatim to appliers that recognize it and ignored by all others:
@@ -530,12 +605,12 @@ project, passed verbatim to appliers that recognize it and ignored by all others
 
 Extensions MUST NOT change the meaning of core sections — they add, never override.
 
-## 18. Applier report
+## 19. Applier report
 
 After a successful apply, the applier SHOULD record the applied document on
 the installed system at `/var/lib/lis/system.lis.json` (mode 0600, secret
 references unresolved) — the machine's *birth certificate*
-(`docs/delivery.md` §7).
+(`docs/delivery.md` §8).
 
 An applier SHOULD also emit a machine-readable report:
 
@@ -545,13 +620,13 @@ An applier SHOULD also emit a machine-readable report:
   "warnings": [], "log": "…" }
 ```
 
-## 19. Validation summary (normative checklist)
+## 20. Validation summary (normative checklist)
 
 A document is invalid if any of these fail:
 
 1. `lis` version present and supported.
 2. Validates against the JSON Schema for that version.
-3. All disk/partition/volume references resolve; no dangling `id`s.
+3. All disk/partition/volume/key references resolve; no dangling `id`s.
 4. At most one `size: "rest"` per disk; sizes fit the matched device when sizes are
    absolute and the device is known.
 5. Exactly one mountpoint `/` resolves.
@@ -563,10 +638,7 @@ A document is invalid if any of these fail:
 10. `desktop` requires a `desktop:*` role; `desktop.autologin` must name an
     unlocked user.
 
-## 20. Delivery
+## 21. Delivery
 
-How installers *find* a document — the `LISDATA` seed volume (with its two
-levels: `authorized_keys` trust seeds and `system.lis.json` intent seeds),
-`lis.url=`/`lis.device=` kernel parameters, the search order, piggybacking on
-`CIDATA`/`OEMDRV`, and the two-key consent rule — is specified in
-[`docs/delivery.md`](docs/delivery.md).
+How installers *find* and resolve a document — the `LIS` seed volume (with its `lis.json` boot manifest, multi-source resolution, explicit key objects, and two-key consent rule) — is specified in [`docs/delivery.md`](docs/delivery.md).
+

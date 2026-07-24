@@ -26,6 +26,8 @@ pub struct Document {
     pub lis: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<Meta>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<KeyObject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<Target>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -81,6 +83,23 @@ pub struct Meta {
     pub generator: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<String>,
+}
+
+// ── keys ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct KeyObject {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub purpose: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matcher: Option<BTreeMap<String, serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SecretRef>,
+    #[serde(default, skip_serializing_if = "skip_false")]
+    pub pin_required: bool,
 }
 
 // ── target ───────────────────────────────────────────────────────
@@ -599,6 +618,8 @@ pub struct User {
     pub ssh_authorized_keys: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dotfiles: Option<Dotfiles>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scripts: Option<Scripts>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -907,21 +928,34 @@ pub enum Encoding {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Scripts {
+    #[serde(default, alias = "pre", skip_serializing_if = "Vec::is_empty")]
+    pub pre_install: Vec<Script>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pre: Vec<Script>,
+    pub post_storage: Vec<Script>,
+    #[serde(default, alias = "post", skip_serializing_if = "Vec::is_empty")]
+    pub post_install: Vec<Script>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub post: Vec<Script>,
+    pub pre_reboot: Vec<Script>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on_success: Vec<Script>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on_error: Vec<Script>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub firstboot: Vec<Script>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Script {
-    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SecretRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interpreter: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chroot: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_failure: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]

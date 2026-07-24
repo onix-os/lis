@@ -1,151 +1,176 @@
-# LIS delivery — the seed convention
+# LIS delivery — the boot manifest & seed convention
 
 **Status: v0.1.0-draft**, companion to [SPEC.md](../SPEC.md) §20.
 
-A LIS document describes an installation; this document describes how an
-installer **finds** one. The convention follows the two proven prior arts —
-Anaconda's `OEMDRV` volume (auto-discovered kickstart) and cloud-init's
-`CIDATA` NoCloud seed — and fixes their weakest point: discovery never
-implies consent to destroy a machine.
+A LIS document describes an installation intent (the recipe); this document describes how an installer **locates, fetches, and authorizes** that intent using a boot manifest (`lis.json`) delivered via physical media (`LIS` seed volume), network parameters, or dynamic remote hooks.
 
-## 1. The seed volume
+---
 
-A **LIS seed** is a filesystem labeled `LISDATA` (matched case-insensitively)
-on any block device: USB stick, virtual disk, CD image. Installers MUST
-support `vfat` and `iso9660` seeds and SHOULD support `ext4`.
+## 1. The LIS volume & `lis.json` boot manifest
 
-Contents, all optional, at the volume root:
+A **LIS seed** is a filesystem labeled `LIS` (or `LISDATA`, matched case-insensitively) on any block device: USB stick, virtual disk, CD image, or NVMe partition. Installers MUST support `vfat` and `iso9660` seeds and SHOULD support `ext4`.
 
-| file | meaning |
-|---|---|
-| `system.lis.json` | the intent — a LIS document to apply (level 2) |
-| `authorized_keys` | the trust — OpenSSH public keys for remote provisioning (level 1) |
-| `unattended` | the consent — empty marker file permitting a zero-prompt destructive run |
-| `secrets/…` | secret material referenced from the document via `seed:` (§4) |
+Instead of requiring a static system configuration file on the volume, the volume root contains a lightweight **boot manifest** named `lis.json` (with `system.lis.json` supported for legacy/direct intent):
 
-A seed MAY carry other conventions' files next to these (`user-data`,
-`meta-data`, `ks.cfg`): one stick can drive cloud-init, Anaconda, and LIS.
+```
+LIS/ (Volume Root)
+├── lis.json           the manifest — HOW to get the recipe & keys
+├── authorized_keys    the trust    — OpenSSH public keys for remote provisioning
+├── unattended         the consent  — empty marker file permitting zero-prompt runs
+├── keys/…             local key files (GPG, binary keyfiles)
+└── secrets/…          secret material referenced via { "from": "seed:secrets/…" }
+```
 
-## 2. Two levels: trust and intent
+---
 
-### Level 1 — trust seed (remote provisioning)
+## 2. Multi-source recipe resolution (`source`)
 
-A seed with `authorized_keys` and **no** `system.lis.json` puts the booted
-installer environment into **await mode**:
+The `lis.json` manifest specifies where the installer should fetch the system recipe via the `source` field. `source` can be a single source object or a **fallback priority chain** (array).
 
-1. Bring up networking (DHCP on wired interfaces by default).
-2. Start an SSH daemon and authorize the seed's keys for the installer user.
-3. Announce (§5) and wait.
+### 2.1 Supported source types
 
-A remote frontend holding a matching private key connects, probes the
-machine, produces a LIS document interactively, and drives the installation
-over the wire. One generic stick provisions any number of machines; the
-per-machine decisions happen live at the operator's side.
+| Source type | Description | Example / Schema |
+|---|---|---|
+| `file` / `path` | Local filesystem path | `"source": { "type": "file", "path": "/recipes/server.lis.json" }` |
+| `disk` | Specific disk partition or label | `"source": { "type": "disk", "match": { "label": "DATA" }, "path": "/server.lis.json" }` |
+| `http` / `https` | Remote web server or CMDB API | `"source": { "type": "https", "url": "https://cmdb.internal/api/lis" }` |
+| `nfs` | Remote Network Attached Storage | `"source": { "type": "nfs", "server": "nas.local", "export": "/deploy", "path": "/web.lis.json" }` |
+| `smb` / `cifs` | Windows / Samba share | `"source": { "type": "smb", "share": "//nas.local/configs", "path": "node1.lis.json" }` |
+| `git` | Git repository branch/tag | `"source": { "type": "git", "url": "https://github.com/org/infra.git", "path": "nodes/web.lis.json" }` |
+| `s3` | S3 / MinIO object storage | `"source": { "type": "s3", "endpoint": "https://minio.local:9000", "bucket": "recipes", "key": "node.lis.json" }` |
+| `await` | Remote SSH / Web hook | `"source": { "type": "await", "protocol": "ssh", "timeout": 600 }` |
+| `exec` | Local generator script | `"source": { "type": "exec", "command": "/lis/scripts/detect_and_generate.sh" }` |
+| `interactive` | Local TUI / GUI wizard | `"source": { "type": "interactive" }` |
 
-If the live environment needs more than DHCP (wifi, static addressing), the
-seed MAY also carry a **storage-less** LIS document: a `system.lis.json`
-without a `storage` section installs nothing — its `network` (and
-`system.keymap`) sections are applied to the live environment instead, and
-the installer proceeds to await mode.
+### 2.2 Fallback priority chains
 
-### Level 2 — intent seed (unattended or prefilled)
+If `source` is an array, the installer attempts each source sequentially:
 
-A seed whose `system.lis.json` has a `storage` section is an install intent.
-What happens next depends on consent (§3): a fully consented seed runs to
-completion with no prompts; anything less loads the document into the
-installer's interactive flow as prefilled answers.
+```json
+{
+  "lis": "0.1.0",
+  "source": [
+    {
+      "type": "nfs",
+      "server": "nas.internal.net",
+      "export": "/deployments",
+      "path": "server-01.lis.json"
+    },
+    {
+      "type": "disk",
+      "match": { "label": "LIS_BACKUP" },
+      "path": "/system.lis.json"
+    },
+    {
+      "type": "await",
+      "protocol": "ssh",
+      "timeout": 300
+    },
+    {
+      "type": "interactive"
+    }
+  ]
+}
+```
 
-When both `system.lis.json` (with storage) and `authorized_keys` are
-present, the document applies **and** the SSH keys stay authorized in the
-live environment for the duration of the run — the operator's escape hatch
-to watch or abort.
+---
 
-## 3. Consent — the two-key rule
+## 3. Explicit key objects (`keys`)
 
-Discovering a document is not permission to erase a machine. An installer
-MUST NOT begin a destructive, prompt-free run unless BOTH keys are present:
+The manifest or LIS document can declare an explicit `keys` section for hardware tokens (YubiKey), cryptographic keys, or keyfiles used for disk encryption (`LUKS`) or document decryption:
 
-1. **In the document**: `installer.unattended: true` (and, for disks that
-   hold data, `storage.wipe: true` as always).
-2. **On the delivery channel**: the empty `unattended` marker file on the
-   seed volume — or, for network delivery (§6), `lis.unattended=1` on the
-   kernel command line.
+```json
+"keys": [
+  {
+    "id": "admin-yubikey",
+    "type": "yubikey_fido2",
+    "purpose": "disk_encryption",
+    "match": { "serial": "12345678" },
+    "pin_required": true
+  },
+  {
+    "id": "luks-keyfile",
+    "type": "keyfile",
+    "purpose": "disk_encryption",
+    "source": { "from": "seed:keys/luks-root.key" }
+  }
+]
+```
 
-The document key travels with the *intent* (which is copied and shared);
-the channel key stays with the *physical object* someone deliberately
-prepared and plugged into this machine. Missing either key, the installer
-MUST stop at a confirmation step (or full interactive flow) with the
-document's answers prefilled.
+### Supported key types:
+- `yubikey_fido2`: Enrolled directly via `systemd-cryptenroll --fido2-device=auto`.
+- `yubikey_challenge`: HMAC-SHA1 challenge-response key.
+- `tpm2`: Bound to motherboard TPM2 PCR registers.
+- `gpg` / `age`: Used for decrypting encrypted recipe payloads.
+- `keyfile`: Binary keyfile for LUKS or volume unlocking.
+- `ssh`: Public key for remote session authorization.
 
-## 4. Secrets on the seed
+---
 
-SPEC §2.4 forbids inline secrets. The seed adds a third reference form to
-`file:` and `env:`:
+## 4. Remote await mode & dynamic hooks (`source: "await"`)
+
+When `source` resolves to `"await"` (or a seed contains `authorized_keys` with no static recipe):
+
+1. The live installer brings up networking (DHCP by default).
+2. It starts an SSH daemon (or ephemeral HTTPS web server) authorizing the `authorized_keys`.
+3. It announces itself on the LAN via mDNS (`_lis-installer._tcp`) with TXT records:
+   ```
+   lisv=0.1  hostname=<transient-hostname>  arch=x86_64  serial=<dmi-serial-or-unknown>
+   ```
+4. A remote operator or deployment wizard connects over SSH, probes the system, generates the recipe interactively or programmatically, and **pushes the LIS JSON across the hook**.
+5. The installer receives the recipe, binds any local hardware keys on the target machine, and executes the installation.
+
+---
+
+## 5. Consent — the two-key rule
+
+Discovering a document or receiving a recipe over a network hook is not permission to erase a machine. An installer MUST NOT begin a destructive, prompt-free run unless BOTH consent keys are present:
+
+1. **In the document**: `installer.unattended: true` (and `storage.wipe: true` for target disks).
+2. **On the delivery channel**: the empty `unattended` marker file on the `LIS` seed volume — or `lis.unattended=1` on the kernel command line.
+
+Missing either key, the installer MUST stop at a confirmation step (or full interactive flow) with the document's answers prefilled.
+
+---
+
+## 6. Secrets on the seed
+
+SPEC §2.4 forbids inline secrets. The seed allows secret references:
 
 ```json
 { "registration": { "token": { "from": "seed:secrets/scc-token" } } }
 ```
 
-`seed:<relative-path>` resolves against the seed volume root. The document
-stays committable and shareable; the secret material exists only on the
-stick. Appliers MUST resolve `seed:` references at apply time and MUST NOT
-copy the resolved values into any record they leave behind (§7).
+`seed:<relative-path>` resolves against the `LIS` seed volume root. The document stays committable and shareable; secret material exists only on physical media or secure stores. Appliers MUST resolve `seed:` references at apply time and MUST NOT copy resolved secrets into target log files or birth certificates.
 
-## 5. Announcement
+---
 
-While in await mode (level 1), the installer SHOULD announce itself via
-mDNS/DNS-SD as `_lis-installer._tcp` on the SSH port, with TXT records:
+## 7. Network delivery and search order
 
-```
-lisv=0.1  hostname=<transient-hostname>  arch=x86_64  serial=<dmi-serial-or-unknown>
-```
+Kernel command-line parameters for PXE/netboot fleets:
 
-so that frontends can enumerate every machine on the link currently waiting
-for instructions. Implementations MAY skip announcement; operators can
-always fall back to DHCP leases.
+- `lis.url=<http|https|nfs|git URL>` — fetch the document/manifest directly.
+- `lis.device=<path | LABEL=x | UUID=x>` and optional `lis.path=<path>` (default `/lis.json`).
+- `lis.unattended=1` — channel consent key for network delivery.
 
-## 6. Network delivery and search order
-
-Kernel command-line parameters, for PXE/netboot fleets:
-
-- `lis.url=<http|https|file URL>` — fetch the document from a URL.
-- `lis.device=<path | LABEL=x | UUID=x>` and optional `lis.path=<path>`
-  (default `/system.lis.json`) — read it from a specific device.
-- `lis.unattended=1` — the channel consent key for network delivery (§3).
-
-An installer MUST search in this order and use the first document found:
-
+Installer search order:
 1. `lis.url=`
 2. `lis.device=`
-3. a volume labeled `LISDATA` containing `/system.lis.json`
-4. a volume labeled `CIDATA` containing `/system.lis.json` (piggyback)
-5. a volume labeled `OEMDRV` containing `/system.lis.json` (piggyback)
-6. nothing → await mode if an `authorized_keys` seed exists, else interactive.
+3. Volume labeled `LIS` containing `/lis.json` or `/system.lis.json`
+4. Volume labeled `LISDATA` containing `/lis.json` or `/system.lis.json`
+5. Volume labeled `CIDATA` containing `/system.lis.json` (piggyback)
+6. Volume labeled `OEMDRV` containing `/system.lis.json` (piggyback)
+7. Fallback to `await` mode if `authorized_keys` exists, else local `interactive` TUI.
 
-If one tier matches more than one volume, the installer MUST fail rather
-than guess — the same determinism rule as disk matching (SPEC §5).
+---
 
-## 7. The birth certificate
+## 8. The birth certificate
 
-After a successful apply — regardless of how the document was delivered —
-the applier SHOULD record the applied document on the installed system at:
+After a successful apply — regardless of how the document was delivered — the applier SHOULD record the applied document on the installed system at:
 
 ```
 /var/lib/lis/system.lis.json      (mode 0600, root-owned)
 ```
 
-with `seed:`/`file:`/`env:` secret references left as references, never
-resolved values. Every LIS-installed machine can then answer *"how were you
-built?"* — and reinstalling or cloning it is: take the file, make a seed.
+with `seed:`/`file:`/`env:` secret references left as references, never resolved values. Every LIS-installed machine can then answer *"how were you built?"* — and reinstalling or cloning it is: take the file, make a seed.
 
-## 8. Prior art, and the deltas
-
-| | OEMDRV (kickstart) | CIDATA (cloud-init) | LISDATA |
-|---|---|---|---|
-| discovery | label scan | label scan | label scan + url/device params |
-| payload | ks.cfg | user-data/meta-data | system.lis.json |
-| consent | none — found = executed | n/a (first boot, not install) | two-key (§3) |
-| remote/attended mode | none | none | level 1: authorized_keys + await + announce |
-| secrets | inline in ks.cfg | inline in user-data | `seed:` references, stick-only |
-| record on target | anaconda-ks.cfg (with secrets) | /var/lib/cloud | birth certificate, secrets as refs |
-| coexistence | — | — | explicitly piggybacks on both |
