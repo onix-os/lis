@@ -31,10 +31,7 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk:
     """Launch QEMU with pexpect serial automation to trigger the distro installer."""
     print_stage_header(2, f"Executing {distro.upper()} Installer in QEMU Serial Console")
 
-    ovmf_path = pathlib.Path("/usr/share/ovmf/OVMF.fd")
-    ovmf_flag = f"-bios {ovmf_path}" if ovmf_path.exists() else ""
-
-    qemu_cmd = f"qemu-system-x86_64 -enable-kvm -m {ram} -smp 4 -cpu host {ovmf_flag} -drive file={target_disk},if=virtio,format=qcow2 -drive file={seed_disk},if=virtio,format=raw -cdrom {iso_path} -boot order=d -nographic"
+    qemu_cmd = f"qemu-system-x86_64 -enable-kvm -m {ram} -smp 4 -cpu host -drive file={target_disk},if=virtio,format=qcow2 -drive file={seed_disk},if=virtio,format=raw -cdrom {iso_path} -boot order=d -nographic"
     print(f"  [{TICK}] Spawning background QEMU VM serial controller...")
 
     child = pexpect.spawn(qemu_cmd, encoding="utf-8", timeout=300)
