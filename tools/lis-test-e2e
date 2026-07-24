@@ -129,9 +129,17 @@ def main() -> int:
     if not qemu_bin:
         sys.exit("error: 'qemu-system-x86_64' not found on PATH")
 
-    applier_script = pathlib.Path(__file__).resolve().parent / "appliers" / f"lis2{args.distro if args.distro != 'suse' else 'agama'}.py"
-    if not applier_script.exists() and args.distro in ("arch", "ubuntu", "nixos", "fedora", "debian", "alpine"):
-        applier_script = pathlib.Path(__file__).resolve().parent / "appliers" / f"lis2{args.distro}install.py"
+    APPLIER_MAP = {
+        "nixos": "lis2nixos.py",
+        "arch": "lis2archinstall.py",
+        "ubuntu": "lis2autoinstall.py",
+        "fedora": "lis2kickstart.py",
+        "suse": "lis2agama.py",
+        "debian": "lis2debian.py",
+        "alpine": "lis2alpine.py",
+    }
+    applier_filename = APPLIER_MAP.get(args.distro, f"lis2{args.distro}.py")
+    applier_script = pathlib.Path(__file__).resolve().parent / "appliers" / applier_filename
 
     print(f"  Applier Script: {applier_script}")
     print(f"  Executing Live ISO in QEMU with KVM, target disk (/dev/vda), and LIS seed (/dev/vdb)...")
@@ -150,11 +158,12 @@ def main() -> int:
     ]
 
     print(f"  Command: {' '.join(qemu_cmd)}")
-    print("\nVM booted. Live ISO installer running...")
-
-    # For automated test demonstration, verify target disk post-installation
-    time.sleep(3)
+    print("\n[STAGE 2] VM booted. Running automated live ISO installer in QEMU...")
+    print("Waiting for VM installation process to finish...")
     
+    res = subprocess.run(qemu_cmd)
+    print(f"  [✓] Live ISO installer VM exited with code {res.returncode}")
+
     # STAGE 3: POST-INSTALLATION VERIFICATION
     verify_installed_disk(target_disk, expected_hostname, expected_user)
 
