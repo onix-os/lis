@@ -67,7 +67,11 @@ def verify_installed_disk(target_disk: pathlib.Path, recipe_data: dict) -> bool:
 def run_stage4_live_guest_verification(args, target_disk: pathlib.Path, recipe_data: dict) -> int:
     """Boot target disk strictly without ISO attached and run live in-guest spec verification."""
     print_stage_header(4, "Reboot Test — Booting Installed OS & Live Guest Spec Verification")
-    reboot_cmd = f"qemu-system-x86_64 -enable-kvm -m {args.ram} -smp 4 -cpu host -drive file={target_disk},if=virtio,format=qcow2 -boot order=c -nographic"
+    
+    ovmf_path = pathlib.Path("/usr/share/ovmf/OVMF.fd")
+    ovmf_flag = f"-bios {ovmf_path}" if ovmf_path.exists() else ""
+
+    reboot_cmd = f"qemu-system-x86_64 -enable-kvm -m {args.ram} -smp 4 -cpu host {ovmf_flag} -drive file={target_disk},if=virtio,format=qcow2 -boot order=c -nographic"
     print(f"  [{TICK}] Booting strictly from target disk ({target_disk})...")
     
     expected_hostname = (recipe_data.get("system", {}) or {}).get("hostname", "lis-test-host")
