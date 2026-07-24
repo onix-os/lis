@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover
     sys.exit("lis-validate needs the 'jsonschema' python package (pip install jsonschema)")
 
 HERE = pathlib.Path(__file__).resolve().parent
-SCHEMA = HERE.parent / "schema" / "lis-0.1.schema.json"
+SCHEMA = HERE.parent.parent / "spec" / "schema.json"
 
 
 def load_document(path: pathlib.Path):

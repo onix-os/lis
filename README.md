@@ -116,15 +116,15 @@ Missing either key, the installer loads the document as prefilled answers and pa
 
 Beyond the stick, installers accept `lis.url=` and `lis.device=` kernel parameters, search in a fixed order (`lis.url=` $\rightarrow$ `lis.device=` $\rightarrow$ `LIS` $\rightarrow$ `LISDATA` $\rightarrow$ `CIDATA`/`OEMDRV` piggyback $\rightarrow$ await/interactive), and fail on ambiguity. After install, the applier records the birth certificate at `/var/lib/lis/system.lis.json` — so every LIS-installed system can answer *"how were you built?"*, and reinstalling it is: take the file, make a seed.
 
-Full normative text: [`docs/delivery.md`](docs/delivery.md).
+Full normative text: [`spec/delivery.md`](spec/delivery.md).
 
 ## Repository layout
 
-- [`SPEC.md`](SPEC.md) — the specification (v0.1.0-draft)
-- [`schema/lis-0.1.schema.json`](schema/lis-0.1.schema.json) — JSON Schema (draft 2020-12)
-- [`docs/delivery.md`](docs/delivery.md) — the seed convention (delivery, discovery, consent)
-- [`examples/`](examples/) — complete documents, JSON and YAML
-- [`docs/prior-art.md`](docs/prior-art.md) — what exists, what LIS learned from each
+- [`spec/SPEC.md`](spec/SPEC.md) — the core specification (v0.1.0-draft)
+- [`spec/delivery.md`](spec/delivery.md) — the delivery & boot manifest specification
+- [`spec/schema.json`](spec/schema.json) — canonical JSON Schema (draft 2020-12)
+- [`tools/`](tools/) — implementation code, appliers (`tools/appliers/`), validators (`tools/validators/`), and bindings (`tools/bindings/`)
+- [`docs/`](docs/) — research documentation (`docs/prior-art.md`, `docs/coverage-matrix.md`) and examples (`docs/examples/`)
 
 ## Status
 
@@ -136,18 +136,18 @@ Full normative text: [`docs/delivery.md`](docs/delivery.md).
 - **applier**: `nox lis-apply --file system.lis.json` consumes a LIS document and
   generates the NixOS config (disko.nix, host.nix, user.nix) from it — no disk is
   touched; applying the generated config stays a separate, confirmed step.
-- **translators**: [`tools/`](tools/) holds converters to archinstall and
+- **translators**: [`tools/appliers/`](tools/appliers/) holds converters to archinstall and
   Ubuntu autoinstall configurations.
-- **translator (nixos)**: [`tools/lis2nixos.py`](tools/lis2nixos.py) turns a
+- **translator (nixos)**: [`tools/appliers/lis2nixos.py`](tools/appliers/lis2nixos.py) turns a
   document into the classic trio — `disko.nix`, `hardware.nix`,
   `configuration.nix` — using plain NixOS options only. Opinionated flakes
   bring their own translators; the default acts as default.
-- **rust crate**: [`bindings/rust`](bindings/rust) is the reference
+- **rust crate**: [`tools/bindings/rust`](tools/bindings/rust) is the reference
   implementation — a typed model of every spec section with JSON emit/parse and
-  the SPEC §19 validation. Depend on it with
-  `lis-spec = { git = "https://github.com/onix-os/lis" }`; nox uses it directly.
-- **validator**: [`tools/lis-validate`](tools/lis-validate) checks documents
-  against the JSON Schema *and* the SPEC §19 semantic rules (reference
+  the SPEC validation. Depend on it with
+  `lis-spec = { git = "https://github.com/onix-os/lis", path = "tools/bindings/rust" }`; nox uses it directly.
+- **validator**: [`tools/validators/lis-validate`](tools/validators/lis-validate) checks documents
+  against the JSON Schema *and* semantic rules (reference
   resolution, exactly-one-root, firmware/loader coherence, no plaintext
   secrets, …). CI runs it on every example.
 

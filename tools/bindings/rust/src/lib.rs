@@ -70,7 +70,7 @@ mod tests {
     use super::*;
 
     fn example(name: &str) -> String {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../docs/examples/");
         std::fs::read_to_string(format!("{path}{name}")).unwrap()
     }
 

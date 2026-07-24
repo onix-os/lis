@@ -622,7 +622,7 @@ Extensions MUST NOT change the meaning of core sections — they add, never over
 After a successful apply, the applier SHOULD record the applied document on
 the installed system at `/var/lib/lis/system.lis.json` (mode 0600, secret
 references unresolved) — the machine's *birth certificate*
-(`docs/delivery.md` §8).
+(`delivery.md` §8).
 
 An applier SHOULD also emit a machine-readable report:
 
@@ -652,5 +652,5 @@ A document is invalid if any of these fail:
 
 ## 21. Delivery
 
-How installers *find* and resolve a document — the `LIS` seed volume (with its `lis.json` boot manifest, multi-source resolution, explicit key objects, and two-key consent rule) — is specified in [`docs/delivery.md`](docs/delivery.md).
+How installers *find* and resolve a document — the `LIS` seed volume (with its `lis.json` boot manifest, multi-source resolution, explicit key objects, and two-key consent rule) — is specified in [`delivery.md`](delivery.md).
 
