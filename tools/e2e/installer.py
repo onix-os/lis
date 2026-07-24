@@ -144,7 +144,7 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk:
         child.sendline("mkdir -p /mnt/seed && mount /dev/vdb /mnt/seed")
         child.expect([r"root@nixos", r"\]#", r"#"], timeout=30)
         print(f"\n  [{TICK}] Executing NixOS applier via nix-shell...")
-        child.sendline("nix-shell -p python3Minimal --run 'python3 /mnt/seed/unattended/lis2nixos.py /mnt/seed/recipes/system.lis.json --apply'")
+        child.sendline("nix-shell -p python3Minimal --run 'python3 /mnt/seed/appliers/lis2nixos.py /mnt/seed/recipes/system.lis.json --apply'")
         child.expect([r"root@nixos", r"\]#", r"#"], timeout=600)
         finalize_live_installation(child)
     elif distro == "ubuntu":
@@ -155,7 +155,7 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk:
         child.expect(["ubuntu@ubuntu", "login:", "# "], timeout=180)
         child.sendline("sudo mkdir -p /mnt/seed && sudo mount /dev/vdb /mnt/seed")
         child.expect(["$ ", "# "], timeout=30)
-        child.sendline("sudo python3 /mnt/seed/unattended/lis2autoinstall.py /mnt/seed/recipes/system.lis.json --apply")
+        child.sendline("sudo python3 /mnt/seed/appliers/lis2autoinstall.py /mnt/seed/recipes/system.lis.json --apply")
         child.expect(["$ ", "# "], timeout=300)
         finalize_live_installation(child)
     elif distro == "arch":
@@ -163,7 +163,7 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk:
         child.expect(["root@archiso", "# "], timeout=180)
         child.sendline("mkdir -p /mnt/seed && mount /dev/vdb /mnt/seed")
         child.expect(["# "], timeout=30)
-        child.sendline("python3 /mnt/seed/unattended/lis2archinstall.py /mnt/seed/recipes/system.lis.json --apply")
+        child.sendline("python3 /mnt/seed/appliers/lis2archinstall.py /mnt/seed/recipes/system.lis.json --apply")
         child.expect(["# "], timeout=300)
         finalize_live_installation(child)
     elif distro == "debian":
@@ -171,7 +171,7 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk:
         child.expect(["root@debian", "user@debian", "login:", "# "], timeout=180)
         child.sendline("mkdir -p /mnt/seed && mount /dev/vdb /mnt/seed 2>/dev/null || true")
         child.expect(["$ ", "# "], timeout=30)
-        child.sendline("python3 /mnt/seed/unattended/lis2debian.py /mnt/seed/recipes/system.lis.json --apply 2>/dev/null || true")
+        child.sendline("python3 /mnt/seed/appliers/lis2debian.py /mnt/seed/recipes/system.lis.json --apply 2>/dev/null || true")
         child.expect(["$ ", "# "], timeout=300)
         finalize_live_installation(child)
     elif distro == "fedora":
@@ -179,7 +179,7 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk:
         child.expect(["liveuser@localhost", "root@localhost", "# "], timeout=180)
         child.sendline("sudo mkdir -p /mnt/seed && sudo mount /dev/vdb /mnt/seed 2>/dev/null || true")
         child.expect(["$ ", "# "], timeout=30)
-        child.sendline("python3 /mnt/seed/unattended/lis2kickstart.py /mnt/seed/recipes/system.lis.json --apply 2>/dev/null || true")
+        child.sendline("python3 /mnt/seed/appliers/lis2kickstart.py /mnt/seed/recipes/system.lis.json --apply 2>/dev/null || true")
         child.expect(["$ ", "# "], timeout=300)
         finalize_live_installation(child)
     elif distro == "suse":
@@ -187,7 +187,7 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk:
         child.expect(["root@localhost", "live@localhost", "# "], timeout=180)
         child.sendline("mkdir -p /mnt/seed && mount /dev/vdb /mnt/seed 2>/dev/null || true")
         child.expect(["$ ", "# "], timeout=30)
-        child.sendline("python3 /mnt/seed/unattended/lis2agama.py /mnt/seed/recipes/system.lis.json --apply 2>/dev/null || true")
+        child.sendline("python3 /mnt/seed/appliers/lis2agama.py /mnt/seed/recipes/system.lis.json --apply 2>/dev/null || true")
         child.expect(["$ ", "# "], timeout=300)
         finalize_live_installation(child)
     else:

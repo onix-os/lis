@@ -58,6 +58,12 @@ def main() -> int:
         if args.unattended:
             (staging / "unattended").touch()
 
+        # Copy appliers to /appliers/ on the seed drive
+        appliers_src = pathlib.Path(__file__).resolve().parent / "appliers"
+        appliers_dst = staging / "appliers"
+        if appliers_src.exists():
+            shutil.copytree(appliers_src, appliers_dst)
+
         # 4. Build FAT32 disk image using mcopy / mformat or loopback/mkfs.vfat
         img_path = args.out.resolve()
         if img_path.exists():
@@ -79,6 +85,10 @@ def main() -> int:
                 subprocess.run(["mcopy", "-i", str(img_path), "-s", f"{staging}/unattended", "::unattended"], check=True)
             subprocess.run(["mmd", "-i", str(img_path), "::recipes"], check=True)
             subprocess.run(["mcopy", "-i", str(img_path), "-s", f"{target_recipe}", "::recipes/system.lis.json"], check=True)
+            if appliers_dst.exists():
+                subprocess.run(["mmd", "-i", str(img_path), "::appliers"], check=True)
+                for applier_file in appliers_dst.glob("*.py"):
+                    subprocess.run(["mcopy", "-i", str(img_path), "-s", str(applier_file), f"::appliers/{applier_file.name}"], check=True)
         else:
             # Fallback using 7z / fatcat / mounting if needed, or mtools
             # Check if fatcat or 7z or sudo mount is available
