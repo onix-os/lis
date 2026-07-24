@@ -1,6 +1,6 @@
 # LIS delivery — the boot manifest & seed convention
 
-**Status: v0.1.0-draft**, companion to [SPEC.md](SPEC.md) §21.
+**Status: v0.1.0-draft**, companion to [schema.md](schema.md) §21.
 
 A LIS document describes an installation intent (the recipe); this document describes how an installer **locates, fetches, and authorizes** that intent using a boot manifest (`lis.json`) delivered via physical media (`LIS` seed volume), network parameters, or dynamic remote hooks.
 

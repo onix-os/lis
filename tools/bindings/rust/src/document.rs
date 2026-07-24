@@ -1,4 +1,4 @@
-//! The typed LIS document model — one struct per SPEC.md section.
+//! The typed LIS document model — one struct per schema.md section.
 //!
 //! Every field is optional (or an empty collection) exactly as the spec
 //! demands: an omitted section means "applier default". Unknown top-level

@@ -1,4 +1,4 @@
-//! Semantic validation — SPEC.md §19, the rules a JSON Schema cannot express.
+//! Semantic validation — schema.md §20, the rules a JSON Schema cannot express.
 
 use std::collections::BTreeSet;
 

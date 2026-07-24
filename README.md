@@ -120,7 +120,7 @@ Full normative text: [`spec/delivery.md`](spec/delivery.md).
 
 ## Repository layout
 
-- [`spec/SPEC.md`](spec/SPEC.md) — the core specification (v0.1.0-draft)
+- [`spec/schema.md`](spec/schema.md) — the core specification (v0.1.0-draft)
 - [`spec/delivery.md`](spec/delivery.md) — the delivery & boot manifest specification
 - [`spec/schema.json`](spec/schema.json) — canonical JSON Schema (draft 2020-12)
 - [`tools/`](tools/) — implementation code, appliers (`tools/appliers/`), validators (`tools/validators/`), and bindings (`tools/bindings/`)
