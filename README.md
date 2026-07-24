@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/logo.svg" width="180" alt="LIS — an oak tree whose roots end in three nodes"></p>
+<p align="center"><img src="docs/assets/logo.svg" width="180" alt="LIS — an oak tree whose roots end in three nodes"></p>
 
 # LIS — Linux Installation Specification
 
