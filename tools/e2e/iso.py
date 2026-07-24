@@ -43,13 +43,6 @@ def download_iso_if_missing(distro: str) -> pathlib.Path:
     if not meta:
         sys.exit(f"{RED}error: unknown distro '{distro}'{RESET}")
 
-    tmp_iso = pathlib.Path("/tmp") / meta["file"]
-
-    local_down = pathlib.Path("/home/bresilla/down")
-    for f in local_down.glob(f"*{distro}*.iso"):
-        print(f"  [{TICK}] Found existing local ISO: {BOLD}{f}{RESET}")
-        return f
-
     if tmp_iso.exists() and tmp_iso.stat().st_size > 10 * 1024 * 1024:
         print(f"  [{TICK}] Found cached ISO in /tmp: {BOLD}{tmp_iso}{RESET}")
         return tmp_iso

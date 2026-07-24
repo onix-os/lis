@@ -502,7 +502,7 @@ def main() -> int:
         
         if shutil.which("nixos-install"):
             print("installing NixOS system via nixos-install...")
-            res = subprocess.run(["nixos-install", "--no-root-passwd"])
+            res = subprocess.run(["nixos-install", "--no-root-passwd", "--root", "/mnt"])
             return res.returncode
         else:
             print("disko formatting complete; run nixos-install to finish system installation")
