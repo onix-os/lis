@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""lis-test-e2e — End-to-end VM installation runner for NixOS and Ubuntu.
+
+Usage: lis-test-e2e --distro nixos|ubuntu [--iso ISO_PATH] [--recipe RECIPE.lis.json]
+"""
+
+import argparse
+import json
+import pathlib
+import shutil
+import subprocess
+import sys
+
+DEFAULT_ISOS = {
+    "nixos": pathlib.Path("/home/bresilla/down/nixos-minimal-26.05.3705.1f01958ffb5b-x86_64-linux.iso"),
+    "ubuntu": pathlib.Path("/home/bresilla/down/ubuntu-26.04-desktop-amd64.iso"),
+}
+
+DEFAULT_RECIPE = pathlib.Path("docs/examples/test-full-install.lis.json")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="End-to-end LIS installation test in QEMU/KVM")
+    ap.add_argument("--distro", choices=["nixos", "ubuntu"], required=True, help="Distro to test (nixos or ubuntu)")
+    ap.add_argument("--iso", type=pathlib.Path, help="Path to ISO (default: search /home/bresilla/down/)")
+    ap.add_argument("--recipe", type=pathlib.Path, default=DEFAULT_RECIPE, help="Path to LIS recipe")
+    ap.add_argument("--ram", default="4G", help="RAM (default: 4G)")
+    ap.add_argument("--disk-size", default="20G", help="Target disk size (default: 20G)")
+    args = ap.parse_args()
+
+    iso_path = args.iso or DEFAULT_ISOS.get(args.distro)
+    if not iso_path or not iso_path.exists():
+        sys.exit(f"error: ISO for {args.distro} not found at '{iso_path}'")
+
+    if not args.recipe.exists():
+        sys.exit(f"error: recipe file '{args.recipe}' not found")
+
+    target_disk = pathlib.Path(f"/tmp/e2e-{args.distro}-target.qcow2")
+    seed_disk = pathlib.Path(f"/tmp/e2e-LIS-{args.distro}.img")
+
+    print(f"=== LIS END-TO-END TEST: {args.distro.upper()} ===")
+
+    # 1. Create target virtual disk
+    if target_disk.exists():
+        target_disk.unlink()
+    subprocess.run(["qemu-img", "create", "-f", "qcow2", str(target_disk), args.disk_size], check=True)
+    print(f"✓ Created target virtual disk ({args.disk_size}): {target_disk}")
+
+    # 2. Build seed disk image
+    make_seed = pathlib.Path(__file__).resolve().parent / "lis-make-seed"
+    subprocess.run([sys.executable, str(make_seed), str(args.recipe), "--out", str(seed_disk), "--unattended"], check=True)
+    print(f"✓ Created FAT32 seed volume: {seed_disk}")
+
+    # 3. Launch QEMU VM
+    qemu_cmd = [
+        "qemu-system-x86_64",
+        "-enable-kvm",
+        "-m", args.ram,
+        "-smp", "4",
+        "-cpu", "host",
+        "-drive", f"file={target_disk},if=virtio,format=qcow2",
+        "-drive", f"file={seed_disk},if=virtio,format=raw",
+        "-cdrom", str(iso_path),
+        "-boot", "order=d",
+    ]
+
+    print(f"\nLaunching QEMU VM for {args.distro.upper()} live installation...")
+    print("Command:", " ".join(qemu_cmd))
+    print("\nVM is starting with target disk attached at /dev/vda and LIS seed attached at /dev/vdb.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

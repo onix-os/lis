@@ -1,0 +1,109 @@
+{
+  "lis": "0.1.0",
+  "meta": {
+    "name": "full-test-system",
+    "description": "Full end-to-end testing recipe for NixOS and Ubuntu QEMU verification",
+    "generator": "lis-test-suite 0.1.0"
+  },
+  "target": {
+    "arch": "x86_64",
+    "firmware": "bios",
+    "disks": [
+      {
+        "id": "main",
+        "match": {
+          "path": "/dev/vda"
+        }
+      }
+    ]
+  },
+  "storage": {
+    "wipe": true,
+    "partitions": [
+      {
+        "disk": "main",
+        "id": "esp",
+        "role": "esp",
+        "size": "1GiB",
+        "fs": "vfat",
+        "mountpoint": "/boot"
+      },
+      {
+        "disk": "main",
+        "id": "swap",
+        "role": "swap",
+        "size": "2GiB",
+        "fs": "swap"
+      },
+      {
+        "disk": "main",
+        "id": "root",
+        "role": "root",
+        "size": "rest",
+        "fs": "btrfs",
+        "mountpoint": "/",
+        "subvolumes": [
+          { "name": "@", "mountpoint": "/" },
+          { "name": "@home", "mountpoint": "/home" }
+        ]
+      }
+    ]
+  },
+  "boot": {
+    "loader": "grub",
+    "timeout": 5
+  },
+  "system": {
+    "hostname": "lis-test-host",
+    "timezone": "UTC",
+    "locale": "en_US.UTF-8"
+  },
+  "users": [
+    {
+      "name": "fakeuser",
+      "comment": "Test Fake User",
+      "admin": true,
+      "shell": "/bin/bash",
+      "groups": ["wheel", "video"],
+      "password": {
+        "hash": "$6$saltsalt$fakeuserhash"
+      },
+      "scripts": {
+        "post_install": [
+          {
+            "content": "echo 'USER_POST_INSTALL_HOOK_PASSED' > /tmp/user_hook.txt",
+            "chroot": true
+          }
+        ],
+        "firstboot": [
+          {
+            "content": "echo 'USER_FIRSTBOOT_HOOK_PASSED' > /tmp/user_firstboot.txt"
+          }
+        ]
+      }
+    }
+  ],
+  "software": {
+    "role": "desktop:gnome",
+    "apps": ["firefox", "neovim"],
+    "packages": ["curl", "git"]
+  },
+  "scripts": {
+    "pre_install": [
+      {
+        "content": "echo 'PRE_INSTALL_HOOK_PASSED' > /tmp/pre_install.txt"
+      }
+    ],
+    "post_install": [
+      {
+        "content": "echo 'POST_INSTALL_HOOK_PASSED' > /tmp/post_install.txt",
+        "chroot": true
+      }
+    ],
+    "firstboot": [
+      {
+        "content": "echo 'FIRSTBOOT_HOOK_PASSED' > /tmp/firstboot.txt"
+      }
+    ]
+  }
+}
