@@ -136,12 +136,14 @@ Full normative text: [`spec/delivery.md`](spec/delivery.md).
 - **applier**: `nox lis-apply --file system.lis.json` consumes a LIS document and
   generates the NixOS config (disko.nix, host.nix, user.nix) from it — no disk is
   touched; applying the generated config stays a separate, confirmed step.
-- **translators**: [`tools/appliers/`](tools/appliers/) holds converters to archinstall and
-  Ubuntu autoinstall configurations.
-- **translator (nixos)**: [`tools/appliers/lis2nixos.py`](tools/appliers/lis2nixos.py) turns a
-  document into the classic trio — `disko.nix`, `hardware.nix`,
-  `configuration.nix` — using plain NixOS options only. Opinionated flakes
-  bring their own translators; the default acts as default.
+- **translators**: [`tools/appliers/`](tools/appliers/) holds full-spec converters for major distributions:
+  - `lis2nixos.py` — NixOS (`disko.nix`, `hardware.nix`, `configuration.nix`)
+  - `lis2archinstall.py` — Arch Linux (`user_configuration.json`, `user_credentials.json`)
+  - `lis2autoinstall.py` — Ubuntu (`user-data` Subiquity & cloud-init `runcmd`)
+  - `lis2kickstart.py` — Fedora / RHEL / Rocky / Alma (`ks.cfg` Kickstart)
+  - `lis2agama.py` — openSUSE / SLES (`profile.json` Agama)
+  - `lis2debian.py` — Debian (`preseed.cfg`)
+  - `lis2alpine.py` — Alpine Linux (`answers`)
 - **rust crate**: [`tools/bindings/rust`](tools/bindings/rust) is the reference
   implementation — a typed model of every spec section with JSON emit/parse and
   the SPEC validation. Depend on it with
