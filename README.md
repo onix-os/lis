@@ -152,6 +152,7 @@ Full normative text: [`spec/delivery.md`](spec/delivery.md).
   against the JSON Schema *and* semantic rules (reference
   resolution, exactly-one-root, firmware/loader coherence, no plaintext
   secrets, …). CI runs it on every example.
+- **testing & seed generator**: [`tools/lis-make-seed`](tools/lis-make-seed) creates the bootable `LIS.img` FAT32 seed drive, and [`tools/lis-test-qemu`](tools/lis-test-qemu) boots QEMU/KVM with the live ISO, a blank target drive, and the seed drive for automated end-to-end testing.
 
 ## Non-goals
 

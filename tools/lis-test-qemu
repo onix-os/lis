@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""lis-test-qemu — Turnkey QEMU/KVM testing environment for LIS installation documents.
+
+Usage: lis-test-qemu --iso /path/to/distro-live.iso [--recipe RECIPE.lis.json] [--ram 4G] [--cpu 4] [--disk-size 20G]
+
+Automates end-to-end VM testing:
+  1. Generates a target virtual disk image (target.qcow2)
+  2. Generates the LIS seed USB drive image (LIS.img) via lis-make-seed
+  3. Launches QEMU with KVM, target drive, seed drive, and live ISO attached.
+"""
+
+import argparse
+import json
+import pathlib
+import shutil
+import subprocess
+import sys
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Run QEMU test for LIS recipe against a live ISO.")
+    ap.add_argument("--iso", type=pathlib.Path, required=True, help="Path to distribution Live ISO")
+    ap.add_argument("--recipe", type=pathlib.Path, default=pathlib.Path("docs/examples/server-btrfs.lis.json"), help="LIS recipe document")
+    ap.add_argument("--target-disk", type=pathlib.Path, default=pathlib.Path("/tmp/lis-target.qcow2"), help="Target virtual disk image")
+    ap.add_argument("--seed-disk", type=pathlib.Path, default=pathlib.Path("/tmp/LIS.img"), help="Seed disk image")
+    ap.add_argument("--disk-size", default="20G", help="Target disk size (default: 20G)")
+    ap.add_argument("--ram", default="4G", help="VM memory size (default: 4G)")
+    ap.add_argument("--cpu", type=int, default=4, help="VM CPU cores (default: 4)")
+    ap.add_argument("--nographic", action="store_true", help="Run QEMU in terminal serial mode")
+    args = ap.parse_args()
+
+    if not args.iso.exists():
+        sys.exit(f"error: ISO file '{args.iso}' not found")
+    if not args.recipe.exists():
+        sys.exit(f"error: Recipe file '{args.recipe}' not found")
+
+    qemu_bin = shutil.which("qemu-system-x86_64")
+    if not qemu_bin:
+        sys.exit("error: 'qemu-system-x86_64' not found on PATH")
+
+    # 1. Create target qcow2 disk image
+    print(f"1. Preparing target virtual disk image ({args.disk_size}): {args.target_disk}")
+    if args.target_disk.exists():
+        args.target_disk.unlink()
+    subprocess.run(["qemu-img", "create", "-f", "qcow2", str(args.target_disk), args.disk_size], check=True)
+
+    # 2. Create LIS.img seed drive
+    print(f"2. Generating LIS seed volume ({args.recipe}): {args.seed_disk}")
+    make_seed_bin = pathlib.Path(__file__).resolve().parent / "lis-make-seed"
+    subprocess.run([sys.executable, str(make_seed_bin), str(args.recipe), "--out", str(args.seed_disk), "--unattended"], check=True)
+
+    # 3. Build QEMU command line
+    cmd = [
+        qemu_bin,
+        "-enable-kvm",
+        "-m", args.ram,
+        "-smp", str(args.cpu),
+        "-cpu", "host",
+        "-drive", f"file={args.target_disk},if=virtio,format=qcow2",
+        "-drive", f"file={args.seed_disk},if=virtio,format=raw",
+        "-cdrom", str(args.iso),
+        "-boot", "order=d",
+    ]
+
+    if args.nographic:
+        cmd.extend(["-nographic"])
+
+    print("\n3. Launching QEMU VM...")
+    print("Command:", " ".join(cmd))
+    print("\n" + "=" * 60)
+    print("Press Ctrl+C to stop QEMU or shutdown the VM when finished.")
+    print("=" * 60 + "\n")
+
+    res = subprocess.run(cmd)
+    return res.returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())
