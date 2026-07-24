@@ -31,7 +31,10 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk:
     """Launch QEMU with pexpect serial automation to trigger the distro installer."""
     print_stage_header(2, f"Executing {distro.upper()} Installer in QEMU Serial Console")
 
-    qemu_cmd = f"qemu-system-x86_64 -enable-kvm -m {ram} -smp 4 -cpu host -drive file={target_disk},if=virtio,format=qcow2 -drive file={seed_disk},if=virtio,format=raw -cdrom {iso_path} -boot order=d -nographic"
+    ovmf_path = pathlib.Path("/usr/share/ovmf/OVMF.fd")
+    ovmf_flag = f"-bios {ovmf_path}" if ovmf_path.exists() else ""
+
+    qemu_cmd = f"qemu-system-x86_64 -enable-kvm -m {ram} -smp 4 -cpu host {ovmf_flag} -drive file={target_disk},if=virtio,format=qcow2 -drive file={seed_disk},if=virtio,format=raw -cdrom {iso_path} -boot order=d -nographic"
     print(f"  [{TICK}] Spawning background QEMU VM serial controller...")
 
     child = pexpect.spawn(qemu_cmd, encoding="utf-8", timeout=300)
@@ -131,11 +134,12 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk:
         finalize_live_installation(child)
 
     elif distro == "nixos":
-        print(f"\n  [{TICK}] Sending serial console kernel flag to NixOS bootloader...")
-        time.sleep(2)
-        child.send("\t console=ttyS0\n")
-        time.sleep(1)
-        child.sendline("")
+        print(f"\n  [{TICK}] Waiting for UEFI bootloader prompt...")
+        idx = child.expect(["boot menu", "GNU GRUB", "login:", "#"], timeout=60)
+        if idx in (0, 1):
+            child.send("t\r")
+            child.expect(["GNU GRUB", "Installer", "login:", "#"], timeout=30)
+        child.send("\r")
         print(f"\n  [{TICK}] Waiting for NixOS shell prompt...")
         child.expect([r"nixos@nixos", r"root@nixos", r"login:", r"\$", r"#"], timeout=180)
         child.sendline("sudo su -")
@@ -159,6 +163,10 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk:
         child.expect(["$ ", "# "], timeout=300)
         finalize_live_installation(child)
     elif distro == "arch":
+        print(f"\n  [{TICK}] Waiting for Arch bootloader prompt...")
+        idx = child.expect(["bootloader", "systemd-boot", "Arch Linux", "root@archiso", "#"], timeout=60)
+        if idx in (0, 1, 2):
+            child.send("\r")
         print(f"\n  [{TICK}] Waiting for Arch Linux shell prompt...")
         child.expect(["root@archiso", "# "], timeout=180)
         child.sendline("mkdir -p /mnt/seed && mount /dev/vdb /mnt/seed")
@@ -167,14 +175,21 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk:
         child.expect(["# "], timeout=300)
         finalize_live_installation(child)
     elif distro == "debian":
+        print(f"\n  [{TICK}] Waiting for Debian bootloader prompt...")
+        child.expect(["bootloader", "ISOLINUX", "GNU GRUB", "Install", "login:", "#"], timeout=60)
+        child.send("\r")
         print(f"\n  [{TICK}] Waiting for Debian Live shell prompt...")
-        child.expect(["root@debian", "user@debian", "login:", "# "], timeout=180)
+        child.expect(["root@debian", "user@debian", "login:", "debian-installer", "# "], timeout=180)
         child.sendline("mkdir -p /mnt/seed && mount /dev/vdb /mnt/seed 2>/dev/null || true")
         child.expect(["$ ", "# "], timeout=30)
         child.sendline("python3 /mnt/seed/appliers/lis2debian.py /mnt/seed/recipes/system.lis.json --apply 2>/dev/null || true")
         child.expect(["$ ", "# "], timeout=300)
         finalize_live_installation(child)
     elif distro == "fedora":
+        print(f"\n  [{TICK}] Waiting for Fedora bootloader prompt...")
+        idx = child.expect(["bootloader", "Fedora", "liveuser@localhost", "root@localhost", "#"], timeout=60)
+        if idx in (0, 1):
+            child.send("\r")
         print(f"\n  [{TICK}] Waiting for Fedora Live shell prompt...")
         child.expect(["liveuser@localhost", "root@localhost", "# "], timeout=180)
         child.sendline("sudo mkdir -p /mnt/seed && sudo mount /dev/vdb /mnt/seed 2>/dev/null || true")
@@ -183,6 +198,10 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk:
         child.expect(["$ ", "# "], timeout=300)
         finalize_live_installation(child)
     elif distro == "suse":
+        print(f"\n  [{TICK}] Waiting for openSUSE bootloader prompt...")
+        idx = child.expect(["bootloader", "openSUSE", "root@localhost", "live@localhost", "#"], timeout=60)
+        if idx in (0, 1):
+            child.send("\r")
         print(f"\n  [{TICK}] Waiting for openSUSE Live shell prompt...")
         child.expect(["root@localhost", "live@localhost", "# "], timeout=180)
         child.sendline("mkdir -p /mnt/seed && mount /dev/vdb /mnt/seed 2>/dev/null || true")
