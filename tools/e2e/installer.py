@@ -128,11 +128,20 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk:
         finalize_live_installation(child)
 
     elif distro == "nixos":
+        print(f"\n  [{TICK}] Sending serial console kernel flag to NixOS bootloader...")
+        time.sleep(2)
+        child.send("\t console=ttyS0\n")
+        time.sleep(1)
+        child.sendline("")
         print(f"\n  [{TICK}] Waiting for NixOS shell prompt...")
-        child.expect(["root@nixos", "nixos@nixos", "# "], timeout=180)
+        child.expect(["nixos@nixos", "root@nixos", "login:", "$ ", "# "], timeout=180)
+        child.sendline("sudo su -")
+        child.expect(["# ", "~# "], timeout=30)
+        print(f"\n  [{TICK}] Mounting LIS seed volume (/dev/vdb)...")
         child.sendline("mkdir -p /mnt/seed && mount /dev/vdb /mnt/seed")
         child.expect(["# ", "~# "], timeout=30)
-        child.sendline("python3 /mnt/seed/unattended/lis2nixos.py /mnt/seed/recipes/system.lis.json --apply")
+        print(f"\n  [{TICK}] Executing NixOS applier via nix-shell...")
+        child.sendline("nix-shell -p python3 --run 'python3 /mnt/seed/unattended/lis2nixos.py /mnt/seed/recipes/system.lis.json --apply'")
         child.expect(["# ", "~# "], timeout=300)
         finalize_live_installation(child)
     elif distro == "ubuntu":
