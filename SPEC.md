@@ -394,7 +394,18 @@ the rest to extensions.
 ```json
 {
   "role": "desktop:gnome",
-  "packages": ["firefox", "git", "htop"],
+  "apps": [
+    "firefox",
+    "vlc",
+    "neovim",
+    {
+      "name": "vscode",
+      "package": "code",
+      "flatpak": "com.visualstudio.code",
+      "preference": ["native", "flatpak"]
+    }
+  ],
+  "packages": ["git", "htop"],
   "exclude": ["nano"],
   "services": { "enable": ["sshd", "tailscaled"], "disable": ["bluetooth"] },
   "flatpak": ["org.mozilla.firefox"],
@@ -406,6 +417,7 @@ the rest to extensions.
   `minimal`, `server`, `desktop:gnome`, `desktop:kde`, `desktop:hyprland`,
   `desktop:sway`, `desktop:xfce`. Appliers map a role to their curated set and MUST
   fail on roles they cannot provide.
+- `apps[]` is an **optional list of user applications**: items can be portable shorthand string names (`"firefox"`, `"vlc"`, `"neovim"`) or structured objects (`{ "name": "...", "package": "...", "flatpak": "...", "snap": "...", "preference": [...] }`). Appliers map application intent names to native packages or preferred application runtimes. Unresolvable items in `apps` emit a non-fatal warning in the birth certificate report rather than aborting installation.
 - `packages[]` are **common-intent names**: the spec maintains a small alias
   registry (`docs/package-registry.md`) mapping intent names to per-distro package
   names. Names outside the registry are passed through verbatim; an applier that

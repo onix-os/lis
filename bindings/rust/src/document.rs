@@ -762,6 +762,8 @@ pub struct Software {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<AppEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub packages: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exclude: Vec<String>,
@@ -771,6 +773,28 @@ pub struct Software {
     pub flatpak: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub snap: Vec<Snap>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum AppEntry {
+    Simple(String),
+    Detailed(AppDetail),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct AppDetail {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flatpak: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snap: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appimage: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preference: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]

@@ -902,6 +902,46 @@
           "type": "string",
           "pattern": "^(minimal|server|desktop:(gnome|kde|hyprland|sway|xfce))$"
         },
+        "apps": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "package": {
+                    "type": "string"
+                  },
+                  "flatpak": {
+                    "type": "string"
+                  },
+                  "snap": {
+                    "type": "string"
+                  },
+                  "appimage": {
+                    "type": "string"
+                  },
+                  "preference": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
         "packages": {
           "type": "array",
           "items": {
