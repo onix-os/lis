@@ -35,25 +35,27 @@ def render_alpine(doc: dict) -> str:
 
     keymap = (system.get("keymap", {}) or {}).get("console", "us")
     lines.append(f"KEYMAPOPTS=\"{keymap} {keymap}\"")
-    lines.append(f"HOSTNAMEOPTS=\"-n {system.get('hostname', 'alpine')}\"")
+    lines.append(f"HOSTNAMEOPTS=\"{system.get('hostname', 'lis-test-host')}\"")
     lines.append("INTERFACESOPTS=\"auto eth0\niface eth0 inet dhcp\n\"")
-
-    lines.append(f"TIMEZONEOPTS=\"-z {system.get('timezone', 'UTC')}\"")
+    lines.append("DNSOPTS=\"-n 8.8.8.8\"")
+    lines.append(f"TIMEZONEOPTS=\"{system.get('timezone', 'UTC')}\"")
     lines.append("PROXYOPTS=\"none\"")
     lines.append("APKREPOSOPTS=\"-c\"")
+    lines.append("SSHDOPTS=\"openssh\"")
+    lines.append("NTPOPTS=\"chrony\"")
+
+    disks = [(d.get("match", {}) or {}).get("path") for d in target.get("disks", []) if (d.get("match", {}) or {}).get("path")]
+    disk_target = disks[0] if disks else "/dev/vda"
+    lines.append(f"DISKOPTS=\"-m sys {disk_target}\"")
+    lines.append("LBUOPTS=\"none\"")
+    lines.append("APKCACHEOPTS=\"none\"")
 
     for u in users:
-        if u["name"] != "root":
+        if u.get("name") != "root":
             lines.append(f"USEROPTS=\"-a -g wheel {u['name']}\"")
             if h := (u.get("password") or {}).get("hash"):
                 lines.append(f"USERPASSWORD=\"{h}\"")
             break
-
-    disks = [(d.get("match", {}) or {}).get("path") for d in target.get("disks", []) if (d.get("match", {}) or {}).get("path")]
-    if disks:
-        lines.append(f"DISKOPTS=\"-m sys {disks[0]}\"")
-    else:
-        lines.append("DISKOPTS=\"-m sys /dev/sda\"")
 
     if doc.get("keys"):
         warn("hardware key matrix (keys[]) requires cryptsetup/fido2 post-install setup on Alpine")

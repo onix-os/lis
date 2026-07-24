@@ -131,7 +131,12 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk:
         
         print(f"\n  [{TICK}] Executing Alpine automated installer (setup-alpine -f /mnt/seed/answers)...")
         child.sendline("setup-alpine -f /mnt/seed/answers")
-        child.expect(["Installation is complete", "reboot", "# ", "~# "], timeout=180)
+        
+        idx = child.expect(["Erase the entire disk", "continue\?", "Installation is complete", "reboot", "# "], timeout=180)
+        if idx in (0, 1):
+            print(f"\n  [{TICK}] Confirming disk partition wipe (y)...")
+            child.sendline("y")
+            child.expect(["Installation is complete", "reboot", "# "], timeout=180)
 
         print(f"\n  [{TICK}] Live installation finished! Powering off VM...")
         child.sendline("poweroff")
