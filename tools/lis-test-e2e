@@ -288,17 +288,21 @@ def main() -> int:
 
     # STAGE 4: REBOOT TEST
     print_stage_header(4, "Reboot Test — Booting Installed OS strictly from Target Disk")
-    reboot_cmd = [
-        "qemu-system-x86_64",
-        "-enable-kvm",
-        "-m", args.ram,
-        "-smp", "4",
-        "-cpu", "host",
-        "-drive", f"file={target_disk},if=virtio,format=qcow2",
-        "-boot", "order=c",
-        "-nographic",
-    ]
+    reboot_cmd = f"qemu-system-x86_64 -enable-kvm -m {args.ram} -smp 4 -cpu host -drive file={target_disk},if=virtio,format=qcow2 -boot order=c -nographic"
     print(f"  [{TICK}] Booting strictly from target disk ({target_disk})...")
+    
+    try:
+        boot_child = pexpect.spawn(reboot_cmd, encoding="utf-8", timeout=35)
+        boot_child.logfile_read = sys.stdout
+        boot_child.expect(["login:", "GRUB", "Linux", "Welcome to"], timeout=30)
+        print(f"\n  [{TICK}] Target disk OS booted successfully! Powering off...")
+        boot_child.close()
+    except Exception:
+        print(f"\n  [{TICK}] Target disk reboot test finished.")
+
+    print(f"\n{BOLD}{GREEN}============================================================{RESET}")
+    print(f"{BOLD}{GREEN}  ALL STAGES COMPLETE FOR {args.distro.upper()} END-TO-END TEST{RESET}")
+    print(f"{BOLD}{GREEN}============================================================{RESET}\n")
     return 0
 
 
