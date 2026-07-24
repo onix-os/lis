@@ -1,0 +1,12 @@
+{
+  "name": "@lis/spec",
+  "version": "0.1.0",
+  "exports": "./src/document.ts",
+  "compilerOptions": {
+    "strict": true
+  },
+  "tasks": {
+    "test": "deno test tests/test.ts",
+    "test:bun": "bun test tests/test.ts"
+  }
+}

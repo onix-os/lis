@@ -1,0 +1,17 @@
+{
+  "name": "lis-spec",
+  "version": "0.1.0",
+  "description": "TypeScript/JavaScript types and helpers for Linux Installation Specification (LIS)",
+  "main": "dist/document.js",
+  "types": "dist/document.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "tsc && node --test tests/test.js"
+  },
+  "keywords": ["lis", "linux", "installer", "specification", "types"],
+  "author": "Antigravity",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

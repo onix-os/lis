@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lis-spec"
+version = "0.1.0"
+description = "Typed LIS document model and helper tools in Python"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+yaml = ["pyyaml"]
+test = ["pytest"]
