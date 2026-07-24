@@ -135,8 +135,22 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk:
         while True:
             idx = child.expect([
                 "Enter system hostname",
-                "Erase the entire disk",
-                "continue",
+                "Which one do you want to initialize\?",
+                "Ip address for eth0\?",
+                "manual network configuration\?",
+                "New password:",
+                "Retype password:",
+                "Which timezone are you in\?",
+                "HTTP/FTP proxy URL\?",
+                "Which NTP client to use\?",
+                "Which mirror\?",
+                "Enter mirror number",
+                "Which user do you want to create\?",
+                "Enter ssh key or URL",
+                "Which disk\(s\) would you like to use\?",
+                "How would you like to use it\?",
+                "WARNING: Erase the entire disk",
+                "continue\?",
                 "Installation is complete",
                 "reboot",
                 "# ",
@@ -145,7 +159,43 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk:
             if idx == 0:
                 print(f"\n  [{TICK}] Responding to hostname prompt: lis-test-host")
                 child.sendline("lis-test-host")
-            elif idx in (1, 2):
+            elif idx == 1:
+                print(f"\n  [{TICK}] Responding to interface prompt: eth0")
+                child.sendline("eth0")
+            elif idx == 2:
+                print(f"\n  [{TICK}] Responding to ip prompt: dhcp")
+                child.sendline("dhcp")
+            elif idx == 3:
+                print(f"\n  [{TICK}] Responding to manual net prompt: no")
+                child.sendline("no")
+            elif idx in (4, 5):
+                print(f"\n  [{TICK}] Responding to root password prompt")
+                child.sendline("rootpass123")
+            elif idx == 6:
+                print(f"\n  [{TICK}] Responding to timezone prompt: UTC")
+                child.sendline("UTC")
+            elif idx == 7:
+                print(f"\n  [{TICK}] Responding to proxy prompt: none")
+                child.sendline("none")
+            elif idx == 8:
+                print(f"\n  [{TICK}] Responding to NTP prompt: chrony")
+                child.sendline("chrony")
+            elif idx in (9, 10):
+                print(f"\n  [{TICK}] Responding to mirror prompt: 1")
+                child.sendline("1")
+            elif idx == 11:
+                print(f"\n  [{TICK}] Responding to user creation prompt: fakeuser")
+                child.sendline("fakeuser")
+            elif idx == 12:
+                print(f"\n  [{TICK}] Responding to ssh key prompt: none")
+                child.sendline("none")
+            elif idx == 13:
+                print(f"\n  [{TICK}] Responding to target disk prompt: vda")
+                child.sendline("vda")
+            elif idx == 14:
+                print(f"\n  [{TICK}] Responding to disk mode prompt: sys")
+                child.sendline("sys")
+            elif idx in (15, 16):
                 print(f"\n  [{TICK}] Responding to disk erase prompt: y")
                 child.sendline("y")
             else:
