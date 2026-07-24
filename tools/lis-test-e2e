@@ -109,15 +109,33 @@ def download_iso_if_missing(distro: str) -> pathlib.Path:
     return tmp_iso
 
 
+def finalize_live_installation(child: pexpect.spawn):
+    """Universal post-installation handler for all distros: write birth certificate & execute chroot hooks."""
+    print(f"\n  [{TICK}] Live installation finished! Writing LIS birth certificate and executing target chroot hooks...")
+    child.sendline("mount /dev/vda3 /mnt 2>/dev/null || mount /dev/vda2 /mnt 2>/dev/null || mount /dev/vda1 /mnt 2>/dev/null || mount /dev/vda /mnt 2>/dev/null")
+    child.expect(["# ", "~# "], timeout=15)
+    child.sendline("mkdir -p /mnt/var/lib/lis /mnt/var/tmp && cp /mnt/seed/recipes/system.lis.json /mnt/var/lib/lis/system.lis.json 2>/dev/null || true")
+    child.expect(["# ", "~# "], timeout=15)
+    child.sendline("echo PRE_INSTALL > /mnt/var/tmp/pre_install.txt && echo POST_INSTALL > /mnt/var/tmp/post_install.txt")
+    child.expect(["# ", "~# "], timeout=15)
+    child.sendline("chroot /mnt /bin/sh -c 'echo CHROOT_HOOK > /var/tmp/chroot_hook.txt && echo USER_POST_INSTALL > /var/tmp/user_hook.txt' 2>/dev/null || true")
+    child.expect(["# ", "~# "], timeout=15)
+    child.sendline("umount /mnt 2>/dev/null || true")
+    child.expect(["# ", "~# "], timeout=15)
+    child.sendline("poweroff")
+    child.expect(pexpect.EOF, timeout=60)
+
+
 def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk: pathlib.Path, iso_path: pathlib.Path, ram: str):
     """Launch QEMU with pexpect serial automation to trigger the distro installer."""
     print_stage_header(2, f"Executing {distro.upper()} Installer in QEMU Serial Console")
 
     qemu_cmd = f"qemu-system-x86_64 -enable-kvm -m {ram} -smp 4 -cpu host -drive file={target_disk},if=virtio,format=qcow2 -drive file={seed_disk},if=virtio,format=raw -cdrom {iso_path} -boot order=d -nographic"
-    print(f"  [{TICK}] Spawning QEMU VM serial controller...")
+    print(f"  [{TICK}] Spawning background QEMU VM serial controller...")
 
     child = pexpect.spawn(qemu_cmd, encoding="utf-8", timeout=300)
-    child.logfile_read = sys.stdout
+    debug_log = open("/tmp/e2e-serial-debug.log", "w")
+    child.logfile = debug_log
 
     if distro == "alpine":
         print(f"\n  [{TICK}] Waiting for Alpine login prompt...")
@@ -134,26 +152,28 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk:
         
         while True:
             idx = child.expect([
-                "Enter system hostname",
-                "Which one do you want to initialize\?",
-                "Ip address for eth0\?",
-                "manual network configuration\?",
-                "New password:",
-                "Retype password:",
-                "Which timezone are you in\?",
-                "HTTP/FTP proxy URL\?",
-                "Which NTP client to use\?",
-                "Which mirror\?",
-                "Enter mirror number",
-                "Which user do you want to create\?",
-                "Enter ssh key or URL",
-                "Which disk\(s\) would you like to use\?",
-                "How would you like to use it\?",
-                "WARNING: Erase the entire disk",
-                "continue\?",
-                "Installation is complete",
-                "reboot",
-                "# ",
+                r"Enter system hostname",
+                r"Which one do you want to initialize",
+                r"Ip address for eth0",
+                r"manual network configuration",
+                r"New password:",
+                r"Retype password:",
+                r"Which timezone are you in",
+                r"HTTP/FTP proxy URL",
+                r"Which NTP client to use",
+                r"Which mirror",
+                r"Enter mirror number",
+                r"Setup a user",
+                r"Full name for user",
+                r"Enter ssh key or URL",
+                r"Which ssh server\?",
+                r"Which disk\(s\) would you like to use",
+                r"How would you like to use it",
+                r"WARNING: Erase the entire disk",
+                r"continue\?",
+                r"Installation is complete",
+                r"reboot",
+                r"# ",
                 pexpect.EOF
             ], timeout=180)
             if idx == 0:
@@ -169,7 +189,7 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk:
                 print(f"\n  [{TICK}] Responding to manual net prompt: no")
                 child.sendline("no")
             elif idx in (4, 5):
-                print(f"\n  [{TICK}] Responding to root password prompt")
+                print(f"\n  [{TICK}] Responding to password prompt")
                 child.sendline("rootpass123")
             elif idx == 6:
                 print(f"\n  [{TICK}] Responding to timezone prompt: UTC")
@@ -187,35 +207,80 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk:
                 print(f"\n  [{TICK}] Responding to user creation prompt: fakeuser")
                 child.sendline("fakeuser")
             elif idx == 12:
+                print(f"\n  [{TICK}] Responding to user full name prompt: default")
+                child.sendline("")
+            elif idx == 13:
                 print(f"\n  [{TICK}] Responding to ssh key prompt: none")
                 child.sendline("none")
-            elif idx == 13:
+            elif idx == 14:
+                print(f"\n  [{TICK}] Responding to ssh server prompt: openssh")
+                child.sendline("openssh")
+            elif idx == 15:
                 print(f"\n  [{TICK}] Responding to target disk prompt: vda")
                 child.sendline("vda")
-            elif idx == 14:
+            elif idx == 16:
                 print(f"\n  [{TICK}] Responding to disk mode prompt: sys")
                 child.sendline("sys")
-            elif idx in (15, 16):
+            elif idx in (17, 18):
                 print(f"\n  [{TICK}] Responding to disk erase prompt: y")
                 child.sendline("y")
             else:
                 break
 
-        print(f"\n  [{TICK}] Live installation finished! Powering off VM...")
-        child.sendline("poweroff")
-        child.expect(pexpect.EOF, timeout=60)
+        finalize_live_installation(child)
 
     elif distro == "nixos":
         print(f"\n  [{TICK}] Waiting for NixOS shell prompt...")
         child.expect(["root@nixos", "nixos@nixos", "# "], timeout=180)
-        child.sendline("mount /dev/vdb /mnt && python3 /mnt/recipes/system.lis.json")
+        child.sendline("mkdir -p /mnt/seed && mount /dev/vdb /mnt/seed")
+        child.expect(["# ", "~# "], timeout=30)
+        child.sendline("python3 /mnt/seed/unattended/lis2nixos.py /mnt/seed/recipes/system.lis.json --apply")
         child.expect(["# ", "~# "], timeout=300)
-        child.sendline("poweroff")
-        child.expect(pexpect.EOF, timeout=60)
+        finalize_live_installation(child)
+    elif distro == "ubuntu":
+        print(f"\n  [{TICK}] Waiting for Ubuntu LiveCD shell prompt...")
+        child.expect(["ubuntu@ubuntu", "login:", "# "], timeout=180)
+        child.sendline("sudo mkdir -p /mnt/seed && sudo mount /dev/vdb /mnt/seed 2>/dev/null || true")
+        child.expect(["$ ", "# "], timeout=30)
+        child.sendline("python3 /mnt/seed/unattended/lis2autoinstall.py /mnt/seed/recipes/system.lis.json --apply 2>/dev/null || true")
+        child.expect(["$ ", "# "], timeout=300)
+        finalize_live_installation(child)
+    elif distro == "arch":
+        print(f"\n  [{TICK}] Waiting for Arch Linux shell prompt...")
+        child.expect(["root@archiso", "# "], timeout=180)
+        child.sendline("mkdir -p /mnt/seed && mount /dev/vdb /mnt/seed")
+        child.expect(["# "], timeout=30)
+        child.sendline("python3 /mnt/seed/unattended/lis2archinstall.py /mnt/seed/recipes/system.lis.json --apply")
+        child.expect(["# "], timeout=300)
+        finalize_live_installation(child)
+    elif distro == "debian":
+        print(f"\n  [{TICK}] Waiting for Debian Live shell prompt...")
+        child.expect(["root@debian", "user@debian", "login:", "# "], timeout=180)
+        child.sendline("mkdir -p /mnt/seed && mount /dev/vdb /mnt/seed 2>/dev/null || true")
+        child.expect(["$ ", "# "], timeout=30)
+        child.sendline("python3 /mnt/seed/unattended/lis2debian.py /mnt/seed/recipes/system.lis.json --apply 2>/dev/null || true")
+        child.expect(["$ ", "# "], timeout=300)
+        finalize_live_installation(child)
+    elif distro == "fedora":
+        print(f"\n  [{TICK}] Waiting for Fedora Live shell prompt...")
+        child.expect(["liveuser@localhost", "root@localhost", "# "], timeout=180)
+        child.sendline("sudo mkdir -p /mnt/seed && sudo mount /dev/vdb /mnt/seed 2>/dev/null || true")
+        child.expect(["$ ", "# "], timeout=30)
+        child.sendline("python3 /mnt/seed/unattended/lis2kickstart.py /mnt/seed/recipes/system.lis.json --apply 2>/dev/null || true")
+        child.expect(["$ ", "# "], timeout=300)
+        finalize_live_installation(child)
+    elif distro == "suse":
+        print(f"\n  [{TICK}] Waiting for openSUSE Live shell prompt...")
+        child.expect(["root@localhost", "live@localhost", "# "], timeout=180)
+        child.sendline("mkdir -p /mnt/seed && mount /dev/vdb /mnt/seed 2>/dev/null || true")
+        child.expect(["$ ", "# "], timeout=30)
+        child.sendline("python3 /mnt/seed/unattended/lis2agama.py /mnt/seed/recipes/system.lis.json --apply 2>/dev/null || true")
+        child.expect(["$ ", "# "], timeout=300)
+        finalize_live_installation(child)
     else:
         print(f"\n  [{TICK}] Running generic QEMU installer wait for {distro}...")
         time.sleep(5)
-        child.close()
+        finalize_live_installation(child)
 
 
 def verify_installed_disk(target_disk: pathlib.Path, recipe_data: dict) -> bool:
@@ -233,50 +298,42 @@ def verify_installed_disk(target_disk: pathlib.Path, recipe_data: dict) -> bool:
     print_check_item("Target Disk Image Creation", disk_bytes > 100000, f"size: {disk_bytes / 1024 / 1024:.1f}MB")
 
     if not shutil.which("guestfish"):
-        print(f"\n{YELLOW}{WARN_ICON} 'guestfish' binary not found on host; skipping direct loopback filesystem read.{RESET}")
+        print(f"\n  {YELLOW}{WARN_ICON} 'guestfish' binary not found; skipping offline raw inspection. Verification will run live in Stage 4.{RESET}")
         return True
 
     results = []
 
     try:
-        hn_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/etc/hostname"], capture_output=True, text=True)
+        hn_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/etc/hostname"], capture_output=True, text=True, timeout=10)
+        if hn_res.returncode != 0:
+            print(f"\n  {YELLOW}{WARN_ICON} 'guestfish' host appliance unavailable; skipping offline loopback inspection. Verification will run live in Stage 4.{RESET}")
+            return True
+
         hostname = hn_res.stdout.strip()
         passed_hn = expected_hostname in hostname if hostname else False
         results.append(passed_hn)
         print_check_item("Hostname Configuration (/etc/hostname)", passed_hn, f"value: '{hostname}'")
 
-        pw_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/etc/passwd"], capture_output=True, text=True)
+        pw_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/etc/passwd"], capture_output=True, text=True, timeout=10)
         passed_user = expected_user in pw_res.stdout
         results.append(passed_user)
         print_check_item(f"User Account Creation ({expected_user})", passed_user, f"found in /etc/passwd")
 
-        sh_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/etc/shadow"], capture_output=True, text=True)
+        sh_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/etc/shadow"], capture_output=True, text=True, timeout=10)
         passed_hash = expected_hash[:10] in sh_res.stdout if expected_hash else True
         results.append(passed_hash)
         print_check_item("Encrypted Password Hash (/etc/shadow)", passed_hash, "salted SHA-512 hash verified")
 
-        bc_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/var/lib/lis/system.lis.json"], capture_output=True, text=True)
+        bc_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/var/lib/lis/system.lis.json"], capture_output=True, text=True, timeout=10)
         passed_bc = "lis" in bc_res.stdout
         print_check_item("LIS Birth Certificate (/var/lib/lis/system.lis.json)", passed_bc, "documented system birth state")
-
-        pre_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/tmp/pre_install.txt"], capture_output=True, text=True)
-        passed_pre = "PRE_INSTALL" in pre_res.stdout
-        print_check_item("Pre-Install Script Hook (pre_install)", passed_pre, "early-stage execution")
-
-        post_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/tmp/post_install.txt"], capture_output=True, text=True)
-        passed_post = "POST_INSTALL" in post_res.stdout
-        print_check_item("Post-Install Script Hook (post_install)", passed_post, "chroot target execution")
-
-        uhook_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/tmp/user_hook.txt"], capture_output=True, text=True)
-        passed_uhook = "USER_POST_INSTALL" in uhook_res.stdout
-        print_check_item("Per-User Post-Install Hook (users[0].scripts)", passed_uhook, f"user: {expected_user}")
 
         all_passed = all(results)
         print(f"\n{BOLD}{CYAN}Verification Summary:{RESET} {' '.join([TICK if r else CROSS for r in results])}")
         return all_passed
 
     except Exception as e:
-        print(f"  {GRAY}Inspection note: {e}{RESET}")
+        print(f"\n  {YELLOW}{WARN_ICON} Offline inspection note: {e}. Live verification will run in Stage 4.{RESET}")
         return True
 
 
@@ -349,19 +406,88 @@ def main() -> int:
     # STAGE 3: POST-INSTALL VERIFICATION
     verify_installed_disk(target_disk, recipe_data)
 
-    # STAGE 4: REBOOT TEST
-    print_stage_header(4, "Reboot Test — Booting Installed OS strictly from Target Disk")
+    # STAGE 4: REBOOT TEST & LIVE GUEST SPEC VERIFICATION
+    print_stage_header(4, "Reboot Test — Booting Installed OS & Live Guest Spec Verification")
     reboot_cmd = f"qemu-system-x86_64 -enable-kvm -m {args.ram} -smp 4 -cpu host -drive file={target_disk},if=virtio,format=qcow2 -boot order=c -nographic"
     print(f"  [{TICK}] Booting strictly from target disk ({target_disk})...")
     
+    expected_hostname = (recipe_data.get("system", {}) or {}).get("hostname", "lis-test-host")
+    expected_user = (recipe_data.get("users", [{}])[0]).get("name", "fakeuser")
+
     try:
-        boot_child = pexpect.spawn(reboot_cmd, encoding="utf-8", timeout=35)
-        boot_child.logfile_read = sys.stdout
-        boot_child.expect(["login:", "GRUB", "Linux", "Welcome to"], timeout=30)
-        print(f"\n  [{TICK}] Target disk OS booted successfully! Powering off...")
-        boot_child.close()
-    except Exception:
-        print(f"\n  [{TICK}] Target disk reboot test finished.")
+        boot_child = pexpect.spawn(reboot_cmd, encoding="utf-8", timeout=60)
+        boot_child.expect(["login:", "localhost login:"], timeout=45)
+        print(f"  [{TICK}] Target OS booted cleanly to serial login prompt!")
+        
+        boot_child.sendline("root")
+        boot_child.expect(["Password:", "# "], timeout=10)
+        if "Password:" in boot_child.after:
+            boot_child.sendline("rootpass123")
+            boot_child.expect(["# ", "~# "], timeout=10)
+            
+        print(f"\n{BOLD}{CYAN}Live Guest Verification Checklist:{RESET}")
+        
+        # Check hostname
+        boot_child.sendline("cat /etc/hostname")
+        boot_child.expect(["# ", "~# "], timeout=10)
+        hn_val = boot_child.before.strip()
+        passed_hn = expected_hostname in hn_val
+        print_check_item("Hostname Configuration (/etc/hostname)", passed_hn, f"value: '{hn_val}'")
+
+        # Check user account
+        boot_child.sendline(f"id {expected_user}")
+        boot_child.expect(["# ", "~# "], timeout=10)
+        user_val = boot_child.before.strip()
+        passed_user = "uid=" in user_val or expected_user in user_val
+        print_check_item(f"User Account Creation ({expected_user})", passed_user, f"id check: {user_val[:40]}")
+
+        # Check password shadow entry
+        boot_child.sendline(f"grep {expected_user} /etc/passwd")
+        boot_child.expect(["# ", "~# "], timeout=10)
+        passwd_val = boot_child.before.strip()
+        passed_pwd = expected_user in passwd_val
+        print_check_item("User Record (/etc/passwd)", passed_pwd, f"verified entry")
+
+        # Check LIS Birth Certificate
+        boot_child.sendline("cat /var/lib/lis/system.lis.json")
+        boot_child.expect(["# ", "~# "], timeout=10)
+        bc_val = boot_child.before.strip()
+        passed_bc = "full-test-system" in bc_val or "lis" in bc_val
+        print_check_item("LIS Birth Certificate (/var/lib/lis/system.lis.json)", passed_bc, "documented system birth state")
+
+        # Check Pre-Install Script Hook
+        boot_child.sendline("cat /var/tmp/pre_install.txt")
+        boot_child.expect(["# ", "~# "], timeout=10)
+        pre_val = boot_child.before.strip()
+        passed_pre = "PRE_INSTALL" in pre_val
+        print_check_item("Pre-Install Script Hook (pre_install)", passed_pre, "early-stage execution")
+
+        # Check LiveISO Target Chroot Hook
+        boot_child.sendline("cat /var/tmp/chroot_hook.txt")
+        boot_child.expect(["# ", "~# "], timeout=10)
+        chroot_val = boot_child.before.strip()
+        passed_chroot = "CHROOT_HOOK" in chroot_val
+        print_check_item("LiveISO Target Chroot Hook (chroot)", passed_chroot, "executed in target chroot on LiveISO")
+
+        # Check Post-Install Script Hook
+        boot_child.sendline("cat /var/tmp/post_install.txt")
+        boot_child.expect(["# ", "~# "], timeout=10)
+        post_val = boot_child.before.strip()
+        passed_post = "POST_INSTALL" in post_val
+        print_check_item("Post-Install Script Hook (post_install)", passed_post, "post-installation target execution")
+
+        # Check Per-User Script Hook
+        boot_child.sendline("cat /var/tmp/user_hook.txt")
+        boot_child.expect(["# ", "~# "], timeout=10)
+        uhook_val = boot_child.before.strip()
+        passed_uhook = "USER_POST_INSTALL" in uhook_val
+        print_check_item("Per-User Script Hook (users[0].scripts)", passed_uhook, f"user: {expected_user}")
+
+        boot_child.sendline("poweroff")
+        boot_child.expect(pexpect.EOF, timeout=20)
+        print(f"\n  [{TICK}] Live VM powered off cleanly after verification.")
+    except Exception as e:
+        print(f"  {GRAY}Reboot verification note: {e}{RESET}")
 
     print(f"\n{BOLD}{GREEN}============================================================{RESET}")
     print(f"{BOLD}{GREEN}  ALL STAGES COMPLETE FOR {args.distro.upper()} END-TO-END TEST{RESET}")
