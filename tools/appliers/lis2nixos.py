@@ -491,10 +491,12 @@ def main() -> int:
     if args.apply:
         import shutil
         import subprocess
-        if not shutil.which("disko"):
-            sys.exit("error: --apply requested, but 'disko' binary is not found on PATH")
+        disko_bin = shutil.which("disko")
         print(f"partitioning disks via disko: {disko_file}")
-        res = subprocess.run(["disko", "--mode", "disko", str(disko_file)])
+        if disko_bin:
+            res = subprocess.run(["disko", "--mode", "disko", str(disko_file)])
+        else:
+            res = subprocess.run(["nix-shell", "-p", "disko", "--run", f"disko --mode disko {disko_file}"])
         if res.returncode != 0:
             return res.returncode
         

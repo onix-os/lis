@@ -7,19 +7,22 @@ import pexpect
 from tools.e2e.colors import BOLD, print_stage_header, TICK, RESET
 
 
+PROMPTS = [r"\]#", r"root@nixos", r"nixos@nixos", r"# ", r"~# ", r"#", r"\$"]
+
+
 def finalize_live_installation(child: pexpect.spawn):
     """Universal post-installation handler for all distros: write birth certificate & execute chroot hooks."""
     print(f"\n  [{TICK}] Live installation finished! Writing LIS birth certificate and executing target chroot hooks...")
     child.sendline("mount /dev/vda3 /mnt 2>/dev/null || mount /dev/vda2 /mnt 2>/dev/null || mount /dev/vda1 /mnt 2>/dev/null || mount /dev/vda /mnt 2>/dev/null")
-    child.expect(["# ", "~# "], timeout=15)
+    child.expect(PROMPTS, timeout=15)
     child.sendline("mkdir -p /mnt/var/lib/lis /mnt/var/tmp && cp /mnt/seed/recipes/system.lis.json /mnt/var/lib/lis/system.lis.json 2>/dev/null || true")
-    child.expect(["# ", "~# "], timeout=15)
+    child.expect(PROMPTS, timeout=15)
     child.sendline("echo PRE_INSTALL > /mnt/var/tmp/pre_install.txt && echo POST_INSTALL > /mnt/var/tmp/post_install.txt")
-    child.expect(["# ", "~# "], timeout=15)
+    child.expect(PROMPTS, timeout=15)
     child.sendline("chroot /mnt /bin/sh -c 'echo CHROOT_HOOK > /var/tmp/chroot_hook.txt && echo USER_POST_INSTALL > /var/tmp/user_hook.txt' 2>/dev/null || true")
-    child.expect(["# ", "~# "], timeout=15)
+    child.expect(PROMPTS, timeout=15)
     child.sendline("umount /mnt 2>/dev/null || true")
-    child.expect(["# ", "~# "], timeout=15)
+    child.expect(PROMPTS, timeout=15)
     child.sendline("poweroff")
     child.expect(pexpect.EOF, timeout=60)
 
@@ -134,15 +137,15 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk:
         time.sleep(1)
         child.sendline("")
         print(f"\n  [{TICK}] Waiting for NixOS shell prompt...")
-        child.expect(["nixos@nixos", "root@nixos", "login:", "$ ", "# "], timeout=180)
+        child.expect([r"nixos@nixos", r"root@nixos", r"login:", r"\$", r"#"], timeout=180)
         child.sendline("sudo su -")
-        child.expect(["# ", "~# "], timeout=30)
+        child.expect([r"root@nixos", r"\]#", r"#"], timeout=30)
         print(f"\n  [{TICK}] Mounting LIS seed volume (/dev/vdb)...")
         child.sendline("mkdir -p /mnt/seed && mount /dev/vdb /mnt/seed")
-        child.expect(["# ", "~# "], timeout=30)
+        child.expect([r"root@nixos", r"\]#", r"#"], timeout=30)
         print(f"\n  [{TICK}] Executing NixOS applier via nix-shell...")
-        child.sendline("nix-shell -p python3 --run 'python3 /mnt/seed/unattended/lis2nixos.py /mnt/seed/recipes/system.lis.json --apply'")
-        child.expect(["# ", "~# "], timeout=300)
+        child.sendline("nix-shell -p python3Minimal --run 'python3 /mnt/seed/unattended/lis2nixos.py /mnt/seed/recipes/system.lis.json --apply'")
+        child.expect([r"root@nixos", r"\]#", r"#"], timeout=600)
         finalize_live_installation(child)
     elif distro == "ubuntu":
         print(f"\n  [{TICK}] Sending Enter to Ubuntu GRUB bootloader...")
