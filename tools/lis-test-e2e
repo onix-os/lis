@@ -4,7 +4,7 @@
 Usage: lis-test-e2e --distro nixos|ubuntu|arch|fedora|suse|debian|alpine [--iso ISO_PATH] [--recipe RECIPE.lis.json]
 
 Downloads distribution ISOs automatically to /tmp/ if not present, builds FAT32 seed volumes,
-runs QEMU installer VMs, and inspects installed disks with ANSI colored checklists.
+runs QEMU installer VMs with pexpect serial automation, and inspects installed disks with ANSI colored checklists.
 """
 
 import argparse
@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import pexpect
 
 # ANSI Color Utilities
 RESET = "\033[0m"
@@ -32,7 +33,6 @@ TICK = f"{GREEN}✓{RESET}"
 CROSS = f"{RED}✗{RESET}"
 WARN_ICON = f"{YELLOW}⚠{RESET}"
 
-# Official ISO Mirror URLs
 DISTRO_ISOS = {
     "alpine": {
         "url": "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/alpine-standard-3.21.3-x86_64.iso",
@@ -86,7 +86,6 @@ def download_iso_if_missing(distro: str) -> pathlib.Path:
 
     tmp_iso = pathlib.Path("/tmp") / meta["file"]
 
-    # Check local fallback path first
     local_down = pathlib.Path("/home/bresilla/down")
     for f in local_down.glob(f"*{distro}*.iso"):
         print(f"  [{TICK}] Found existing local ISO: {BOLD}{f}{RESET}")
@@ -108,6 +107,47 @@ def download_iso_if_missing(distro: str) -> pathlib.Path:
     urllib.request.urlretrieve(url, tmp_iso, reporthook=_progress)
     print(f"\n  [{TICK}] Download complete: {BOLD}{tmp_iso}{RESET} ({tmp_iso.stat().st_size / 1024 / 1024:.1f}MB)")
     return tmp_iso
+
+
+def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk: pathlib.Path, iso_path: pathlib.Path, ram: str):
+    """Launch QEMU with pexpect serial automation to trigger the distro installer."""
+    print_stage_header(2, f"Executing {distro.upper()} Installer in QEMU Serial Console")
+
+    qemu_cmd = f"qemu-system-x86_64 -enable-kvm -m {ram} -smp 4 -cpu host -drive file={target_disk},if=virtio,format=qcow2 -drive file={seed_disk},if=virtio,format=raw -cdrom {iso_path} -boot order=d -nographic"
+    print(f"  [{TICK}] Spawning QEMU VM serial controller...")
+
+    child = pexpect.spawn(qemu_cmd, encoding="utf-8", timeout=300)
+    child.logfile_read = sys.stdout
+
+    if distro == "alpine":
+        print(f"\n  [{TICK}] Waiting for Alpine login prompt...")
+        child.expect(["login:", "localhost login:", "# "], timeout=120)
+        child.sendline("root")
+        child.expect(["# ", "~# "], timeout=30)
+        
+        print(f"\n  [{TICK}] Mounting LIS seed volume (/dev/vdb)...")
+        child.sendline("mkdir -p /mnt/seed && mount /dev/vdb /mnt/seed")
+        child.expect(["# ", "~# "], timeout=30)
+        
+        print(f"\n  [{TICK}] Executing Alpine automated installer (setup-alpine -f /mnt/seed/answers)...")
+        child.sendline("setup-alpine -f /mnt/seed/answers")
+        child.expect(["Installation is complete", "reboot", "# ", "~# "], timeout=180)
+
+        print(f"\n  [{TICK}] Live installation finished! Powering off VM...")
+        child.sendline("poweroff")
+        child.expect(pexpect.EOF, timeout=60)
+
+    elif distro == "nixos":
+        print(f"\n  [{TICK}] Waiting for NixOS shell prompt...")
+        child.expect(["root@nixos", "nixos@nixos", "# "], timeout=180)
+        child.sendline("mount /dev/vdb /mnt && python3 /mnt/recipes/system.lis.json")
+        child.expect(["# ", "~# "], timeout=300)
+        child.sendline("poweroff")
+        child.expect(pexpect.EOF, timeout=60)
+    else:
+        print(f"\n  [{TICK}] Running generic QEMU installer wait for {distro}...")
+        time.sleep(5)
+        child.close()
 
 
 def verify_installed_disk(target_disk: pathlib.Path, recipe_data: dict) -> bool:
@@ -225,8 +265,6 @@ def main() -> int:
         return 0
 
     # STAGE 2: AUTOMATED ISO RESOLUTION & SEED GENERATION
-    print_stage_header(2, "ISO Resolution, Seed Generation & QEMU Launch")
-    
     iso_path = args.iso or download_iso_if_missing(args.distro)
 
     if target_disk.exists():
@@ -238,34 +276,7 @@ def main() -> int:
     subprocess.run([sys.executable, str(make_seed), str(recipe_path), "--out", str(seed_disk), "--unattended"], check=True)
     print(f"  [{TICK}] Created FAT32 LIS seed volume image: {BOLD}{seed_disk}{RESET}")
 
-    APPLIER_MAP = {
-        "nixos": "lis2nixos.py",
-        "arch": "lis2archinstall.py",
-        "ubuntu": "lis2autoinstall.py",
-        "fedora": "lis2kickstart.py",
-        "suse": "lis2agama.py",
-        "debian": "lis2debian.py",
-        "alpine": "lis2alpine.py",
-    }
-    applier_filename = APPLIER_MAP.get(args.distro, f"lis2{args.distro}.py")
-    applier_script = pathlib.Path(__file__).resolve().parent / "appliers" / applier_filename
-    print(f"  [{TICK}] Applier Script: {BOLD}{applier_script}{RESET}")
-
-    qemu_cmd = [
-        "qemu-system-x86_64",
-        "-enable-kvm",
-        "-m", args.ram,
-        "-smp", "4",
-        "-cpu", "host",
-        "-drive", f"file={target_disk},if=virtio,format=qcow2",
-        "-drive", f"file={seed_disk},if=virtio,format=raw",
-        "-cdrom", str(iso_path),
-        "-boot", "order=d",
-        "-nographic",
-    ]
-
-    print(f"\n{BOLD}Executing Live ISO in QEMU...{RESET}")
-    print(f"{GRAY}Command:{RESET} {' '.join(qemu_cmd[:8])} ...")
+    run_stage2_qemu_installer(args.distro, target_disk, seed_disk, iso_path, args.ram)
 
     # STAGE 3: POST-INSTALL VERIFICATION
     verify_installed_disk(target_disk, recipe_data)
