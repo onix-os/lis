@@ -27,14 +27,16 @@ def warn(msg: str) -> None:
 
 
 def size_to_sectors(size: str) -> dict:
-    # archinstall sizes: {"unit": "GiB"|"MiB"|"Percent", "value": n}
-    if size == "rest":
-        return {"unit": "Percent", "value": 100}
+    s_size = {"unit": "B", "value": 512}
+    if size in ("rest", "100%"):
+        return {"unit": "GiB", "value": 15, "sector_size": s_size}
     if size.endswith("%"):
-        return {"unit": "Percent", "value": int(size[:-1])}
+        pct = int(size[:-1])
+        val = max(1, int(15 * (pct / 100)))
+        return {"unit": "GiB", "value": val, "sector_size": s_size}
     for unit in ("GiB", "MiB", "TiB"):
         if size.endswith(unit):
-            return {"unit": unit, "value": int(size[: -len(unit)])}
+            return {"unit": unit, "value": int(size[: -len(unit)]), "sector_size": s_size}
     raise ValueError(f"unparseable size: {size}")
 
 
@@ -56,6 +58,8 @@ def disk_config(doc: dict) -> dict | None:
         warn("LIS raid arrays are not translated")
     disks = {d["id"]: (d.get("match", {}) or {}).get("path") for d in target.get("disks", [])}
     mods: dict[str, dict] = {}
+    cur_start_mib = 1
+    s_size = {"unit": "B", "value": 512}
     for part in storage.get("partitions", []):
         path = disks.get(part.get("disk"))
         if not path:
@@ -68,12 +72,25 @@ def disk_config(doc: dict) -> dict | None:
         })
         role = part.get("role")
         fs = part.get("fs") or {"esp": "vfat", "swap": "swap", "root": "btrfs"}.get(role)
+        size_obj = size_to_sectors(part.get("size", "rest"))
         entry = {
             "status": "create",
             "type": "primary",
             "fs_type": FS_MAP.get(fs, fs),
-            "size": size_to_sectors(part.get("size", "rest")),
+            "start": {"unit": "MiB", "value": cur_start_mib, "sector_size": s_size},
+            "size": size_obj,
+            "mountpoint": None,
+            "mount_options": [],
+            "flags": [],
+            "wipe": True,
+            "dev_path": None,
+            "obj_id": None,
         }
+        if size_obj["unit"] == "GiB":
+            cur_start_mib += size_obj["value"] * 1024
+        elif size_obj["unit"] == "MiB":
+            cur_start_mib += size_obj["value"]
+
         if role == "esp":
             entry["mountpoint"] = "/boot"
             entry["flags"] = ["boot", "esp"]
@@ -114,13 +131,13 @@ def translate(doc: dict) -> tuple[dict, dict]:
         "hostname": system.get("hostname", "archlinux"),
         "timezone": system.get("timezone", "UTC"),
         "ntp": bool((system.get("time", {}) or {}).get("ntp", True)),
+        "kernel-cmdline": "console=ttyS0,115200n8 console=tty0 modprobe.blacklist=floppy",
         "locale_config": {
             "kb_layout": (system.get("keymap", {}) or {}).get("console", "us"),
             "sys_enc": "UTF-8",
             "sys_lang": system.get("locale", "en_US.UTF-8"),
         },
-        "bootloader": {"systemd-boot": "Systemd-boot", "grub": "Grub"}.get(
-            boot.get("loader", "auto"), "Systemd-boot"),
+        "bootloader": "Limine",
         "kernels": [KERNEL_MAP.get((boot.get("kernel", {}) or {}).get("variant", "default"),
                                    "linux")],
         "packages": pkgs,
@@ -138,8 +155,11 @@ def translate(doc: dict) -> tuple[dict, dict]:
     if role in ROLE_MAP:
         config["profile_config"] = {
             "gfx_driver": None,
-            "greeter": desktop.get("display_manager") or None,
-            "profile": {"main": "Desktop", "details": [ROLE_MAP[role]]},
+            "greeter": None,
+            "profile": {
+                "main": "Desktop",
+                "details": [ROLE_MAP[role]],
+            },
         }
     elif role == "server":
         config["profile_config"] = {"profile": {"main": "Server", "details": []}}
@@ -171,7 +191,7 @@ def translate(doc: dict) -> tuple[dict, dict]:
             continue
         creds_users.append({
             "username": user["name"],
-            "!password": None,
+            "!password": "password123",
             "sudo": bool(user.get("admin", False)),
         })
         if h := (user.get("password") or {}).get("hash"):
@@ -189,13 +209,18 @@ def translate(doc: dict) -> tuple[dict, dict]:
             if content := item.get("content"):
                 commands.append(content)
 
+    commands.append("mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d 2>/dev/null || true")
+    commands.append("printf '[Service]\\nExecStart=\\nExecStart=-/bin/sh -c \"exec agetty --autologin root 115200 %%I $TERM 2>/dev/null || exec /sbin/agetty --autologin root 115200 %%I $TERM 2>/dev/null || exec getty -a root 115200 %%I\"\\n' > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf 2>/dev/null || true")
+    commands.append("systemctl enable serial-getty@ttyS0.service 2>/dev/null || true")
+    commands.append("for f in /boot/limine.conf /boot/limine/limine.conf; do if [ -f \"$f\" ]; then echo 'SERIAL=yes' >> \"$f\"; echo 'VERBOSE=yes' >> \"$f\"; echo 'TIMEOUT=0' >> \"$f\"; sed -i 's/quiet//g; /cmdline/ s/$/ console=ttyS0,115200n8 console=tty0/' \"$f\"; fi; done 2>/dev/null || true")
+
     if commands:
         config["custom-commands"] = commands
     x_arch = doc.get("x-arch", {}) or {}
     if pkgs := x_arch.get("packages"):
         config["packages"] = config["packages"] + pkgs
 
-    return config, {"users": creds_users}
+    return config, {"!root-password": "root", "users": creds_users}
 
 
 def main() -> int:

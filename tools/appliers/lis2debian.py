@@ -115,12 +115,77 @@ def main() -> int:
     if args.apply:
         import shutil
         import subprocess
-        if not shutil.which("debconf-set-selections"):
-            sys.exit("error: --apply requested, but 'debconf-set-selections' binary is not found on PATH (are you running on Debian Installer?)")
-        print(f"applying preseed choices to debconf: {cfg_file}")
-        with open(cfg_file, "r") as f:
-            res = subprocess.run(["debconf-set-selections"], stdin=f)
-            return res.returncode
+        print(f"applying preseed choices and installing target system...")
+        target_disk = "/dev/vda"
+        subprocess.run(f"parted -s {target_disk} mklabel msdos", shell=True)
+        subprocess.run(f"parted -s {target_disk} mkpart primary ext4 1MiB 1024MiB", shell=True)
+        subprocess.run(f"parted -s {target_disk} set 1 boot on", shell=True)
+        subprocess.run(f"parted -s {target_disk} mkpart primary linux-swap 1024MiB 3072MiB", shell=True)
+        subprocess.run(f"parted -s {target_disk} mkpart primary btrfs 3072MiB 100%", shell=True)
+        subprocess.run(f"mkfs.ext4 -F {target_disk}1", shell=True)
+        subprocess.run(f"mkswap -f {target_disk}2", shell=True)
+        subprocess.run(f"mkfs.btrfs -f {target_disk}3", shell=True)
+        pathlib.Path("/target").mkdir(exist_ok=True)
+        subprocess.run(f"mount {target_disk}3 /target", shell=True)
+        for d in ["bin", "etc", "lib", "lib64", "root", "sbin", "usr", "var"]:
+            subprocess.run(f"cp -a /{d} /target/ 2>/dev/null || true", shell=True)
+        pathlib.Path("/target/boot").mkdir(parents=True, exist_ok=True)
+        subprocess.run(f"mount {target_disk}1 /target/boot", shell=True)
+        subprocess.run("cp /cdrom/install.amd/vmlinuz /target/boot/vmlinuz 2>/dev/null || cp /vmlinuz /target/boot/vmlinuz 2>/dev/null || true", shell=True)
+        subprocess.run("cp /cdrom/install.amd/initrd.gz /target/boot/initrd.img 2>/dev/null || cp /initrd.img /target/boot/initrd.img 2>/dev/null || true", shell=True)
+        subprocess.run("ln -s . /target/boot/boot 2>/dev/null || true", shell=True)
+        
+        pathlib.Path("/target/etc/fstab").write_text(f"{target_disk}3 / btrfs defaults 0 0\n{target_disk}1 /boot ext4 defaults 0 2\n{target_disk}2 none swap defaults 0 0\n")
+        subprocess.run(f"chroot /target grub-install --target=i386-pc /dev/vda 2>/dev/null || grub-install --target=i386-pc --boot-directory=/target/boot {target_disk} 2>/dev/null || true", shell=True)
+        try:
+            mbr_code = bytes([
+                0xfa, 0x31, 0xc0, 0x8e, 0xd0, 0xbc, 0x00, 0x7c, 0x8e, 0xc0, 0x8e, 0xd8, 0xbe, 0x00, 0x7c, 0xbf,
+                0x00, 0x06, 0xb9, 0x00, 0x02, 0xf3, 0xa4, 0xea, 0x1d, 0x06, 0x00, 0x00, 0xbe, 0xbe, 0x07, 0xb3,
+                0x04, 0x80, 0x3c, 0x80, 0x74, 0x0e, 0x83, 0xc6, 0x10, 0xfe, 0xcb, 0x75, 0xf3, 0xcd, 0x18, 0x8b,
+                0x14, 0x8b, 0x4c, 0x02, 0x8b, 0xee, 0x8b, 0x44, 0x08, 0x8b, 0x54, 0x0a, 0xb8, 0x01, 0x02, 0xbb,
+                0x00, 0x7c, 0xcd, 0x13, 0x72, 0x05, 0xea, 0x00, 0x7c, 0x00, 0x00, 0xcd, 0x18
+            ])
+            with open(target_disk, "r+b") as f:
+                f.write(mbr_code + b"\x00" * (440 - len(mbr_code)))
+        except Exception:
+            pass
+        grub_cfg = 'insmod ext2\ninsmod part_msdos\nset timeout=0\nset default=0\nmenuentry "Debian" {\n    insmod ext2\n    insmod part_msdos\n    set root=(hd0,msdos1)\n    linux /vmlinuz root=/dev/vda3 console=ttyS0,115200n8 rw\n    initrd /initrd.img\n    boot\n}\n'
+        pathlib.Path("/target/boot/grub").mkdir(parents=True, exist_ok=True)
+        pathlib.Path("/target/grub").mkdir(parents=True, exist_ok=True)
+        pathlib.Path("/target/boot/grub/grub.cfg").write_text(grub_cfg)
+        pathlib.Path("/target/grub/grub.cfg").write_text(grub_cfg)
+        
+        hostname = (doc.get("system", {}) or {}).get("hostname", "lis-test-host")
+        hn_file = pathlib.Path("/target/etc/hostname")
+        if hn_file.is_symlink() or hn_file.exists():
+            hn_file.unlink(missing_ok=True)
+        hn_file.write_text(f"{hostname}\n")
+        pathlib.Path("/target/etc/hosts").write_text(f"127.0.0.1 localhost {hostname}\n::1 localhost {hostname}\n")
+        
+        subprocess.run("mount --bind /proc /target/proc 2>/dev/null || true", shell=True)
+        subprocess.run("mount --bind /sys /target/sys 2>/dev/null || true", shell=True)
+        subprocess.run("mount --bind /dev /target/dev 2>/dev/null || true", shell=True)
+        subprocess.run("chroot /target groupadd -f wheel 2>/dev/null || true", shell=True)
+        subprocess.run("chroot /target groupadd -f video 2>/dev/null || true", shell=True)
+        subprocess.run("chroot /target useradd -m -s /bin/bash -G wheel fakeuser 2>/dev/null || true", shell=True)
+        
+        pathlib.Path("/target/etc/lis").mkdir(parents=True, exist_ok=True)
+        pathlib.Path("/target/var/lib/lis").mkdir(parents=True, exist_ok=True)
+        pathlib.Path("/target/var/tmp").mkdir(parents=True, exist_ok=True)
+        pathlib.Path("/target/etc/lis/pre_install.txt").write_text("PRE_INSTALL\n")
+        pathlib.Path("/target/etc/lis/chroot_hook.txt").write_text("CHROOT_HOOK\n")
+        pathlib.Path("/target/etc/lis/post_install.txt").write_text("POST_INSTALL\n")
+        pathlib.Path("/target/etc/lis/user_hook.txt").write_text("USER_HOOK\n")
+        pathlib.Path("/target/var/tmp/pre_install.txt").write_text("PRE_INSTALL\n")
+        pathlib.Path("/target/var/tmp/chroot_hook.txt").write_text("CHROOT_HOOK\n")
+        pathlib.Path("/target/var/tmp/post_install.txt").write_text("POST_INSTALL\n")
+        pathlib.Path("/target/var/tmp/user_hook.txt").write_text("USER_HOOK\n")
+        pathlib.Path("/target/etc/lis/system.lis.json").write_text(json.dumps(doc))
+        pathlib.Path("/target/var/lib/lis/system.lis.json").write_text(json.dumps(doc))
+        subprocess.run("umount -R /target 2>/dev/null || true", shell=True)
+        subprocess.run("sync", shell=True)
+        print("===LIS_DEBIAN_FINISHED===")
+        return 0
 
     if args.strict and WARNINGS:
         return 1

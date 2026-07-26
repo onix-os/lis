@@ -56,7 +56,7 @@ def run_single_distro_test(args) -> int:
 
     if args.verify_only:
         verify_installed_disk(target_disk, recipe_data)
-        return 0
+        return run_stage4_live_guest_verification(args, target_disk, recipe_data)
 
     # STAGE 2: AUTOMATED ISO RESOLUTION & SEED GENERATION
     iso_path = args.iso or download_iso_if_missing(args.distro)
@@ -93,6 +93,7 @@ def main() -> int:
         distros = ["alpine", "nixos", "ubuntu", "arch", "fedora", "suse", "debian"]
         summary = {}
         for d in distros:
+            subprocess.run("rm -f /tmp/*.log /tmp/*.qcow2 /tmp/*.img", shell=True)
             print(f"\n{BOLD}{CYAN}============================================================{RESET}")
             print(f"{BOLD}{CYAN}  STARTING E2E VM TEST SUITE FOR DISTRO: {d.upper()}{RESET}")
             print(f"{BOLD}{CYAN}============================================================{RESET}")
@@ -100,6 +101,7 @@ def main() -> int:
             sub_args.distro = d
             res = run_single_distro_test(sub_args)
             summary[d] = res
+            subprocess.run(f"rm -f /tmp/e2e-{d}-target.qcow2 /tmp/e2e-LIS-{d}.img /tmp/*.log", shell=True)
         
         print(f"\n\n{BOLD}{CYAN}╔══════════════════════════════════════════════════════════════════════╗{RESET}")
         print(f"{BOLD}{CYAN}║           LIS MULTI-DISTRO END-TO-END SUITE RESULTS MATRIX           ║{RESET}")

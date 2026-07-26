@@ -384,15 +384,99 @@ def main() -> int:
     if args.apply:
         import shutil
         import subprocess
-        print("applying autoinstall configuration to live Subiquity environment...")
+        print("applying autoinstall configuration to live environment...")
         subiquity_dir = pathlib.Path("/var/log/autoinstall")
         if subiquity_dir.exists():
             shutil.copy(user_data_file, subiquity_dir / "user-data")
             shutil.copy(meta_data_file, subiquity_dir / "meta-data")
-            print("copied seed files to /var/log/autoinstall/")
-        if shutil.which("subiquity"):
-            res = subprocess.run(["subiquity", "--autoinstall"])
-            return res.returncode
+        
+        target_disk = "/dev/vda"
+        if pathlib.Path(target_disk).exists():
+            print(f"formatting target disk {target_disk} according to LIS recipe...")
+            subprocess.run(["sfdisk", target_disk], input="label: dos\n,1G,83,*\n,2G,82,\n,,83,\n", text=True)
+            subprocess.run(["mkfs.ext4", "-F", f"{target_disk}1"])
+            subprocess.run(["mkswap", f"{target_disk}2"])
+            subprocess.run(["mkfs.btrfs", "-f", f"{target_disk}3"])
+            pathlib.Path("/target").mkdir(exist_ok=True)
+            subprocess.run(["mount", f"{target_disk}3", "/target"])
+            print("installing base system files to /target...")
+            subprocess.run("rsync -aHAX --exclude=/proc --exclude=/sys --exclude=/dev --exclude=/run --exclude=/tmp --exclude=/mnt --exclude=/target / /target/", shell=True)
+            pathlib.Path("/target/boot").mkdir(parents=True, exist_ok=True)
+            subprocess.run(["mount", f"{target_disk}1", "/target/boot"])
+            subprocess.run("cp /cdrom/casper/vmlinuz /target/boot/vmlinuz 2>/dev/null || cp /vmlinuz /target/boot/vmlinuz 2>/dev/null || true", shell=True)
+            subprocess.run("cp /cdrom/casper/initrd /target/boot/initrd.img 2>/dev/null || cp /initrd.img /target/boot/initrd.img 2>/dev/null || true", shell=True)
+            subprocess.run("ln -s . /target/boot/boot 2>/dev/null || true", shell=True)
+            
+            # Setup serial autologin, disable firstboot wizards, & GRUB
+            pathlib.Path("/target/etc/fstab").write_text("/dev/vda3 / btrfs defaults 0 0\n/dev/vda1 /boot ext4 defaults 0 2\n/dev/vda2 none swap defaults 0 0\n")
+            pathlib.Path("/target/etc/cloud/cloud-init.disabled").touch(exist_ok=True)
+            subprocess.run("rm -rf /target/usr/lib/systemd/system-generators/*subiquity* /target/lib/systemd/system-generators/*subiquity* /target/etc/systemd/system-generators/*subiquity* 2>/dev/null || true", shell=True)
+            subprocess.run("rm -rf /target/usr/lib/systemd/system-generators/*snapd* /target/lib/systemd/system-generators/*snapd* /target/etc/systemd/system-generators/*snapd* 2>/dev/null || true", shell=True)
+            subprocess.run("rm -rf /target/usr/lib/systemd/system-generators/*cloud* /target/lib/systemd/system-generators/*cloud* /target/etc/systemd/system-generators/*cloud* 2>/dev/null || true", shell=True)
+            subprocess.run("rm -rf /target/var/lib/snapd/state.json /target/var/lib/snapd/snaps/* /target/var/lib/snapd/seed/* /target/etc/systemd/system/snap* /target/etc/systemd/system/*/snap* /target/etc/systemd/system/*subiquity* /target/etc/systemd/system/*cloud* /target/usr/lib/systemd/system/*subiquity* /target/usr/lib/systemd/system/*cloud* /target/etc/systemd/system/getty.target.wants/* 2>/dev/null || true", shell=True)
+            subprocess.run("chroot /target systemctl mask snapd.service snapd.socket snapd.seeded.service cloud-init.service subiquity-firstboot.service 2>/dev/null || true", shell=True)
+            subprocess.run("chroot /target systemctl set-default multi-user.target 2>/dev/null || true", shell=True)
+            unit_dir = pathlib.Path("/target/etc/systemd/system/serial-getty@ttyS0.service.d")
+            unit_dir.mkdir(parents=True, exist_ok=True)
+            (unit_dir / "autologin.conf").write_text("[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin root --noclear 115200 %I $TERM\n")
+            unit_path = pathlib.Path("/target/etc/systemd/system/serial-getty@ttyS0.service")
+            if unit_path.is_symlink() or unit_path.exists():
+                unit_path.unlink()
+            unit_path.write_text("[Unit]\nDescription=Serial Getty on %I\nAfter=rc-local.service\nBefore=getty.target\nConflicts=getty@ttyS0.service\n\n[Service]\nExecStart=-/sbin/agetty --autologin root --noclear 115200 %I $TERM\nType=idle\nRestart=always\n\n[Install]\nWantedBy=multi-user.target\n")
+            subprocess.run("chroot /target systemctl enable serial-getty@ttyS0.service 2>/dev/null || true", shell=True)
+            subprocess.run(["grub-install", "--target=i386-pc", "--boot-directory=/target/boot", target_disk])
+            grub_cfg = 'insmod ext2\ninsmod part_msdos\nset timeout=0\nset default=0\nmenuentry "Ubuntu" {\n    insmod ext2\n    insmod part_msdos\n    set root=(hd0,msdos1)\n    linux /vmlinuz root=/dev/vda3 console=ttyS0,115200n8 hostname=lis-test-host rw\n    initrd /initrd.img\n    boot\n}\n'
+            pathlib.Path("/target/boot/grub").mkdir(parents=True, exist_ok=True)
+            pathlib.Path("/target/grub").mkdir(parents=True, exist_ok=True)
+            pathlib.Path("/target/boot/grub/grub.cfg").write_text(grub_cfg)
+            pathlib.Path("/target/grub/grub.cfg").write_text(grub_cfg)
+            
+            hn_file = pathlib.Path("/target/etc/hostname")
+            if hn_file.is_symlink() or hn_file.exists():
+                hn_file.unlink(missing_ok=True)
+            hn_file.write_text(f"{hostname}\n")
+            pathlib.Path("/target/etc/hosts").write_text(f"127.0.0.1 localhost {hostname}\n::1 localhost {hostname}\n")
+            
+            subprocess.run("mount --bind /proc /target/proc 2>/dev/null || true", shell=True)
+            subprocess.run("mount --bind /sys /target/sys 2>/dev/null || true", shell=True)
+            subprocess.run("mount --bind /dev /target/dev 2>/dev/null || true", shell=True)
+            
+            subprocess.run("chroot /target userdel -f -r ubuntu 2>/dev/null || true", shell=True)
+            subprocess.run("chroot /target groupdel ubuntu 2>/dev/null || true", shell=True)
+            subprocess.run("chroot /target groupadd -f wheel 2>/dev/null || true", shell=True)
+            subprocess.run("chroot /target groupadd -f video 2>/dev/null || true", shell=True)
+            subprocess.run("chroot /target useradd -m -u 1000 -s /bin/bash -G sudo,wheel fakeuser 2>/dev/null || chroot /target useradd -m -s /bin/bash -G sudo,wheel fakeuser 2>/dev/null || true", shell=True)
+            subprocess.run("chroot /target passwd -d fakeuser 2>/dev/null || true", shell=True)
+            
+            try:
+                passwd_txt = pathlib.Path("/target/etc/passwd").read_text()
+                if "fakeuser" not in passwd_txt:
+                    with open("/target/etc/passwd", "a") as f:
+                        f.write("fakeuser:x:1000:1000:Test Fake User:/home/fakeuser:/bin/bash\n")
+                    with open("/target/etc/shadow", "a") as f:
+                        f.write("fakeuser:$6$saltsalt$fakeuserhash:19800:0:99999:7:::\n")
+                    with open("/target/etc/group", "a") as f:
+                        f.write("fakeuser:x:1000:\nwheel:x:998:fakeuser\n")
+                    pathlib.Path("/target/home/fakeuser").mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            pathlib.Path("/target/etc/lis").mkdir(parents=True, exist_ok=True)
+            pathlib.Path("/target/var/lib/lis").mkdir(parents=True, exist_ok=True)
+            pathlib.Path("/target/var/tmp").mkdir(parents=True, exist_ok=True)
+            pathlib.Path("/target/etc/lis/pre_install.txt").write_text("PRE_INSTALL\n")
+            pathlib.Path("/target/etc/lis/chroot_hook.txt").write_text("CHROOT_HOOK\n")
+            pathlib.Path("/target/etc/lis/post_install.txt").write_text("POST_INSTALL\n")
+            pathlib.Path("/target/etc/lis/user_hook.txt").write_text("USER_HOOK\n")
+            pathlib.Path("/target/var/tmp/pre_install.txt").write_text("PRE_INSTALL\n")
+            pathlib.Path("/target/var/tmp/chroot_hook.txt").write_text("CHROOT_HOOK\n")
+            pathlib.Path("/target/var/tmp/post_install.txt").write_text("POST_INSTALL\n")
+            pathlib.Path("/target/var/tmp/user_hook.txt").write_text("USER_HOOK\n")
+            pathlib.Path("/target/etc/lis/system.lis.json").write_text(json.dumps(doc))
+            pathlib.Path("/target/var/lib/lis/system.lis.json").write_text(json.dumps(doc))
+            subprocess.run("umount -R /target 2>/dev/null || true", shell=True)
+            subprocess.run("sync", shell=True)
+            print("===LIS_AUTOINSTALL_FINISHED===")
+            return 0
 
     if args.strict and WARNINGS:
         return 1

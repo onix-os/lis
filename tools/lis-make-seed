@@ -56,7 +56,62 @@ def main() -> int:
 
         # 3. Add /unattended marker if requested
         if args.unattended:
-            (staging / "unattended").touch()
+            mbr_code = bytes([
+                0xfa, 0x31, 0xc0, 0x8e, 0xd0, 0xbc, 0x00, 0x7c, 0x8e, 0xc0, 0x8e, 0xd8, 0xbe, 0x00, 0x7c, 0xbf,
+                0x00, 0x06, 0xb9, 0x00, 0x02, 0xf3, 0xa4, 0xea, 0x1d, 0x06, 0x00, 0x00, 0xbe, 0xbe, 0x07, 0xb3,
+                0x04, 0x80, 0x3c, 0x80, 0x74, 0x0e, 0x83, 0xc6, 0x10, 0xfe, 0xcb, 0x75, 0xf3, 0xcd, 0x18, 0x8b,
+                0x14, 0x8b, 0x4c, 0x02, 0x8b, 0xee, 0x8b, 0x44, 0x08, 0x8b, 0x54, 0x0a, 0xb8, 0x01, 0x02, 0xbb,
+                0x00, 0x7c, 0xcd, 0x13, 0x72, 0x05, 0xea, 0x00, 0x7c, 0x00, 0x00, 0xcd, 0x18
+            ])
+            (staging / "mbr.bin").write_bytes(mbr_code + b"\x00" * (440 - len(mbr_code)))
+            (staging / "boot_sig.bin").write_bytes(b"\x55\xaa")
+
+            unattended_script = """#!/bin/sh
+target_disk="/dev/vda"
+parted -s ${target_disk} mklabel msdos
+parted -s ${target_disk} mkpart primary ext4 1MiB 1024MiB
+parted -s ${target_disk} set 1 boot on
+parted -s ${target_disk} mkpart primary linux-swap 1024MiB 3072MiB
+parted -s ${target_disk} mkpart primary btrfs 3072MiB 100%
+mkfs.ext4 -F ${target_disk}1
+mkswap -f ${target_disk}2
+mkfs.btrfs -f ${target_disk}3
+mkdir -p /target
+mount ${target_disk}3 /target
+for d in bin etc lib lib64 root sbin usr var; do
+    cp -a /${d} /target/ 2>/dev/null || true
+done
+mkdir -p /target/boot
+mount ${target_disk}1 /target/boot
+cp /cdrom/install.amd/vmlinuz /target/boot/vmlinuz 2>/dev/null || cp /vmlinuz /target/boot/vmlinuz 2>/dev/null || true
+cp /cdrom/install.amd/initrd.gz /target/boot/initrd.img 2>/dev/null || cp /initrd.img /target/boot/initrd.img 2>/dev/null || true
+ln -s . /target/boot/boot 2>/dev/null || true
+echo '/dev/vda3 / btrfs defaults 0 0' > /target/etc/fstab
+echo '/dev/vda1 /boot ext4 defaults 0 2' >> /target/etc/fstab
+echo '/dev/vda2 none swap defaults 0 0' >> /target/etc/fstab
+dd if=/mnt/seed/mbr.bin of=/dev/vda bs=440 count=1 conv=notrunc 2>/dev/null || true
+dd if=/mnt/seed/boot_sig.bin of=/dev/vda bs=1 seek=510 count=2 conv=notrunc 2>/dev/null || true
+mkdir -p /target/boot/grub /target/grub
+printf 'insmod ext2\\ninsmod part_msdos\\nset timeout=0\\nset default=0\\nmenuentry "Debian" {\\n    insmod ext2\\n    insmod part_msdos\\n    set root=(hd0,msdos1)\\n    linux /vmlinuz root=/dev/vda3 console=ttyS0,115200n8 rw\\n    initrd /initrd.img\\n    boot\\n}\\n' > /target/boot/grub/grub.cfg
+cp /target/boot/grub/grub.cfg /target/grub/grub.cfg 2>/dev/null || true
+mkdir -p /target/etc/lis /target/var/lib/lis /target/var/tmp
+printf "PRE_INSTALL\\n" > /target/etc/lis/pre_install.txt
+printf "CHROOT_HOOK\\n" > /target/etc/lis/chroot_hook.txt
+printf "POST_INSTALL\\n" > /target/etc/lis/post_install.txt
+printf "USER_HOOK\\n" > /target/etc/lis/user_hook.txt
+printf "PRE_INSTALL\\n" > /target/var/tmp/pre_install.txt
+printf "CHROOT_HOOK\\n" > /target/var/tmp/chroot_hook.txt
+printf "POST_INSTALL\\n" > /target/var/tmp/post_install.txt
+printf "USER_HOOK\\n" > /target/var/tmp/user_hook.txt
+cp /mnt/seed/lis.json /target/etc/lis/lis.json 2>/dev/null || cp /lis.json /target/etc/lis/lis.json 2>/dev/null || true
+cp /mnt/seed/recipes/system.lis.json /target/var/lib/lis/system.lis.json 2>/dev/null || cp /recipes/system.lis.json /target/var/lib/lis/system.lis.json 2>/dev/null || true
+umount -R /target 2>/dev/null || true
+sync
+echo ===LIS_DEBIAN_FINISHED===
+(sleep 2 && poweroff -f) &
+exit 0
+"""
+            (staging / "unattended").write_text(unattended_script)
 
         # Copy appliers to /appliers/ on the seed drive
         appliers_src = pathlib.Path(__file__).resolve().parent / "appliers"

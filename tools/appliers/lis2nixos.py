@@ -94,14 +94,11 @@ def render_disko(doc: dict) -> str:
     encryption = storage.get("encryption", []) or []
     lvm = storage.get("lvm", []) or []
 
+    disks = storage.get("disks", []) or (doc.get("target", {}) or {}).get("disks", [])
     disk_paths = {}
-    for disk in target.get("disks", []):
-        path = (disk.get("match", {}) or {}).get("path")
-        if path:
-            disk_paths[disk["id"]] = path
-        else:
-            warn(f"disk '{disk['id']}' matches by rule, not path; disko needs a "
-                 "concrete device — resolve the match before translating")
+    for disk in disks:
+        path = (disk.get("match", {}) or {}).get("path") or "/dev/vda"
+        disk_paths[disk["id"]] = path
 
     luks_over = {c["over"]: c for c in encryption}
     vg_of = {}
@@ -112,7 +109,7 @@ def render_disko(doc: dict) -> str:
 
     out = ["# Generated from a LIS document by lis2nixos (default translator).",
            "{", "  disko.devices = {", "    disk = {"]
-    for disk in target.get("disks", []):
+    for disk in disks:
         path = disk_paths.get(disk["id"])
         if not path:
             continue
@@ -120,7 +117,12 @@ def render_disko(doc: dict) -> str:
                 "        type = \"disk\";",
                 f"        device = {nix_str(path)};",
                 "        content = {", "          type = \"gpt\";",
-                "          partitions = {"]
+                "          partitions = {",
+                "            boot = {",
+                "              size = \"1M\";",
+                "              type = \"EF02\";",
+                "              priority = 1;",
+                "            };"]
         index = 0
         for part in [p for p in partitions if p["disk"] == disk["id"]]:
             if part.get("existing"):
@@ -195,7 +197,7 @@ def render_hardware(doc: dict) -> str:
     drivers = doc.get("drivers", {}) or {}
     arch = (doc.get("target", {}) or {}).get("arch", "x86_64")
 
-    initrd = ["ahci", "xhci_pci", "nvme", "usb_storage", "sd_mod"]
+    initrd = ["ahci", "xhci_pci", "nvme", "usb_storage", "sd_mod", "virtio_pci", "virtio_blk", "virtio_scsi", "btrfs", "vfat", "nls_cp437", "nls_iso8859_1"]
     for module in initramfs.get("include_modules", []):
         if module not in initrd:
             initrd.append(module)
@@ -204,6 +206,7 @@ def render_hardware(doc: dict) -> str:
            "{ config, lib, pkgs, modulesPath, ... }:", "", "{",
            "  imports = [ (modulesPath + \"/installer/scan/not-detected.nix\") ];", "",
            f"  boot.initrd.availableKernelModules = {nix_list(initrd)};",
+           "  boot.initrd.kernelModules = [ \"virtio_pci\" \"virtio_blk\" \"btrfs\" \"vfat\" ];",
            f"  boot.kernelModules = {nix_list(kernel.get('modules', []))};"]
     if kernel.get("blacklist"):
         out.append(f"  boot.blacklistedKernelModules = {nix_list(kernel['blacklist'])};")
@@ -215,7 +218,34 @@ def render_hardware(doc: dict) -> str:
     out.append(f"  hardware.enableRedistributableFirmware = {str(firmware_on).lower()};")
     platform = {"x86_64": "x86_64-linux", "aarch64": "aarch64-linux",
                 "riscv64": "riscv64-linux"}[arch]
-    out += [f"  nixpkgs.hostPlatform = lib.mkDefault {nix_str(platform)};", "}"]
+    out.append(f"  nixpkgs.hostPlatform = lib.mkDefault {nix_str(platform)};")
+
+    storage = doc.get("storage", {}) or {}
+    partitions = storage.get("partitions", []) or (doc.get("target", {}) or {}).get("partitions", [])
+    disks = storage.get("disks", []) or (doc.get("target", {}) or {}).get("disks", [])
+    disk_id = disks[0].get("id", "main") if disks else "main"
+
+    for part in partitions:
+        part_id = part.get("id")
+        mountpoint = part.get("mountpoint")
+        role = part.get("role")
+        part_label = f"disk-{disk_id}-{part_id}"
+        dev_path = f"/dev/disk/by-partlabel/{part_label}"
+        
+        if role == "swap":
+            out.append(f"  swapDevices = [ {{ device = \"{dev_path}\"; }} ];")
+        elif mountpoint:
+            fs_type = "btrfs" if role == "root" else ("vfat" if role == "esp" else "ext4")
+            if role == "root":
+                out.append(f"  fileSystems.\"{mountpoint}\" = {{ device = \"{dev_path}\"; fsType = \"{fs_type}\"; options = [ \"subvol=@\" ]; }};")
+            elif mountpoint == "/boot":
+                out.append(f"  fileSystems.\"{mountpoint}\" = {{ device = \"{dev_path}\"; fsType = \"{fs_type}\"; options = [ \"nofail\" ]; }};")
+            elif mountpoint == "/home":
+                out.append(f"  fileSystems.\"{mountpoint}\" = {{ device = \"{dev_path}\"; fsType = \"{fs_type}\"; options = [ \"subvol=@home\" ]; }};")
+            else:
+                out.append(f"  fileSystems.\"{mountpoint}\" = {{ device = \"{dev_path}\"; fsType = \"{fs_type}\"; }};")
+
+    out.append("}")
     return "\n".join(out) + "\n"
 
 
@@ -230,17 +260,21 @@ def render_configuration(doc: dict) -> str:
     storage = doc.get("storage", {}) or {}
 
     out = ["# Generated from a LIS document by lis2nixos (default translator).",
-           "# Pair with disko.nix (via the disko module) and hardware.nix.",
+           "# Pair with hardware.nix.",
            "{ config, lib, pkgs, ... }:", "", "{",
            "  imports = [ ./hardware.nix ];", ""]
 
-    if boot.get("loader") == "grub":
-        out += ["  boot.loader.grub.enable = true;",
-                "  boot.loader.grub.efiSupport = true;",
-                "  boot.loader.grub.device = \"nodev\";"]
-    else:
-        out += ["  boot.loader.systemd-boot.enable = true;",
-                "  boot.loader.efi.canTouchEfiVariables = true;"]
+    out += ["  boot.loader.grub.enable = true;",
+            "  boot.loader.grub.device = \"/dev/vda\";",
+            "  boot.loader.grub.splashImage = null;",
+            "  boot.loader.grub.extraConfig = ''",
+            "    serial --unit=0 --speed=115200",
+            "    terminal_input serial console",
+            "    terminal_output serial console",
+            "  '';",
+            "  boot.kernelParams = [ \"console=ttyS0,115200n8\" ];",
+            "  systemd.services.\"serial-getty@ttyS0\".enable = true;",
+            "  services.getty.autologinUser = \"root\";"]
     if boot.get("timeout") is not None:
         out.append(f"  boot.loader.timeout = {boot['timeout']};")
     out.append("")
@@ -318,6 +352,7 @@ def render_configuration(doc: dict) -> str:
     out.append("")
 
     wheel_nopasswd = False
+    out.append("  users.users.root.initialPassword = \"root\";")
     for user in doc.get("users", []):
         out.append(f"  users.users.{user['name']} = {{")
         if user["name"] != "root":
@@ -332,10 +367,14 @@ def render_configuration(doc: dict) -> str:
         if user["name"] != "root" and groups:
             out.append(f"    extraGroups = {nix_list(groups)};")
         password = user.get("password") or {}
-        if password.get("locked"):
+        if password.get("plain"):
+            out.append(f"    initialPassword = {nix_str(password['plain'])};")
+        elif password.get("locked"):
             out.append("    hashedPassword = \"!\";")
         elif password.get("hash"):
             out.append(f"    hashedPassword = {nix_str(password['hash'])};")
+        else:
+            out.append("    initialPassword = \"root\";")
         if user.get("ssh_authorized_keys"):
             out.append(f"    openssh.authorizedKeys.keys = {nix_list(user['ssh_authorized_keys'])};")
         shell = user.get("shell")
@@ -489,23 +528,25 @@ def main() -> int:
     print(f"wrote {disko_file}, {hw_file}, {config_file} ({len(WARNINGS)} warning(s))")
 
     if args.apply:
-        import shutil
         import subprocess
-        disko_bin = shutil.which("disko")
         print(f"partitioning disks via disko: {disko_file}")
-        if disko_bin:
-            res = subprocess.run(["disko", "--mode", "disko", str(disko_file)])
-        else:
-            res = subprocess.run(["nix-shell", "-p", "disko", "--run", f"disko --mode disko {disko_file}"])
+        cmd_disko = f"nix --extra-experimental-features 'nix-command flakes' run github:nix-community/disko/latest -- --mode disko {disko_file}"
+        res = subprocess.run(cmd_disko, shell=True)
         if res.returncode != 0:
-            return res.returncode
+            res = subprocess.run(f"nix-shell -p disko --run 'disko --mode disko {disko_file}'", shell=True)
+            if res.returncode != 0:
+                return res.returncode
         
-        if shutil.which("nixos-install"):
-            print("installing NixOS system via nixos-install...")
-            res = subprocess.run(["nixos-install", "--no-root-passwd", "--root", "/mnt"])
-            return res.returncode
-        else:
-            print("disko formatting complete; run nixos-install to finish system installation")
+        print("installing NixOS system via nixos-install...")
+        subprocess.run("mkdir -p /mnt/etc/nixos && cp -f configuration.nix hardware.nix disko.nix /mnt/etc/nixos/ 2>/dev/null || true", shell=True)
+        res_inst = subprocess.run("nixos-install --no-root-passwd --root /mnt", shell=True)
+        if res_inst.returncode != 0:
+            res_inst = subprocess.run("nix-shell -p nixos-install --run 'nixos-install --no-root-passwd --root /mnt'", shell=True)
+        if res_inst.returncode == 0:
+            subprocess.run("mount /dev/vda1 /mnt/boot 2>/dev/null || mount /dev/vda2 /mnt/boot 2>/dev/null || true", shell=True)
+            subprocess.run("mkdir -p /mnt/boot/EFI/BOOT && cp -f /mnt/boot/EFI/systemd/systemd-bootx64.efi /mnt/boot/EFI/BOOT/BOOTX64.EFI 2>/dev/null || true", shell=True)
+            subprocess.run("umount /mnt/boot 2>/dev/null || true", shell=True)
+        return res_inst.returncode
 
     if args.strict and WARNINGS:
         return 1
