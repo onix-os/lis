@@ -22,8 +22,10 @@ def run_single_distro_test(args) -> int:
 
     recipe_data = json.loads(recipe_path.read_text())
 
-    target_disk = pathlib.Path(f"/tmp/e2e-{args.distro}-target.qcow2")
-    seed_disk = pathlib.Path(f"/tmp/e2e-LIS-{args.distro}.img")
+    build_dir = pathlib.Path("/home/bresilla/lis/build")
+    build_dir.mkdir(exist_ok=True)
+    target_disk = build_dir / f"e2e-{args.distro}-target.qcow2"
+    seed_disk = build_dir / f"e2e-LIS-{args.distro}.img"
 
     print(f"\n{BOLD}{CYAN}╔══════════════════════════════════════════════════════════════════════╗{RESET}")
     print(f"{BOLD}{CYAN}║     LIS END-TO-END AUTOMATED VM TEST SUITE — {args.distro.upper():<15} ║{RESET}")
@@ -93,7 +95,7 @@ def main() -> int:
         distros = ["alpine", "nixos", "ubuntu", "arch", "fedora", "suse", "debian"]
         summary = {}
         for d in distros:
-            subprocess.run("rm -f /tmp/*.log /tmp/*.qcow2 /tmp/*.img", shell=True)
+            subprocess.run("rm -f /home/bresilla/lis/build/*.qcow2 /home/bresilla/lis/build/*.img", shell=True)
             print(f"\n{BOLD}{CYAN}============================================================{RESET}")
             print(f"{BOLD}{CYAN}  STARTING E2E VM TEST SUITE FOR DISTRO: {d.upper()}{RESET}")
             print(f"{BOLD}{CYAN}============================================================{RESET}")
@@ -101,7 +103,7 @@ def main() -> int:
             sub_args.distro = d
             res = run_single_distro_test(sub_args)
             summary[d] = res
-            subprocess.run(f"rm -f /tmp/e2e-{d}-target.qcow2 /tmp/e2e-LIS-{d}.img /tmp/*.log", shell=True)
+            subprocess.run(f"rm -f /home/bresilla/lis/build/e2e-{d}-target.qcow2 /home/bresilla/lis/build/e2e-LIS-{d}.img", shell=True)
         
         print(f"\n\n{BOLD}{CYAN}╔══════════════════════════════════════════════════════════════════════╗{RESET}")
         print(f"{BOLD}{CYAN}║           LIS MULTI-DISTRO END-TO-END SUITE RESULTS MATRIX           ║{RESET}")

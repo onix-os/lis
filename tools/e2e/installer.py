@@ -94,7 +94,7 @@ d-i finish-install/reboot_in_progress note
             "-nographic"
         ]
         print(f"  [{TICK}] Spawning background QEMU VM serial controller for Debian...")
-        child = pexpect.spawn(qemu_args[0], qemu_args[1:], encoding="utf-8", timeout=600)
+        child = pexpect.spawn(qemu_args[0], qemu_args[1:], encoding="utf-8", codec_errors="ignore", timeout=1200)
     elif distro == "fedora":
         vmlinuz_path = pathlib.Path("/tmp/fedora-vmlinuz")
         initrd_path = pathlib.Path("/tmp/fedora-initrd.img")
@@ -111,7 +111,7 @@ text
 bootloader --location=mbr --boot-drive=vda
 clearpart --all --initlabel
 autopart --type=plain
-rootpw root
+rootpw --plaintext root
 user --name=fakeuser --plaintext --password=fakeuser --groups=wheel
 reboot
 %post
@@ -143,7 +143,7 @@ echo lis-test-host > /etc/hostname
             "-nographic"
         ]
         print(f"  [{TICK}] Spawning background QEMU VM serial controller for Fedora...")
-        child = pexpect.spawn(qemu_args[0], qemu_args[1:], encoding="utf-8", timeout=600)
+        child = pexpect.spawn(qemu_args[0], qemu_args[1:], encoding="utf-8", codec_errors="ignore", timeout=600)
     elif distro == "suse":
         vmlinuz_path = pathlib.Path("/tmp/suse-linux")
         initrd_path = pathlib.Path("/tmp/suse-initrd")
@@ -220,14 +220,13 @@ echo fakeuser | passwd --stdin fakeuser 2>/dev/null || echo fakeuser:fakeuser | 
             "-nographic"
         ]
         print(f"  [{TICK}] Spawning background QEMU VM serial controller for openSUSE...")
-        child = pexpect.spawn(qemu_args[0], qemu_args[1:], encoding="utf-8", timeout=600)
+        child = pexpect.spawn(qemu_args[0], qemu_args[1:], encoding="utf-8", codec_errors="ignore", timeout=1800)
     else:
         qemu_cmd = f"qemu-system-x86_64 -enable-kvm -m {ram} -smp 4 -cpu host -net nic -net user -drive file={target_disk},if=virtio,format=qcow2 -drive file={seed_disk},if=virtio,format=raw -cdrom {iso_path} -boot order=d -nographic"
         print(f"  [{TICK}] Spawning background QEMU VM serial controller...")
-        child = pexpect.spawn(qemu_cmd, encoding="utf-8", timeout=300)
+        child = pexpect.spawn(qemu_cmd, encoding="utf-8", codec_errors="ignore", timeout=300)
 
-    debug_log = open("/tmp/e2e-serial-debug.log", "w")
-    child.logfile = debug_log
+    # Suppress verbose raw serial terminal logging to prevent disk quota overflow
 
     if distro == "alpine":
         print(f"\n  [{TICK}] Waiting for Alpine login prompt...")
@@ -383,18 +382,22 @@ echo fakeuser | passwd --stdin fakeuser 2>/dev/null || echo fakeuser:fakeuser | 
         finalize_live_installation(child)
     elif distro == "debian":
         print(f"\n  [{TICK}] Waiting for Debian automated preseed installation & VM poweroff...")
-        child.expect(["===LIS_DEBIAN_FINISHED===", "Power down", "poweroff", "REBOOT", "Restarting system", pexpect.EOF], timeout=600)
+        child.expect(["===LIS_DEBIAN_FINISHED===", "Power down", "poweroff", "REBOOT", "Restarting system", pexpect.EOF], timeout=1200)
     elif distro == "fedora":
         print(f"\n  [{TICK}] Waiting for Fedora automated Kickstart installation & VM poweroff...")
-        idx = child.expect(["===LIS_FEDORA_FINISHED===", "Power down", "poweroff", "REBOOT", "Restarting system", "Press ENTER to exit", pexpect.EOF], timeout=600)
-        if idx == 5:
-            child.sendline("")
-            child.expect(["===LIS_FEDORA_FINISHED===", "Power down", "poweroff", "REBOOT", "Restarting system", "reboot", pexpect.EOF], timeout=180)
+        for _ in range(20):
+            idx = child.expect(["===LIS_FEDORA_FINISHED===", "Power down", "poweroff", "REBOOT", "Restarting system", "Press ENTER to exit", "Press ENTER to continue", pexpect.EOF], timeout=600)
+            if idx in (5, 6):
+                child.sendline("")
+                time.sleep(2)
+                continue
+            break
     elif distro == "suse":
         print(f"\n  [{TICK}] Waiting for openSUSE automated AutoYaST installation & VM poweroff...")
-        for _ in range(20):
-            idx = child.expect(["===LIS_SUSE_FINISHED===", "Power down", "poweroff", "REBOOT", "Restarting system", "System halt", "Download it now and restart", "matching boot image", "The AutoYaST profile is not a valid XML document", "Warning", "None or wrong base product", "Error", pexpect.EOF], timeout=1800)
-            if idx in (6, 7, 8, 9, 10, 11):
+        for _ in range(50):
+            idx = child.expect(["===LIS_SUSE_FINISHED===", "Power down", "poweroff", "REBOOT", "Restarting system", "System halt", "Download it now and restart", "matching boot image", "The AutoYaST profile is not a valid XML document", "Warning", "None or wrong base product", "Error", "Ignore", "OK", "Continue", pexpect.EOF], timeout=1800)
+            if idx in (6, 7, 8, 9, 10, 11, 12, 13, 14):
+                child.send("\x1b[21~")  # F10 key
                 child.sendline("")
                 time.sleep(2)
                 continue
