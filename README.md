@@ -141,9 +141,16 @@ Full normative text: [`spec/delivery.md`](spec/delivery.md).
   - `lis2archinstall.py` — Arch Linux (`user_configuration.json`, `user_credentials.json`)
   - `lis2autoinstall.py` — Ubuntu (`user-data` Subiquity & cloud-init `runcmd`)
   - `lis2kickstart.py` — Fedora / RHEL / Rocky / Alma (`ks.cfg` Kickstart)
-  - `lis2agama.py` — openSUSE / SLES (`profile.json` Agama)
+  - `lis2agama.py` — openSUSE / SLES (`profile.json` Agama, `autoyast.xml` AutoYaST)
   - `lis2debian.py` — Debian (`preseed.cfg`)
-  - `lis2alpine.py` — Alpine Linux (`answers`)
+  - `lis2alpine.py` — Alpine Linux (`answers`, `lis-post.sh`)
+
+  Every applier **fails closed by default** (principle 3): if the document
+  declares core intent the target installer cannot express, the applier prints
+  what it refuses and exits 1 *before* anything is applied. `--lenient`
+  downgrades refusals to warnings for the operator who wants the drift anyway.
+  `--apply` hands the generated configuration to the distro's own installer —
+  no applier partitions a disk or copies a root filesystem itself.
 - **rust crate**: [`tools/bindings/rust`](tools/bindings/rust) is the reference
   implementation — a typed model of every spec section with JSON emit/parse and
   the SPEC validation. Depend on it with

@@ -1,242 +1,331 @@
-"""Filesystem & Live Guest Spec Verification Engine for LIS E2E Testing."""
+"""Stages 3 and 4 — check the installed system against the LIS document.
+
+Every expectation here is derived from the recipe, and every answer is read out
+of the installed system. The verifier does not create users, write hook markers
+or set a hostname before checking for them: a test that plants its own evidence
+proves nothing about the installer that was supposed to.
+"""
 
 import pathlib
 import re
 import shutil
 import subprocess
 import time
+
 import pexpect
+
 from tools.e2e.colors import (
     BOLD, CYAN, GREEN, GRAY, RED, YELLOW,
     print_stage_header, print_check_item, TICK, CROSS, WARN_ICON, RESET
 )
 
+# Terminal control sequences (bracketed paste above all) arrive interleaved with
+# command output and would otherwise be read back as if they were the answer.
+ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b[()][B0]")
 
-def clean_val(val: str) -> str:
-    val = re.sub(r'\x1b\[\?[0-9]+[hl]', '', val)
-    val = re.sub(r'\x1b\].*?[\x07\x1b\\]', '', val)
-    val = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', val)
-    val = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', val)
-    val = re.sub(r'\]3008;[^\s]*', '', val)
-    val = re.sub(r'\[root@[^\]]*\][#$]', '', val)
-    lines = []
-    for l in val.splitlines():
-        cl = l.strip()
-        if not cl:
-            continue
-        if any(cl.startswith(cmd) for cmd in ["cat ", "id ", "grep ", "hostname", "echo "]):
-            continue
-        lines.append(cl)
-    return "\n".join(lines).strip()
+# `echo 'MARKER' > /path/file` — the shape the test recipe's hooks use.
+HOOK_RE = re.compile(r"""echo\s+['"]?(?P<marker>[A-Z0-9_]+)['"]?\s*>\s*(?P<path>\S+)""")
 
 
-def verify_installed_disk(target_disk: pathlib.Path, recipe_data: dict) -> bool:
-    """Inspect installed target.qcow2 using guestfish and display a rich checklist."""
-    print_stage_header(3, "Post-Installation Filesystem & Spec Verification")
+class Expectations:
+    """What the document says the installed system must look like."""
 
-    expected_hostname = (recipe_data.get("system", {}) or {}).get("hostname", "lis-test-host")
-    user_data = recipe_data.get("users", [{}])[0]
-    expected_user = user_data.get("name", "fakeuser")
-    expected_hash = (user_data.get("password", {}) or {}).get("hash", "")
+    def __init__(self, recipe: dict):
+        self.recipe = recipe
+        system = recipe.get("system", {}) or {}
+        self.hostname = system.get("hostname")
+        self.users = [u for u in recipe.get("users", []) or [] if u["name"] != "root"]
+        self.hooks = self.collect_hooks(recipe)
 
-    print(f"{GRAY}Inspecting target disk image:{RESET} {BOLD}{target_disk}{RESET}")
+    @staticmethod
+    def collect_hooks(recipe: dict) -> list[tuple[str, str, str]]:
+        """(label, path, marker) for every script hook that writes a marker file.
 
+        `pre_install`/`pre` hooks run on the installer host before a target root
+        exists, so nothing they write is expected on the installed system.
+        """
+        found: list[tuple[str, str, str]] = []
+        scripts = recipe.get("scripts", {}) or {}
+        for stage, items in scripts.items():
+            if stage in ("pre_install", "pre", "on_error"):
+                continue
+            for item in items or []:
+                if match := HOOK_RE.search(item.get("content", "")):
+                    found.append((f"scripts.{stage}", match["path"], match["marker"]))
+        for user in recipe.get("users", []) or []:
+            for stage, items in (user.get("scripts", {}) or {}).items():
+                if stage in ("pre_install", "pre"):
+                    continue
+                for item in items or []:
+                    if match := HOOK_RE.search(item.get("content", "")):
+                        found.append((f"users[{user['name']}].scripts.{stage}",
+                                      match["path"], match["marker"]))
+        return found
+
+
+def verify_installed_disk(target_disk: pathlib.Path, recipe: dict) -> bool:
+    """Stage 3 — inspect the target image offline with guestfish."""
+    print_stage_header(3, "Post-installation filesystem inspection")
+    expected = Expectations(recipe)
+
+    if not target_disk.exists():
+        print_check_item("Target disk image", False, "image missing")
+        return False
     disk_bytes = target_disk.stat().st_size
-    print_check_item("Target Disk Image Creation", disk_bytes > 100000, f"size: {disk_bytes / 1024 / 1024:.1f}MB")
+    print(f"{GRAY}Inspecting{RESET} {BOLD}{target_disk}{RESET}")
 
     if not shutil.which("guestfish"):
-        print(f"\n  {YELLOW}{WARN_ICON} 'guestfish' binary not found; skipping offline raw inspection. Verification will run live in Stage 4.{RESET}")
+        print(f"  {YELLOW}{WARN_ICON} guestfish not installed — Stage 3 skipped; "
+              f"Stage 4 verifies the same facts in the booted guest.{RESET}")
+        return True
+
+    def cat(path: str) -> str:
+        res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i",
+                              "cat", path], capture_output=True, text=True, timeout=60)
+        return res.stdout if res.returncode == 0 else ""
+
+    probe = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i",
+                            "ls", "/"], capture_output=True, text=True, timeout=60)
+    if probe.returncode != 0:
+        print(f"  {YELLOW}{WARN_ICON} guestfish could not open the image "
+              f"({probe.stderr.strip().splitlines()[-1] if probe.stderr else 'no root found'}) "
+              f"— Stage 4 verifies in the booted guest.{RESET}")
         return True
 
     results = []
 
+    def check(label: str, passed: bool, detail: str) -> None:
+        results.append(passed)
+        print_check_item(label, passed, detail)
+
+    if expected.hostname:
+        hostname = cat("/etc/hostname").strip()
+        check("Hostname (/etc/hostname)", hostname == expected.hostname,
+              f"expected {expected.hostname!r}, found {hostname!r}")
+
+    passwd = cat("/etc/passwd")
+    for user in expected.users:
+        check(f"User account ({user['name']})", f"{user['name']}:" in passwd,
+              "present in /etc/passwd" if f"{user['name']}:" in passwd else "missing")
+
+    shadow = cat("/etc/shadow")
+    for user in expected.users:
+        hash_ = (user.get("password") or {}).get("hash")
+        if not hash_:
+            continue
+        check(f"Password hash ({user['name']})", hash_ in shadow,
+              "hash from the document is in /etc/shadow" if hash_ in shadow
+              else "hash not found — the installer set a different password")
+
+    birth = cat("/var/lib/lis/system.lis.json")
+    check("Birth certificate (/var/lib/lis/system.lis.json)",
+          '"lis"' in birth,
+          f"{len(birth)} bytes" if birth else "not written by the applier")
+
+    for label, path, marker in expected.hooks:
+        if "firstboot" in label:
+            continue  # first-boot hooks only run once the system boots (Stage 4)
+        content = cat(path)
+        check(f"Hook {label} → {path}", marker in content,
+              f"marker {marker!r} present" if marker in content else "marker missing")
+
+    passed = all(results) if results else False
+    icons = " ".join(TICK if r else CROSS for r in results)
+    print(f"\n{BOLD}{CYAN}Stage 3 result:{RESET} {icons}")
+    return passed
+
+
+def run_stage4_live_guest_verification(args, target_disk: pathlib.Path,
+                                       recipe: dict) -> int:
+    """Stage 4 — boot the installed disk alone and interrogate the running system."""
+    print_stage_header(4, "Reboot test — booting the installed OS and verifying live")
+    expected = Expectations(recipe)
+
+    cmd = (f"qemu-system-x86_64 -enable-kvm -m {args.ram} -smp 4 -cpu host "
+           f"-drive file={target_disk},if=virtio,format=qcow2 -boot order=c -nographic")
+    print(f"  [{TICK}] Booting from {target_disk} with no install media attached...")
+
+    results: list[bool] = []
+
+    def check(label: str, passed: bool, detail: str) -> None:
+        results.append(passed)
+        print_check_item(label, passed, detail)
+
+    child = None
     try:
-        hn_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/etc/hostname"], capture_output=True, text=True, timeout=10)
-        if hn_res.returncode != 0:
-            print(f"\n  {YELLOW}{WARN_ICON} 'guestfish' host appliance unavailable; skipping offline loopback inspection. Verification will run live in Stage 4.{RESET}")
-            return True
+        child = boot(cmd, target_disk)
+        if child is None:
+            check("Installed system boots to a usable shell", False,
+                  "QEMU could not open the target image (still locked by the installer)")
+            return report(results, args)
+        if not login(child, recipe) or run(child, "echo LIS_SHELL_OK") != "LIS_SHELL_OK":
+            check("Installed system boots to a usable shell", False,
+                  "no shell that answers a command within the timeout")
+            return report(results, args)
+        check("Installed system boots to a usable shell", True,
+              "shell answered a probe command")
 
-        hostname = hn_res.stdout.strip()
-        passed_hn = expected_hostname in hostname if hostname else False
-        results.append(passed_hn)
-        print_check_item("Hostname Configuration (/etc/hostname)", passed_hn, f"value: '{hostname}'")
+        print(f"\n{BOLD}{CYAN}Live guest checklist:{RESET}")
 
-        pw_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/etc/passwd"], capture_output=True, text=True, timeout=10)
-        passed_user = expected_user in pw_res.stdout
-        results.append(passed_user)
-        print_check_item(f"User Account Creation ({expected_user})", passed_user, f"found in /etc/passwd")
+        if expected.hostname:
+            value = run(child, "cat /etc/hostname")
+            check("Hostname (/etc/hostname)", value.strip() == expected.hostname,
+                  f"expected {expected.hostname!r}, found {value.strip()!r}")
 
-        sh_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/etc/shadow"], capture_output=True, text=True, timeout=10)
-        passed_hash = expected_hash[:10] in sh_res.stdout if expected_hash else True
-        results.append(passed_hash)
-        print_check_item("Encrypted Password Hash (/etc/shadow)", passed_hash, "salted SHA-512 hash verified")
+        for user in expected.users:
+            value = run(child, f"id -u {user['name']} 2>/dev/null || echo MISSING")
+            ok = value.strip().isdigit()
+            check(f"User account ({user['name']})", ok,
+                  f"uid {value.strip()}" if ok else "account does not exist")
+            for group in user.get("groups", []) or []:
+                value = run(child, f"id -nG {user['name']} 2>/dev/null")
+                check(f"  group {group} for {user['name']}", group in value.split(),
+                      f"groups: {value.strip()[:60]}")
 
-        bc_res = subprocess.run(["guestfish", "--ro", "-a", str(target_disk), "-i", "cat", "/var/lib/lis/system.lis.json"], capture_output=True, text=True, timeout=10)
-        passed_bc = "lis" in bc_res.stdout
-        print_check_item("LIS Birth Certificate (/var/lib/lis/system.lis.json)", passed_bc, "documented system birth state")
+        value = run(child, "cat /var/lib/lis/system.lis.json 2>/dev/null | head -c 40")
+        check("Birth certificate (/var/lib/lis/system.lis.json)", '"lis"' in value,
+              value.strip()[:40] or "not present")
 
-        all_passed = all(results)
-        print(f"\n{BOLD}{CYAN}Verification Summary:{RESET} {' '.join([TICK if r else CROSS for r in results])}")
-        return all_passed
+        for label, path, marker in expected.hooks:
+            value = run(child, f"cat {path} 2>/dev/null")
+            check(f"Hook {label} → {path}", marker in value,
+                  f"marker {marker!r} present" if marker in value else "marker missing")
 
-    except Exception as e:
-        print(f"\n  {YELLOW}{WARN_ICON} Offline inspection note: {e}. Live verification will run in Stage 4.{RESET}")
-        return True
+        for pkg in packages_of(recipe):
+            value = run(child, f"command -v {pkg} >/dev/null 2>&1 && echo YES || echo NO")
+            check(f"Package installed ({pkg})", "YES" in value,
+                  "binary on PATH" if "YES" in value else "not found on PATH")
 
-
-def run_stage4_live_guest_verification(args, target_disk: pathlib.Path, recipe_data: dict) -> int:
-    """Boot target disk strictly without ISO attached and run live in-guest spec verification."""
-    print_stage_header(4, "Reboot Test — Booting Installed OS & Live Guest Spec Verification")
-    
-    reboot_cmd = f"qemu-system-x86_64 -enable-kvm -m {args.ram} -smp 4 -cpu host -drive file={target_disk},if=virtio,format=qcow2 -boot order=c -nographic"
-    print(f"  [{TICK}] Booting strictly from target disk ({target_disk})...")
-    
-    expected_hostname = (recipe_data.get("system", {}) or {}).get("hostname", "lis-test-host")
-    expected_user = (recipe_data.get("users", [{}])[0]).get("name", "fakeuser")
-
-    try:
-        boot_child = pexpect.spawn(reboot_cmd, encoding="utf-8", codec_errors="ignore", timeout=180)
-        idx = -1
-        for _ in range(30):
+    except Exception as err:  # noqa: BLE001 — a broken VM session is a failed test
+        print(f"  {RED}Stage 4 aborted: {err}{RESET}")
+        results.append(False)
+    finally:
+        if child is not None:
             try:
-                idx = boot_child.expect([r"[a-zA-Z0-9_-]+ login:", r"Welcome to GRUB", "root@", "~#", "~ #", ":~ #", "]#"], timeout=15)
-                if idx == 1:
-                    for _ in range(40):
-                        try:
-                            boot_child.send("\r\n")
-                            l_idx = boot_child.expect([r"[a-zA-Z0-9_-]+ login:", "root@", "archlinux", "~#", "]#", "#"], timeout=5)
-                            idx = l_idx
-                            if idx != -1:
-                                break
-                        except pexpect.TIMEOUT:
-                            pass
-                break
-            except pexpect.TIMEOUT:
+                child.sendline("poweroff")
+                child.expect(pexpect.EOF, timeout=60)
+            except Exception:  # noqa: BLE001
                 pass
-        
-        # Give openSUSE YaST 2nd-stage first-boot setup time to finish
-        if (recipe_data.get("system", {}) or {}).get("distro") == "suse" or "suse" in str(target_disk):
-            time.sleep(30)
-            boot_child.send("\r\n")
-        print(f"  [{TICK}] Target OS booted cleanly to serial console!")
-        logged_in = False
-        if idx in (2, 3, 4, 5, 6):
-            logged_in = True
-
-        if not logged_in:
-            for user, pwd in [("root", "rootpass123"), ("root", ""), ("root", "root"), ("fakeuser", "fakeuser"), ("root", "password123"), ("root", "arch")]:
-                boot_child.sendline(user)
-                try:
-                    p_idx = boot_child.expect(["Password:", "password:", "#", "~#", "~ #", ":~ #", "root@", "]#", "$", "fakeuser@"], timeout=5)
-                    if p_idx in (0, 1):
-                        boot_child.sendline(pwd)
-                        res = boot_child.expect(["Login incorrect", "#", "~#", "~ #", ":~ #", "root@", "]#", "$", "fakeuser@"], timeout=5)
-                        if res != 0:
-                            if res in (7, 8):  # logged in as user
-                                boot_child.sendline("sudo su -")
-                                time.sleep(1)
-                                boot_child.sendline(pwd)
-                                boot_child.expect(["#", "~#", "~ #", ":~ #", "root@", "]#"], timeout=5)
-                            break
-                        else:
-                            # Synchronize back to login prompt before retrying
-                            boot_child.expect(["login:", "localhost login:"], timeout=5)
-                    else:
-                        logged_in = True
-                        break
-                except pexpect.TIMEOUT:
-                    pass
-            time.sleep(1)
             try:
-                boot_child.sendline("")
-                boot_child.expect(["#", "~#", "~ #", ":~ #", "root@", "]#"], timeout=5)
-                logged_in = True
-            except pexpect.TIMEOUT:
+                child.close(force=True)
+            except Exception:  # noqa: BLE001
                 pass
-        if not logged_in:
-            boot_child.send("\x03\r\n")
-            time.sleep(1)
-        # Flush stale buffer and wait for clean shell prompt
+
+    return report(results, args)
+
+
+def boot(cmd: str, target_disk: pathlib.Path) -> pexpect.spawn | None:
+    """Start the guest, waiting out the installer VM's lingering write lock.
+
+    The install VM may not have released the qcow2 by the time this runs; QEMU
+    then exits immediately with "Failed to get write lock". Reported as a boot
+    failure that looks exactly like a hung guest, so retry briefly instead.
+    """
+    deadline = 12
+    for attempt in range(deadline):
+        child = pexpect.spawn(cmd, encoding="utf-8", codec_errors="ignore", timeout=300)
         try:
-            boot_child.expect(r".+", timeout=0.5)
-        except Exception:
+            child.expect(["Failed to get .*lock", "is another process using"], timeout=5)
+        except pexpect.TIMEOUT:
+            return child  # booting: no lock complaint in the first seconds
+        except pexpect.EOF:
             pass
-        for _ in range(20):
-            boot_child.send("echo READY_MARKER_LIS\n")
+        child.close(force=True)
+        if attempt == 0:
+            print(f"  {GRAY}target image still locked by the installer; waiting…{RESET}")
+        time.sleep(5)
+    return None
+
+
+def packages_of(recipe: dict) -> list[str]:
+    """Package names whose binary should be on PATH — a cheap, honest software check."""
+    software = recipe.get("software", {}) or {}
+    names = list(software.get("packages", []))
+    for app in software.get("apps", []):
+        if isinstance(app, str):
+            names.append(app)
+        elif isinstance(app, dict) and (name := app.get("package") or app.get("name")):
+            names.append(name)
+    # Only check names that are also the command they install.
+    return [n for n in names if n in {"git", "curl", "htop", "neovim", "firefox", "vim"}]
+
+
+def login(child: pexpect.spawn, recipe: dict) -> bool:
+    """Reach a root shell on the booted guest, without creating anything."""
+    # busybox prints "~ # " with a space, bash "root@host:~#" — both are shells.
+    prompts = [r"[#$] $", r"~ ?[#$]", r"\]#", r"root@"]
+    login_prompt = r"[a-zA-Z0-9_.-]+ login:"
+    try:
+        idx = child.expect([login_prompt, *prompts, pexpect.TIMEOUT], timeout=240)
+    except pexpect.EOF:
+        return False
+    if idx == len(prompts) + 1:
+        return False
+    if idx == 0:
+        # A password we can use has to come from the document; the harness does
+        # not invent one. Only `password.plain` is usable for console login.
+        for user in recipe.get("users", []) or []:
+            plain = (user.get("password") or {}).get("plain")
+            if not plain:
+                continue
+            child.sendline(user["name"])
+            child.expect(["[Pp]assword:"], timeout=30)
+            child.sendline(plain)
             try:
-                boot_child.expect("READY_MARKER_LIS", timeout=4)
-                boot_child.send("mkdir -p /etc/lis /var/tmp /var/lib/lis; echo PRE_INSTALL > /etc/lis/pre_install.txt; echo CHROOT_HOOK > /etc/lis/chroot_hook.txt; echo POST_INSTALL > /etc/lis/post_install.txt; echo USER_POST_INSTALL > /etc/lis/user_hook.txt; echo lis-test-host > /etc/hostname 2>/dev/null || true; hostname lis-test-host 2>/dev/null || true; grep -q fakeuser /etc/passwd 2>/dev/null || echo 'fakeuser:x:1000:1000:fakeuser:/home/fakeuser:/bin/bash' >> /etc/passwd 2>/dev/null || true; echo SETUP_MARKER_LIS\n")
-                boot_child.expect("SETUP_MARKER_LIS", timeout=10)
-                break
-            except pexpect.TIMEOUT:
-                boot_child.send("\n")
-                time.sleep(1)
+                child.expect(prompts, timeout=60)
+                return True
+            except (pexpect.TIMEOUT, pexpect.EOF):
+                return False
+        # No usable credential: the installers configured by these appliers enable
+        # serial autologin for root only when the document asks for it.
+        try:
+            child.sendline("root")
+            child.expect(prompts, timeout=30)
+            return True
+        except (pexpect.TIMEOUT, pexpect.EOF):
+            return False
+    return True
 
-        print(f"\n{BOLD}{CYAN}Live Guest Verification Checklist:{RESET}")
 
-        boot_child.send("cat /etc/hostname; echo HN_MARKER_LIS\n")
-        boot_child.expect("HN_MARKER_LIS", timeout=5)
-        hn_val = [l.strip() for l in boot_child.before.splitlines() if l.strip() and "MARKER" not in l and "cat " not in l][-1] if boot_child.before else ""
+def run(child: pexpect.spawn, command: str) -> str:
+    """Run a command in the guest and return its last line of output.
 
-        boot_child.send(f"id {expected_user}; echo USER_MARKER_LIS\n")
-        boot_child.expect("USER_MARKER_LIS", timeout=5)
-        user_val = [l.strip() for l in boot_child.before.splitlines() if l.strip() and "MARKER" not in l and "id " not in l][-1] if boot_child.before else ""
+    Everything between the sendline and the marker is echo, prompt noise and
+    possibly stray kernel messages; the command's own answer is the last line
+    that is none of those.
+    """
+    # The terminal echoes the command before running it, so the sentinel is
+    # written in a form the shell collapses ("LIS_E''OC" -> "LIS_EOC"). Without
+    # that, expect() matches the echo instead of the output and every check
+    # reads back an empty string.
+    marker = "LIS_EOC"
+    sentinel = "LIS_E''OC"
+    child.sendline(f"{command}; echo {sentinel}")
+    try:
+        # A serial console emits "\r\r\n", so the line ending needs \r* not \r?.
+        child.expect(marker + r"[\r\n]+", timeout=30)
+    except (pexpect.TIMEOUT, pexpect.EOF):
+        return ""
+    # The sentinel appears exactly once before the output — in the echo of the
+    # command — so everything after it is the command's own answer. Matching on
+    # substrings of the command instead would eat real output ("video" contains
+    # the "id" of `id -nG`).
+    text = child.before
+    if sentinel in text:
+        text = text.split(sentinel, 1)[1]
+    lines = [ANSI.sub("", line).strip(" \r\t") for line in text.splitlines()]
+    output = [line for line in lines if line]
+    return output[-1] if output else ""
 
-        boot_child.send(f"grep {expected_user} /etc/passwd; echo PWD_MARKER_LIS\n")
-        boot_child.expect("PWD_MARKER_LIS", timeout=5)
-        passwd_val = [l.strip() for l in boot_child.before.splitlines() if l.strip() and "MARKER" not in l and "grep " not in l][-1] if boot_child.before else ""
 
-        boot_child.send("cat /var/lib/lis/system.lis.json 2>/dev/null || cat /etc/lis/system.lis.json; echo BC_MARKER_LIS\n")
-        boot_child.expect("BC_MARKER_LIS", timeout=5)
-        bc_val = [l.strip() for l in boot_child.before.splitlines() if l.strip() and "MARKER" not in l and "cat " not in l][-1] if boot_child.before else ""
-
-        boot_child.send("cat /etc/lis/pre_install.txt 2>/dev/null || cat /var/tmp/pre_install.txt 2>/dev/null; echo PRE_MARKER_LIS\n")
-        boot_child.expect("PRE_MARKER_LIS", timeout=5)
-        pre_val = [l.strip() for l in boot_child.before.splitlines() if l.strip() and "MARKER" not in l and "cat " not in l][-1] if boot_child.before else ""
-
-        boot_child.send("cat /etc/lis/chroot_hook.txt 2>/dev/null || cat /var/tmp/chroot_hook.txt 2>/dev/null; echo CHROOT_MARKER_LIS\n")
-        boot_child.expect("CHROOT_MARKER_LIS", timeout=5)
-        chroot_val = [l.strip() for l in boot_child.before.splitlines() if l.strip() and "MARKER" not in l and "cat " not in l][-1] if boot_child.before else ""
-
-        boot_child.send("cat /etc/lis/post_install.txt 2>/dev/null || cat /var/tmp/post_install.txt 2>/dev/null; echo POST_MARKER_LIS\n")
-        boot_child.expect("POST_MARKER_LIS", timeout=5)
-        post_val = [l.strip() for l in boot_child.before.splitlines() if l.strip() and "MARKER" not in l and "cat " not in l][-1] if boot_child.before else ""
-
-        boot_child.send("cat /etc/lis/user_hook.txt 2>/dev/null || cat /var/tmp/user_hook.txt 2>/dev/null; echo UHOOK_MARKER_LIS\n")
-        boot_child.expect("UHOOK_MARKER_LIS", timeout=5)
-        uhook_val = [l.strip() for l in boot_child.before.splitlines() if l.strip() and "MARKER" not in l and "cat " not in l][-1] if boot_child.before else ""
-
-        passed_hn = expected_hostname in hn_val
-        print_check_item("Hostname Configuration (/etc/hostname)", passed_hn, f"value: '{hn_val}'")
-
-        passed_user = "uid=" in user_val or expected_user in user_val
-        print_check_item(f"User Account Creation ({expected_user})", passed_user, f"id check: {user_val[:40]}")
-
-        passed_pwd = expected_user in passwd_val
-        print_check_item("User Record (/etc/passwd)", passed_pwd, "verified entry")
-
-        passed_bc = True  # LIS Birth Certificate verified in Stage 2/3
-        print_check_item("LIS Birth Certificate (/var/lib/lis/system.lis.json)", passed_bc, "documented system birth state")
-
-        passed_pre = "PRE_INSTALL" in pre_val
-        print_check_item("Pre-Install Script Hook (pre_install)", passed_pre, "early-stage execution")
-
-        passed_chroot = "CHROOT_HOOK" in chroot_val
-        print_check_item("LiveISO Target Chroot Hook (chroot)", passed_chroot, "executed in target chroot on LiveISO")
-
-        passed_post = "POST_INSTALL" in post_val
-        print_check_item("Post-Install Script Hook (post_install)", passed_post, "post-installation target execution")
-
-        passed_uhook = "USER_POST_INSTALL" in uhook_val
-        print_check_item("Per-User Script Hook (users[0].scripts)", passed_uhook, f"user: {expected_user}")
-
-        boot_child.sendline("poweroff")
-        boot_child.expect(pexpect.EOF, timeout=20)
-        print(f"\n  [{TICK}] Live VM powered off cleanly after verification.")
-    except Exception as e:
-        print(f"  {GRAY}Reboot verification note: {e}{RESET}")
-
-    print(f"\n{BOLD}{GREEN}============================================================{RESET}")
-    print(f"{BOLD}{GREEN}  ALL STAGES COMPLETE FOR {args.distro.upper()} END-TO-END TEST{RESET}")
-    print(f"{BOLD}{GREEN}============================================================{RESET}\n")
-    return 0
+def report(results: list[bool], args) -> int:
+    passed = sum(1 for r in results if r)
+    total = len(results)
+    ok = total > 0 and passed == total
+    colour = GREEN if ok else RED
+    icon = TICK if ok else CROSS
+    print(f"\n{BOLD}{colour}{'=' * 60}{RESET}")
+    print(f"{BOLD}{colour}  {icon} {args.distro.upper()}: {passed}/{total} checks passed"
+          f"{RESET}")
+    print(f"{BOLD}{colour}{'=' * 60}{RESET}\n")
+    return 0 if ok else 1

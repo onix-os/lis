@@ -1,408 +1,333 @@
-"""QEMU Headless Serial Console Installer Engine for LIS E2E Testing."""
+"""Stage 2 — drive each distro's own installer inside QEMU over the serial console.
+
+The rule this module lives by: whatever ends up on the target disk must be put
+there by the distro's native installer, acting on a configuration this repo's
+appliers generated from the LIS document. The harness boots the VM, hands the
+installer its configuration, and waits. It never partitions, never copies a root
+filesystem, and never writes the artifacts that Stage 3/4 go on to verify —
+doing any of that would make the test assert against its own output.
+"""
 
 import pathlib
+import shutil
+import subprocess
 import sys
 import time
-import subprocess
+
 import pexpect
-from tools.e2e.colors import BOLD, print_stage_header, TICK, RESET
+
+from tools.e2e.colors import BOLD, GRAY, print_stage_header, TICK, RESET
+
+APPLIERS = pathlib.Path(__file__).resolve().parent.parent / "appliers"
+HTTP_PORT = 8088
+SERIAL = "console=ttyS0,115200n8"
 
 
-PROMPTS = [r"\]#", r"root@nixos", r"nixos@nixos", r"# ", r"~# ", r"#", r"\$"]
+class InstallFailed(Exception):
+    """The distro installer did not reach a successful end state."""
 
 
-def finalize_live_installation(child):
-    print(f"\n  [{TICK}] Live installation finished! Writing LIS birth certificate and executing target chroot hooks...")
-    limine_cfg = (
-        "timeout: 0\\n"
-        "verbose: yes\\n"
-        "serial: yes\\n\\n"
-        "/Arch Linux\\n"
-        "    protocol: linux\\n"
-        "    kernel_path: boot():/vmlinuz-linux\\n"
-        "    kernel_cmdline: root=/dev/vda3 console=tty0 console=ttyS0,115200n8 rw\\n"
-        "    initrd_path: boot():/initramfs-linux.img\\n"
-    )
-    child.sendline("mkdir -p /tmp/btrfs_root; mount /dev/vda3 /tmp/btrfs_root 2>/dev/null || mount /dev/vda2 /tmp/btrfs_root 2>/dev/null || true")
+class DocumentRefused(InstallFailed):
+    """The applier refused the document (SPEC §2.3) — a verdict, not a malfunction."""
+
+    def __init__(self, applier: str, reasons: list[str]):
+        self.applier = applier
+        self.reasons = reasons
+        super().__init__(f"{applier} refused the document: "
+                         + "; ".join(reasons or ["see the applier output above"]))
+
+
+# ── applier invocation ───────────────────────────────────────────
+
+def run_applier(name: str, recipe: pathlib.Path, out_dir: pathlib.Path) -> pathlib.Path:
+    """Generate a distro configuration from the LIS document, fail-closed.
+
+    A non-zero exit means the applier refused the document (SPEC §2.3). That is
+    a legitimate test outcome and must surface as a failure, not be worked
+    around by hand-writing the configuration here.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [sys.executable, str(APPLIERS / name), str(recipe), "--out", str(out_dir)]
+    print(f"  [{TICK}] Translating recipe with {BOLD}{name}{RESET}...")
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    sys.stdout.write(res.stdout)
+    sys.stderr.write(res.stderr)
+    if res.returncode != 0:
+        reasons = [line[len("refused: "):] for line in res.stderr.splitlines()
+                   if line.startswith("refused: ")]
+        raise DocumentRefused(name, reasons)
+    return out_dir
+
+
+def serve(directory: pathlib.Path) -> None:
+    """Expose a directory to the guest at http://10.0.2.2:8088/ (QEMU user net)."""
+    subprocess.run(f"pkill -f 'http.server {HTTP_PORT}' || true", shell=True)
+    subprocess.Popen([sys.executable, "-m", "http.server", str(HTTP_PORT),
+                      "--directory", str(directory)],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(1)
-    child.sendline(f"for rootdir in /tmp/btrfs_root/@ /tmp/btrfs_root/@root /tmp/btrfs_root /mnt; do if [ -d \"$rootdir\" ]; then mkdir -p \"$rootdir/etc/lis\" \"$rootdir/var/lib/lis\" \"$rootdir/var/tmp\" \"$rootdir/boot/limine\" 2>/dev/null; echo PRE_INSTALL > \"$rootdir/etc/lis/pre_install.txt\"; echo POST_INSTALL > \"$rootdir/etc/lis/post_install.txt\"; echo CHROOT_HOOK > \"$rootdir/etc/lis/chroot_hook.txt\"; echo USER_POST_INSTALL > \"$rootdir/etc/lis/user_hook.txt\"; echo PRE_INSTALL > \"$rootdir/var/tmp/pre_install.txt\"; echo POST_INSTALL > \"$rootdir/var/tmp/post_install.txt\"; echo CHROOT_HOOK > \"$rootdir/var/tmp/chroot_hook.txt\"; echo USER_POST_INSTALL > \"$rootdir/var/tmp/user_hook.txt\"; cp /mnt/seed/recipes/system.lis.json \"$rootdir/etc/lis/system.lis.json\" 2>/dev/null || true; cp /mnt/seed/recipes/system.lis.json \"$rootdir/var/lib/lis/system.lis.json\" 2>/dev/null || true; echo lis-test-host > \"$rootdir/etc/hostname\"; chroot \"$rootdir\" userdel -f -r ubuntu 2>/dev/null || true; chroot \"$rootdir\" groupadd -f wheel 2>/dev/null || true; chroot \"$rootdir\" useradd -m -s /bin/bash -G wheel fakeuser 2>/dev/null || true; printf '{limine_cfg}' > \"$rootdir/boot/limine.conf\" 2>/dev/null || true; printf '{limine_cfg}' > \"$rootdir/boot/limine/limine.conf\" 2>/dev/null || true; fi; done 2>/dev/null || true")
-    time.sleep(1)
-    child.sendline("/mnt/seed/limine deploy /dev/vda 2>/dev/null || true")
-    time.sleep(1)
-    time.sleep(1)
-    child.sendline("umount /tmp/btrfs_root 2>/dev/null || true")
-    time.sleep(1)
-    child.sendline("sync; sleep 1; poweroff -f 2>/dev/null || true")
-    time.sleep(2)
+
+
+def build_cidata(seed_files: pathlib.Path, out: pathlib.Path) -> pathlib.Path:
+    """Wrap user-data/meta-data in a CIDATA volume — cloud-init's own discovery path."""
+    if out.exists():
+        out.unlink()
+    with open(out, "wb") as f:
+        f.truncate(32 * 1024 * 1024)  # below ~16MB mkfs.vfat rejects a FAT16 geometry
+    subprocess.run(["mkfs.vfat", "-F", "16", "-n", "CIDATA", str(out)],
+                   check=True, capture_output=True)
+    for name in ("user-data", "meta-data"):
+        subprocess.run(["mcopy", "-i", str(out), str(seed_files / name), f"::{name}"],
+                       check=True)
+    return out
+
+
+def extract(iso: pathlib.Path, mapping: dict[str, pathlib.Path]) -> None:
+    """Pull kernel/initrd out of an ISO so the cmdline can be set without a GRUB dance."""
+    if all(dest.exists() for dest in mapping.values()):
+        return
+    args = " ".join(f"-extract {src} {dest}" for src, dest in mapping.items())
+    subprocess.run(f"osirrox -indev {iso} {args}", shell=True, check=True)
+
+
+# ── QEMU ─────────────────────────────────────────────────────────
+
+def qemu(target_disk, ram, *, iso=None, extra_drives=(), kernel=None, initrd=None,
+         append=None, boot=None, timeout=1800, log=None) -> pexpect.spawn:
+    cmd = ["qemu-system-x86_64", "-enable-kvm", "-m", ram, "-smp", "4", "-cpu", "host",
+           "-net", "nic", "-net", "user",
+           "-drive", f"file={target_disk},if=virtio,format=qcow2"]
+    for drive in extra_drives:
+        cmd += ["-drive", f"file={drive},if=virtio,format=raw"]
+    if iso:
+        cmd += ["-cdrom", str(iso)]
+    if kernel:
+        cmd += ["-kernel", str(kernel)]
+    if initrd:
+        cmd += ["-initrd", str(initrd)]
+    if append:
+        cmd += ["-append", append]
+    if boot:
+        cmd += ["-boot", boot]
+    # The installer boots from -kernel/-initrd, so a guest reboot would re-enter
+    # the installer and overwrite what it just built. Exit instead.
+    cmd += ["-no-reboot", "-nographic"]
+    print(f"  [{TICK}] Spawning QEMU: {GRAY}{' '.join(cmd[:8])} …{RESET}")
+    child = pexpect.spawn(cmd[0], cmd[1:], encoding="utf-8", codec_errors="ignore",
+                          timeout=timeout)
+    if log:
+        # The serial stream goes to a file, not stdout: it is megabytes of installer
+        # chatter, and it is the only evidence available when a run fails.
+        child.logfile_read = open(log, "w", encoding="utf-8", errors="replace")
+        print(f"  [{TICK}] Serial console log: {GRAY}{log}{RESET}")
+    return child
+
+
+def wait_for_finish(child: pexpect.spawn, distro: str, markers: list[str],
+                    timeout: int) -> None:
+    """Wait for the installer to finish. Anything else is a failure."""
+    failures = ["Installation failed", "installation failed", "Kernel panic",
+                "An error occurred", "Sorry, an error occurred"]
+    idx = child.expect(markers + failures + [pexpect.EOF, pexpect.TIMEOUT],
+                       timeout=timeout)
+    if idx < len(markers):
+        print(f"\n  [{TICK}] {distro} installer reported completion.")
+        return
+    if idx < len(markers) + len(failures):
+        raise InstallFailed(f"{distro} installer reported an error: "
+                            f"{failures[idx - len(markers)]!r}")
+    if idx == len(markers) + len(failures):
+        # EOF: QEMU is gone. A guest that powered itself off is the expected end
+        # for these installers, but a VM killed from outside looks identical
+        # here — and calling that a finished install would hand Stage 3 a
+        # half-written disk and blame the applier for it.
+        child.close()
+        if child.signalstatus is not None:
+            raise InstallFailed(
+                f"{distro} VM was killed by signal {child.signalstatus} before the "
+                "installer finished — the target disk is incomplete")
+        print(f"\n  [{TICK}] {distro} VM exited (installer powered the machine off).")
+        return
+    raise InstallFailed(f"{distro} installer timed out after {timeout}s")
+
+
+def shutdown(child: pexpect.spawn) -> None:
     try:
-        child.close(force=True)
-    except Exception:
+        child.sendline("sync; poweroff -f")
+        child.expect(pexpect.EOF, timeout=60)
+    except Exception:  # noqa: BLE001 — the VM going away is the outcome we want
         pass
+    finally:
+        try:
+            child.close(force=True)
+        except Exception:  # noqa: BLE001
+            pass
 
 
-def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path, seed_disk: pathlib.Path, iso_path: pathlib.Path, ram: str):
-    """Launch QEMU with pexpect serial automation to trigger the distro installer."""
-    print_stage_header(2, f"Executing {distro.upper()} Installer in QEMU Serial Console")
+def run_in_live_shell(child, command, done_marker, timeout) -> None:
+    """Run an applier from inside a live ISO shell and wait for it to finish."""
+    child.sendline(f"{command}; echo {done_marker}=$?")
+    child.expect(rf"{done_marker}=(\d+)", timeout=timeout)
+    status = int(child.match.group(1))
+    if status != 0:
+        raise InstallFailed(f"applier exited {status} inside the live environment")
 
-    if distro == "debian":
-        vmlinuz_path = pathlib.Path("/tmp/debian-vmlinuz")
-        initrd_path = pathlib.Path("/tmp/debian-initrd.gz")
-        if not vmlinuz_path.exists() or not initrd_path.exists():
-            subprocess.run(f"osirrox -indev {iso_path} -extract /install.amd/vmlinuz {vmlinuz_path} -extract /install.amd/initrd.gz {initrd_path}", shell=True, check=True)
-        
-        preseed_dir = pathlib.Path("/tmp/debian-preseed")
-        preseed_dir.mkdir(exist_ok=True)
-        (preseed_dir / "preseed.cfg").write_text("""
-d-i debian-installer/locale string en_US.UTF-8
-d-i keyboard-configuration/xkb-keymap select us
-d-i netcfg/get_hostname string lis-test-host
-d-i debian-installer/add-kernel-opts string console=ttyS0,115200n8
-d-i partman-auto/disk string /dev/vda
-d-i partman-auto/method string regular
-d-i partman-auto/choose_recipe select atomic
-d-i partman-partitioning/confirm_write_new_label boolean true
-d-i partman/choose_partition select finish
-d-i partman/confirm boolean true
-d-i partman/confirm_nooverwrite boolean true
-d-i grub-installer/only_debian boolean true
-d-i grub-installer/with_other_os boolean true
-d-i grub-installer/bootdev string /dev/vda
-d-i passwd/root-login boolean true
-d-i passwd/root-password password root
-d-i passwd/root-password-again password root
-d-i passwd/make-user boolean true
-d-i passwd/user-fullname string fakeuser
-d-i passwd/username string fakeuser
-d-i passwd/user-password password fakeuser
-d-i passwd/user-password-again password fakeuser
-d-i preseed/late_command string in-target mkdir -p /etc/lis /var/lib/lis /var/tmp; in-target sh -c "echo PRE_INSTALL > /etc/lis/pre_install.txt"; in-target sh -c "echo CHROOT_HOOK > /etc/lis/chroot_hook.txt"; in-target sh -c "echo POST_INSTALL > /etc/lis/post_install.txt"; in-target sh -c "echo USER_HOOK > /etc/lis/user_hook.txt"; in-target sh -c "echo PRE_INSTALL > /var/tmp/pre_install.txt"; in-target sh -c "echo CHROOT_HOOK > /var/tmp/chroot_hook.txt"; in-target sh -c "echo POST_INSTALL > /var/tmp/post_install.txt"; in-target sh -c "echo USER_HOOK > /var/tmp/user_hook.txt"
-d-i finish-install/reboot_in_progress note
-""")
-        subprocess.run("pkill -f 'http.server 8088' || true", shell=True)
-        subprocess.Popen(["python3", "-m", "http.server", "8088", "--directory", str(preseed_dir)])
-        
-        preseed_cmd = "auto=true priority=critical url=http://10.0.2.2:8088/preseed.cfg"
-        qemu_args = [
-            "/usr/bin/qemu-system-x86_64", "-enable-kvm", "-m", ram, "-smp", "4", "-cpu", "host",
-            "-net", "nic", "-net", "user",
-            "-drive", f"file={target_disk},if=virtio,format=qcow2",
-            "-drive", f"file={seed_disk},if=virtio,format=raw",
-            "-cdrom", str(iso_path),
-            "-kernel", str(vmlinuz_path),
-            "-initrd", str(initrd_path),
-            "-append", f"console=ttyS0,115200n8 {preseed_cmd}",
-            "-nographic"
-        ]
-        print(f"  [{TICK}] Spawning background QEMU VM serial controller for Debian...")
-        child = pexpect.spawn(qemu_args[0], qemu_args[1:], encoding="utf-8", codec_errors="ignore", timeout=1200)
-    elif distro == "fedora":
-        vmlinuz_path = pathlib.Path("/tmp/fedora-vmlinuz")
-        initrd_path = pathlib.Path("/tmp/fedora-initrd.img")
-        if not vmlinuz_path.exists() or not initrd_path.exists():
-            subprocess.run(f"osirrox -indev {iso_path} -extract /images/pxeboot/vmlinuz {vmlinuz_path} -extract /images/pxeboot/initrd.img {initrd_path}", shell=True, check=True)
-        
-        preseed_dir = pathlib.Path("/tmp/debian-preseed")
-        preseed_dir.mkdir(exist_ok=True)
-        (preseed_dir / "ks.cfg").write_text("""
-lang en_US.UTF-8
-keyboard us
-timezone UTC
-text
-bootloader --location=mbr --boot-drive=vda
-clearpart --all --initlabel
-autopart --type=plain
-rootpw --plaintext root
-user --name=fakeuser --plaintext --password=fakeuser --groups=wheel
-reboot
-%post
-mkdir -p /etc/lis /var/lib/lis /var/tmp
-echo PRE_INSTALL > /etc/lis/pre_install.txt
-echo CHROOT_HOOK > /etc/lis/chroot_hook.txt
-echo POST_INSTALL > /etc/lis/post_install.txt
-echo USER_HOOK > /etc/lis/user_hook.txt
-echo PRE_INSTALL > /var/tmp/pre_install.txt
-echo CHROOT_HOOK > /var/tmp/chroot_hook.txt
-echo POST_INSTALL > /var/tmp/post_install.txt
-echo USER_HOOK > /var/tmp/user_hook.txt
-echo lis-test-host > /etc/hostname
-%end
-""")
-        subprocess.run("pkill -f 'http.server 8088' || true", shell=True)
-        subprocess.Popen(["python3", "-m", "http.server", "8088", "--directory", str(preseed_dir)])
-        
-        ks_cmd = "console=ttyS0,115200n8 inst.stage2=hd:LABEL=Fedora-E-dvd-x86_64-41 inst.ks=http://10.0.2.2:8088/ks.cfg"
-        qemu_args = [
-            "/usr/bin/qemu-system-x86_64", "-enable-kvm", "-m", ram, "-smp", "4", "-cpu", "host",
-            "-net", "nic", "-net", "user",
-            "-drive", f"file={target_disk},if=virtio,format=qcow2",
-            "-drive", f"file={seed_disk},if=virtio,format=raw",
-            "-cdrom", str(iso_path),
-            "-kernel", str(vmlinuz_path),
-            "-initrd", str(initrd_path),
-            "-append", ks_cmd,
-            "-nographic"
-        ]
-        print(f"  [{TICK}] Spawning background QEMU VM serial controller for Fedora...")
-        child = pexpect.spawn(qemu_args[0], qemu_args[1:], encoding="utf-8", codec_errors="ignore", timeout=600)
-    elif distro == "suse":
-        vmlinuz_path = pathlib.Path("/tmp/suse-linux")
-        initrd_path = pathlib.Path("/tmp/suse-initrd")
-        if not vmlinuz_path.exists() or not initrd_path.exists():
-            subprocess.run(f"osirrox -indev {iso_path} -extract /boot/x86_64/loader/linux {vmlinuz_path} -extract /boot/x86_64/loader/initrd {initrd_path}", shell=True, check=True)
-        
-        preseed_dir = pathlib.Path("/tmp/debian-preseed")
-        preseed_dir.mkdir(exist_ok=True)
-        (preseed_dir / "autoyast.xml").write_text("""<?xml version="1.0"?>
-<!DOCTYPE profile>
-<profile xmlns="http://www.suse.com/1.0/yast2ns" xmlns:config="http://www.suse.com/1.0/configns">
-  <general>
-    <mode>
-      <confirm config:type="boolean">false</confirm>
-      <final_reboot config:type="boolean">true</final_reboot>
-    </mode>
-  </general>
-  <partitioning config:type="list">
-    <drive>
-      <device>/dev/vda</device>
-      <initialize config:type="boolean">true</initialize>
-      <use>all</use>
-    </drive>
-  </partitioning>
-  <software>
-    <products config:type="list">
-      <product>Leap</product>
-    </products>
-  </software>
-  <users config:type="list">
-    <user>
-      <username>root</username>
-      <user_password>root</user_password>
-      <encrypted config:type="boolean">false</encrypted>
-    </user>
-  </users>
-  <scripts>
-    <chroot-scripts config:type="list">
-      <script>
-        <filename>lis.sh</filename>
-        <source><![CDATA[
-mkdir -p /etc/lis /var/lib/lis /var/tmp
-echo PRE_INSTALL > /etc/lis/pre_install.txt
-echo CHROOT_HOOK > /etc/lis/chroot_hook.txt
-echo POST_INSTALL > /etc/lis/post_install.txt
-echo USER_HOOK > /etc/lis/user_hook.txt
-echo PRE_INSTALL > /var/tmp/pre_install.txt
-echo CHROOT_HOOK > /var/tmp/chroot_hook.txt
-echo POST_INSTALL > /var/tmp/post_install.txt
-echo USER_HOOK > /var/tmp/user_hook.txt
-echo lis-test-host > /etc/hostname
-useradd -m -s /bin/bash fakeuser 2>/dev/null || true
-echo root | passwd --stdin root 2>/dev/null || echo root:root | chpasswd 2>/dev/null || true
-echo fakeuser | passwd --stdin fakeuser 2>/dev/null || echo fakeuser:fakeuser | chpasswd 2>/dev/null || true
-]]></source>
-      </script>
-    </chroot-scripts>
-  </scripts>
-</profile>
-""")
-        subprocess.run("pkill -f 'http.server 8088' || true", shell=True)
-        subprocess.Popen(["python3", "-m", "http.server", "8088", "--directory", str(preseed_dir)])
-        
-        ay_cmd = "console=ttyS0,115200n8 install=http://download.opensuse.org/distribution/leap/15.6/repo/oss/ autoyast=http://10.0.2.2:8088/autoyast.xml autoyast_validation=0"
-        qemu_args = [
-            "/usr/bin/qemu-system-x86_64", "-enable-kvm", "-m", ram, "-smp", "4", "-cpu", "host",
-            "-net", "nic", "-net", "user",
-            "-drive", f"file={target_disk},if=virtio,format=qcow2",
-            "-drive", f"file={seed_disk},if=virtio,format=raw",
-            "-cdrom", str(iso_path),
-            "-kernel", str(vmlinuz_path),
-            "-initrd", str(initrd_path),
-            "-append", ay_cmd,
-            "-nographic"
-        ]
-        print(f"  [{TICK}] Spawning background QEMU VM serial controller for openSUSE...")
-        child = pexpect.spawn(qemu_args[0], qemu_args[1:], encoding="utf-8", codec_errors="ignore", timeout=1800)
-    else:
-        qemu_cmd = f"qemu-system-x86_64 -enable-kvm -m {ram} -smp 4 -cpu host -net nic -net user -drive file={target_disk},if=virtio,format=qcow2 -drive file={seed_disk},if=virtio,format=raw -cdrom {iso_path} -boot order=d -nographic"
-        print(f"  [{TICK}] Spawning background QEMU VM serial controller...")
-        child = pexpect.spawn(qemu_cmd, encoding="utf-8", codec_errors="ignore", timeout=300)
 
-    # Suppress verbose raw serial terminal logging to prevent disk quota overflow
+# ── per-distro drivers ───────────────────────────────────────────
 
-    if distro == "alpine":
-        print(f"\n  [{TICK}] Waiting for Alpine login prompt...")
-        child.expect(["login:", "localhost login:", "# "], timeout=120)
-        child.sendline("root")
-        child.expect(["# ", "~# "], timeout=30)
-        
-        print(f"\n  [{TICK}] Mounting LIS seed volume (/dev/vdb)...")
-        child.sendline("mkdir -p /mnt/seed && mount /dev/vdb /mnt/seed")
-        child.expect(["# ", "~# "], timeout=30)
-        
-        print(f"\n  [{TICK}] Executing Alpine automated installer (setup-alpine -f /mnt/seed/answers)...")
-        child.sendline("setup-alpine -f /mnt/seed/answers")
-        
-        while True:
-            idx = child.expect([
-                r"Enter system hostname",
-                r"Which one do you want to initialize",
-                r"Ip address for eth0",
-                r"manual network configuration",
-                r"New password:",
-                r"Retype password:",
-                r"Which timezone are you in",
-                r"HTTP/FTP proxy URL",
-                r"Which NTP client to use",
-                r"Which mirror",
-                r"Enter mirror number",
-                r"Setup a user",
-                r"Full name for user",
-                r"Enter ssh key or URL",
-                r"Which ssh server\?",
-                r"Which disk\(s\) would you like to use",
-                r"How would you like to use it",
-                r"WARNING: Erase the entire disk",
-                r"continue\?",
-                r"Installation is complete",
-                r"reboot",
-                r"# ",
-                pexpect.EOF
-            ], timeout=180)
-            if idx == 0:
-                print(f"\n  [{TICK}] Responding to hostname prompt: lis-test-host")
-                child.sendline("lis-test-host")
-            elif idx == 1:
-                print(f"\n  [{TICK}] Responding to interface prompt: eth0")
-                child.sendline("eth0")
-            elif idx == 2:
-                print(f"\n  [{TICK}] Responding to ip prompt: dhcp")
-                child.sendline("dhcp")
-            elif idx == 3:
-                print(f"\n  [{TICK}] Responding to manual net prompt: no")
-                child.sendline("no")
-            elif idx in (4, 5):
-                print(f"\n  [{TICK}] Responding to password prompt")
-                child.sendline("rootpass123")
-            elif idx == 6:
-                print(f"\n  [{TICK}] Responding to timezone prompt: UTC")
-                child.sendline("UTC")
-            elif idx == 7:
-                print(f"\n  [{TICK}] Responding to proxy prompt: none")
-                child.sendline("none")
-            elif idx == 8:
-                print(f"\n  [{TICK}] Responding to NTP prompt: chrony")
-                child.sendline("chrony")
-            elif idx in (9, 10):
-                print(f"\n  [{TICK}] Responding to mirror prompt: 1")
-                child.sendline("1")
-            elif idx == 11:
-                print(f"\n  [{TICK}] Responding to user creation prompt: fakeuser")
-                child.sendline("fakeuser")
-            elif idx == 12:
-                print(f"\n  [{TICK}] Responding to user full name prompt: default")
-                child.sendline("")
-            elif idx == 13:
-                print(f"\n  [{TICK}] Responding to ssh key prompt: none")
-                child.sendline("none")
-            elif idx == 14:
-                print(f"\n  [{TICK}] Responding to ssh server prompt: openssh")
-                child.sendline("openssh")
-            elif idx == 15:
-                print(f"\n  [{TICK}] Responding to target disk prompt: vda")
-                child.sendline("vda")
-            elif idx == 16:
-                print(f"\n  [{TICK}] Responding to disk mode prompt: sys")
-                child.sendline("sys")
-            elif idx in (17, 18):
-                print(f"\n  [{TICK}] Responding to disk erase prompt: y")
-                child.sendline("y")
-            else:
-                break
+def install_ubuntu(target_disk, seed_disk, iso, ram, recipe, work):
+    """Subiquity's own autoinstall path: a NoCloud seed plus `autoinstall`.
 
-        finalize_live_installation(child)
+    No terminal hijack and no live-CD copy — the installer that runs is the one
+    Ubuntu ships, reading the user-data lis2autoinstall generated.
+    """
+    seed = run_applier("lis2autoinstall.py", recipe, work / "autoinstall")
+    cidata = build_cidata(seed, work / "cidata.img")
+    vmlinuz, initrd = work / "ubuntu-vmlinuz", work / "ubuntu-initrd"
+    extract(iso, {"/casper/vmlinuz": vmlinuz, "/casper/initrd": initrd})
+    child = qemu(target_disk, ram, iso=iso, extra_drives=[seed_disk, cidata],
+                 kernel=vmlinuz, initrd=initrd,
+                 append=f"{SERIAL} autoinstall --- {SERIAL}", timeout=2400,
+                 log=work / "serial.log")
+    # `finish: subiquity/...` is printed for every internal step, so match only
+    # the states that mean the whole install is over.
+    wait_for_finish(child, "ubuntu",
+                    ["finish: subiquity/Reboot/reboot", "reboot: Power down",
+                     "reboot: Restarting system", "Installation complete"],
+                    timeout=2400)
+    shutdown(child)
 
-    elif distro == "nixos":
-        print(f"\n  [{TICK}] Waiting for NixOS ISOLINUX bootloader prompt...")
-        time.sleep(3)
-        child.send("\t")
-        time.sleep(1)
-        child.send(" console=ttyS0")
-        time.sleep(1)
-        child.sendline("")
-        print(f"\n  [{TICK}] Waiting for NixOS shell prompt...")
-        child.expect([r"nixos@nixos", r"root@nixos", r"login:", r"\$", r"#"], timeout=180)
-        child.sendline("sudo su -")
-        child.expect([r"root@nixos", r"\]#", r"#"], timeout=30)
-        print(f"\n  [{TICK}] Mounting LIS seed volume (/dev/vdb)...")
-        child.sendline("mkdir -p /mnt/seed && mount /dev/vdb /mnt/seed")
-        child.expect([r"root@nixos", r"\]#", r"#"], timeout=30)
-        print(f"\n  [{TICK}] Executing NixOS applier via nix-shell...")
-        child.sendline("nix-shell -p python3 --run 'python3 /mnt/seed/appliers/lis2nixos.py /mnt/seed/recipes/system.lis.json --apply'; echo DISKO_NIXOS_COMPLETE_DONE")
-        child.expect(r"echo DISKO_NIXOS_COMPLETE_DONE")
-        child.expect(r"DISKO_NIXOS_COMPLETE_DONE", timeout=900)
-        finalize_live_installation(child)
-    elif distro == "ubuntu":
-        print(f"\n  [{TICK}] Sending serial boot parameter to Ubuntu GRUB bootloader...")
-        child.expect(r"automatically in \d+s", timeout=30)
-        time.sleep(1)
-        child.send("e")
-        time.sleep(2)
-        for char in "\x0e\x0e\x0e\x05 console=ttyS0,115200n8":
-            child.send(char)
-            time.sleep(0.08)
-        time.sleep(1)
-        child.send("\x18")
-        print(f"\n  [{TICK}] Waiting for Ubuntu LiveCD installer prompt...")
-        child.expect(["Continue in", "ubuntu-server ttyS0", "ubuntu@ubuntu", "login:"], timeout=300)
-        time.sleep(2)
-        child.send("\x1bOQ")  # F2 key to open shell in Subiquity
-        time.sleep(2)
-        child.expect(["#", "$", "root@"], timeout=30)
-        child.sendline("mkdir -p /mnt/seed && mount /dev/vdb /mnt/seed")
-        child.expect(["#", "$", "root@"], timeout=30)
-        child.sendline("python3 /mnt/seed/appliers/lis2autoinstall.py /mnt/seed/recipes/system.lis.json --apply")
-        child.expect("===LIS_AUTOINSTALL_FINISHED===", timeout=600)
-        finalize_live_installation(child)
-    elif distro == "arch":
-        print(f"\n  [{TICK}] Editing Arch ISOLINUX bootloader for serial console...")
-        time.sleep(3)
-        child.send("\t")
-        time.sleep(1)
-        child.send(" console=ttyS0")
-        time.sleep(1)
-        child.sendline("")
-        print(f"\n  [{TICK}] Waiting for Arch Linux shell prompt...")
-        idx = child.expect(["root@archiso", "login:", "archiso login:", "#"], timeout=180)
-        if idx in (1, 2):
-            child.sendline("root")
-            child.expect(["root@archiso", "#", "~#"], timeout=30)
-        child.sendline("mkdir -p /mnt/seed && mount /dev/vdb /mnt/seed")
-        child.expect(["root@archiso", "#"], timeout=30)
-        child.sendline("python3 /mnt/seed/appliers/lis2archinstall.py /mnt/seed/recipes/system.lis.json --apply; echo ARCHINSTALL_DONE")
-        child.expect(r"[\r\n]ARCHINSTALL_DONE[\r\n]", timeout=600)
-        finalize_live_installation(child)
+
+def install_debian(target_disk, seed_disk, iso, ram, recipe, work):
+    out = run_applier("lis2debian.py", recipe, work / "preseed")
+    serve(out)
+    vmlinuz, initrd = work / "debian-vmlinuz", work / "debian-initrd.gz"
+    extract(iso, {"/install.amd/vmlinuz": vmlinuz, "/install.amd/initrd.gz": initrd})
+    child = qemu(target_disk, ram, iso=iso, extra_drives=[seed_disk],
+                 kernel=vmlinuz, initrd=initrd,
+                 append=f"{SERIAL} auto=true priority=critical "
+                        f"url=http://10.0.2.2:{HTTP_PORT}/preseed.cfg", timeout=2400,
+                 log=work / "serial.log")
+    wait_for_finish(child, "debian",
+                    ["Restarting system", "reboot: Power down", "Rebooting"], timeout=2400)
+    shutdown(child)
+
+
+def install_fedora(target_disk, seed_disk, iso, ram, recipe, work):
+    out = run_applier("lis2kickstart.py", recipe, work / "kickstart")
+    serve(out)
+    vmlinuz, initrd = work / "fedora-vmlinuz", work / "fedora-initrd.img"
+    extract(iso, {"/images/pxeboot/vmlinuz": vmlinuz, "/images/pxeboot/initrd.img": initrd})
+    label = iso_label(iso)
+    child = qemu(target_disk, ram, iso=iso, extra_drives=[seed_disk],
+                 kernel=vmlinuz, initrd=initrd,
+                 append=f"{SERIAL} inst.stage2=hd:LABEL={label} "
+                        f"inst.ks=http://10.0.2.2:{HTTP_PORT}/ks.cfg inst.text",
+                 timeout=2400, log=work / "serial.log")
+    wait_for_finish(child, "fedora",
+                    ["Restarting system", "reboot: Power down", "Rebooting"], timeout=2400)
+    shutdown(child)
+
+
+def install_suse(target_disk, seed_disk, iso, ram, recipe, work):
+    out = run_applier("lis2agama.py", recipe, work / "autoyast")
+    serve(out)
+    vmlinuz, initrd = work / "suse-linux", work / "suse-initrd"
+    extract(iso, {"/boot/x86_64/loader/linux": vmlinuz,
+                  "/boot/x86_64/loader/initrd": initrd})
+    child = qemu(target_disk, ram, iso=iso, extra_drives=[seed_disk],
+                 kernel=vmlinuz, initrd=initrd,
+                 append=f"{SERIAL} autoyast=http://10.0.2.2:{HTTP_PORT}/autoyast.xml "
+                        "autoyast_validation=0", timeout=3600,
+                 log=work / "serial.log")
+    wait_for_finish(child, "suse",
+                    ["Restarting system", "reboot: Power down", "System halt"],
+                    timeout=3600)
+    shutdown(child)
+
+
+def install_from_live_shell(distro, target_disk, seed_disk, iso, ram, work,
+                            *, applier, boot_hint, login=None, timeout=2400,
+                            bootstrap=None):
+    """Boot a live ISO, mount the LIS seed, and let the applier drive the install."""
+    child = qemu(target_disk, ram, iso=iso, extra_drives=[seed_disk], boot="order=d",
+                 timeout=timeout, log=work / "serial.log")
+    boot_hint(child)
+    prompts = [r"root@archiso", r"root@nixos", r"nixos@nixos", r"localhost", r"\]#", r"# "]
+    if login:
+        child.expect(["login:", *prompts], timeout=600)
+        child.sendline(login)
+    child.expect(prompts, timeout=900)
+    child.sendline("mkdir -p /run/lis/seed && mount /dev/vdb /run/lis/seed")
+    child.expect(prompts, timeout=120)
+    if bootstrap:
+        # Some live images ship no python at all, so the applier cannot run
+        # until its interpreter is there.
+        print(f"  [{TICK}] Bootstrapping the live environment: {GRAY}{bootstrap}{RESET}")
+        child.sendline(bootstrap)
+        child.expect(prompts, timeout=600)
+    command = (f"python3 /run/lis/seed/appliers/{applier} "
+               "/run/lis/seed/recipes/system.lis.json --apply")
+    if distro == "nixos":
+        command = f"nix-shell -p python3 --run {command!r}"
+    print(f"  [{TICK}] Running {applier} inside the live environment...")
+    run_in_live_shell(child, command, "LIS_APPLY_STATUS", timeout)
+    shutdown(child)
+
+
+def iso_label(iso: pathlib.Path) -> str:
+    """The ISO's volume label, which Anaconda needs for inst.stage2."""
+    res = subprocess.run(["blkid", "-s", "LABEL", "-o", "value", str(iso)],
+                         capture_output=True, text=True)
+    label = res.stdout.strip()
+    if not label and shutil.which("isoinfo"):
+        res = subprocess.run(f"isoinfo -d -i {iso} | sed -n 's/^Volume id: //p'",
+                             shell=True, capture_output=True, text=True)
+        label = res.stdout.strip()
+    return (label or "Fedora").replace(" ", "\\x20")
+
+
+def isolinux_serial(child) -> None:
+    """Arch and NixOS boot isolinux/syslinux: tab to edit, append a serial console."""
+    time.sleep(3)
+    child.send("\t")
+    time.sleep(1)
+    child.send(f" {SERIAL}")
+    time.sleep(1)
+    child.sendline("")
+
+
+def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path,
+                              seed_disk: pathlib.Path, iso_path: pathlib.Path,
+                              ram: str, recipe: pathlib.Path) -> None:
+    """Run the distro's native installer against the LIS document. Raises on failure."""
+    print_stage_header(2, f"Running the native {distro.upper()} installer in QEMU")
+    work = pathlib.Path("/tmp/lis-e2e") / distro
+    work.mkdir(parents=True, exist_ok=True)
+
+    if distro == "ubuntu":
+        install_ubuntu(target_disk, seed_disk, iso_path, ram, recipe, work)
     elif distro == "debian":
-        print(f"\n  [{TICK}] Waiting for Debian automated preseed installation & VM poweroff...")
-        child.expect(["===LIS_DEBIAN_FINISHED===", "Power down", "poweroff", "REBOOT", "Restarting system", pexpect.EOF], timeout=1200)
+        install_debian(target_disk, seed_disk, iso_path, ram, recipe, work)
     elif distro == "fedora":
-        print(f"\n  [{TICK}] Waiting for Fedora automated Kickstart installation & VM poweroff...")
-        for _ in range(20):
-            idx = child.expect(["===LIS_FEDORA_FINISHED===", "Power down", "poweroff", "REBOOT", "Restarting system", "Press ENTER to exit", "Press ENTER to continue", pexpect.EOF], timeout=600)
-            if idx in (5, 6):
-                child.sendline("")
-                time.sleep(2)
-                continue
-            break
+        install_fedora(target_disk, seed_disk, iso_path, ram, recipe, work)
     elif distro == "suse":
-        print(f"\n  [{TICK}] Waiting for openSUSE automated AutoYaST installation & VM poweroff...")
-        for _ in range(50):
-            idx = child.expect(["===LIS_SUSE_FINISHED===", "Power down", "poweroff", "REBOOT", "Restarting system", "System halt", "Download it now and restart", "matching boot image", "The AutoYaST profile is not a valid XML document", "Warning", "None or wrong base product", "Error", "Ignore", "OK", "Continue", pexpect.EOF], timeout=1800)
-            if idx in (6, 7, 8, 9, 10, 11, 12, 13, 14):
-                child.send("\x1b[21~")  # F10 key
-                child.sendline("")
-                time.sleep(2)
-                continue
-            break
+        install_suse(target_disk, seed_disk, iso_path, ram, recipe, work)
+    elif distro == "arch":
+        install_from_live_shell(distro, target_disk, seed_disk, iso_path, ram, work,
+                                applier="lis2archinstall.py", boot_hint=isolinux_serial)
+    elif distro == "nixos":
+        install_from_live_shell(distro, target_disk, seed_disk, iso_path, ram, work,
+                                applier="lis2nixos.py", boot_hint=isolinux_serial,
+                                timeout=3600)
+    elif distro == "alpine":
+        install_from_live_shell(distro, target_disk, seed_disk, iso_path, ram, work,
+                                applier="lis2alpine.py", boot_hint=lambda c: None,
+                                login="root",
+                                # The live image boots with no network and only
+                                # the CD repository, which has no python at all.
+                                bootstrap="ip link set eth0 up; udhcpc -i eth0 -q; "
+                                          "setup-apkrepos -1; apk update; "
+                                          "apk add python3")
     else:
-        print(f"\n  [{TICK}] Running generic QEMU installer wait for {distro}...")
-        time.sleep(5)
-        finalize_live_installation(child)
+        raise InstallFailed(f"no installer driver for distro {distro!r}")

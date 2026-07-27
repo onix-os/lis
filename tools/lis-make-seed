@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-"""lis-make-seed — Create a bootable LIS seed disk image (LIS.img).
+"""lis-make-seed — build a LIS seed volume image (delivery.md §1).
 
-Usage: lis-make-seed RECIPE.lis.json [--out LIS.img] [--unattended] [--label LIS]
+Usage: lis-make-seed RECIPE.lis.json [--out LIS.img] [--label LIS]
+                     [--no-unattended] [--secrets DIR] [--size-mb N]
 
-Creates a 64MB FAT32 filesystem image labeled LIS containing:
-  /lis.json               — Boot manifest pointing to recipes/system.lis.json
-  /recipes/system.lis.json — The LIS recipe document
-  /unattended             — Empty marker file for automated hands-free consent (§2.2)
-  /secrets/...            — Optional seed secret directory
+Creates a FAT32 filesystem image labeled LIS containing:
+  /lis.json                — boot manifest pointing at recipes/system.lis.json
+  /recipes/system.lis.json — the LIS recipe document
+  /unattended              — empty consent marker (delivery.md §5)
+  /appliers/*.py           — the translators, so a live ISO can run one
+  /secrets/…               — optional secret material referenced as seed:…
+
+The seed carries intent and consent. It does not carry an installer: applying
+the recipe is the job of a distro applier running the distro's own installer.
 """
 
 import argparse
 import json
-import os
 import pathlib
 import shutil
 import subprocess
@@ -20,138 +24,88 @@ import sys
 import tempfile
 
 
+def mcopy(img: pathlib.Path, src: pathlib.Path, dest: str) -> None:
+    subprocess.run(["mcopy", "-i", str(img), "-s", str(src), f"::{dest}"], check=True)
+
+
+def mmd(img: pathlib.Path, path: str) -> None:
+    subprocess.run(["mmd", "-i", str(img), f"::{path}"], check=True)
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Create a LIS seed volume image (LIS.img).")
-    ap.add_argument("recipe", type=pathlib.Path, help="Path to input .lis.json file")
-    ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path("LIS.img"), help="Output image file path (default: LIS.img)")
-    ap.add_argument("--label", default="LIS", help="Volume label (default: LIS)")
-    ap.add_argument("--unattended", action="store_true", default=True, help="Include /unattended marker file (default: true)")
-    ap.add_argument("--size-mb", type=int, default=64, help="Image size in MB (default: 64)")
+    ap = argparse.ArgumentParser(description="Create a LIS seed volume image.")
+    ap.add_argument("recipe", type=pathlib.Path, help="path to the .lis.json document")
+    ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path("LIS.img"))
+    ap.add_argument("--label", default="LIS", help="volume label (default: LIS)")
+    ap.add_argument("--no-unattended", dest="unattended", action="store_false",
+                    help="omit the /unattended consent marker, forcing a confirmation step")
+    ap.add_argument("--secrets", type=pathlib.Path,
+                    help="directory copied to /secrets on the seed")
+    ap.add_argument("--size-mb", type=int, default=64)
     args = ap.parse_args()
 
     if not args.recipe.exists():
         sys.exit(f"error: recipe file '{args.recipe}' not found")
+    if not shutil.which("mcopy"):
+        sys.exit("error: mtools (mcopy/mmd) is required to populate the seed image")
 
-    recipe_data = json.loads(args.recipe.read_text())
-    if not str(recipe_data.get("lis", "")).startswith("0.1."):
-        sys.exit(f"error: unsupported LIS version in '{args.recipe}': {recipe_data.get('lis')}")
+    recipe = json.loads(args.recipe.read_text())
+    if not str(recipe.get("lis", "")).startswith("0.1."):
+        sys.exit(f"error: unsupported LIS version in '{args.recipe}': {recipe.get('lis')}")
 
-    with tempfile.TemporaryDirectory() as staging_dir_str:
-        staging = pathlib.Path(staging_dir_str)
+    with tempfile.TemporaryDirectory() as staging_str:
+        staging = pathlib.Path(staging_str)
         recipes_dir = staging / "recipes"
-        recipes_dir.mkdir(parents=True, exist_ok=True)
-
-        # 1. Copy recipe to /recipes/system.lis.json
+        recipes_dir.mkdir(parents=True)
         target_recipe = recipes_dir / "system.lis.json"
-        target_recipe.write_text(json.dumps(recipe_data, indent=2) + "\n")
+        target_recipe.write_text(json.dumps(recipe, indent=2) + "\n")
 
-        # 2. Generate /lis.json boot manifest
-        manifest = {
-            "version": "0.1.0",
-            "recipe": {
-                "source": "file:recipes/system.lis.json"
-            }
-        }
+        manifest = {"lis": "0.1.0",
+                    "source": {"type": "file", "path": "/recipes/system.lis.json"}}
         (staging / "lis.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
-        # 3. Add /unattended marker if requested
-        if args.unattended:
-            mbr_code = bytes([
-                0xfa, 0x31, 0xc0, 0x8e, 0xd0, 0xbc, 0x00, 0x7c, 0x8e, 0xc0, 0x8e, 0xd8, 0xbe, 0x00, 0x7c, 0xbf,
-                0x00, 0x06, 0xb9, 0x00, 0x02, 0xf3, 0xa4, 0xea, 0x1d, 0x06, 0x00, 0x00, 0xbe, 0xbe, 0x07, 0xb3,
-                0x04, 0x80, 0x3c, 0x80, 0x74, 0x0e, 0x83, 0xc6, 0x10, 0xfe, 0xcb, 0x75, 0xf3, 0xcd, 0x18, 0x8b,
-                0x14, 0x8b, 0x4c, 0x02, 0x8b, 0xee, 0x8b, 0x44, 0x08, 0x8b, 0x54, 0x0a, 0xb8, 0x01, 0x02, 0xbb,
-                0x00, 0x7c, 0xcd, 0x13, 0x72, 0x05, 0xea, 0x00, 0x7c, 0x00, 0x00, 0xcd, 0x18
-            ])
-            (staging / "mbr.bin").write_bytes(mbr_code + b"\x00" * (440 - len(mbr_code)))
-            (staging / "boot_sig.bin").write_bytes(b"\x55\xaa")
+        # delivery.md §5: the channel consent key is an *empty* marker file.
+        marker = staging / "unattended"
+        marker.write_text("")
 
-            unattended_script = """#!/bin/sh
-target_disk="/dev/vda"
-parted -s ${target_disk} mklabel msdos
-parted -s ${target_disk} mkpart primary ext4 1MiB 1024MiB
-parted -s ${target_disk} set 1 boot on
-parted -s ${target_disk} mkpart primary linux-swap 1024MiB 3072MiB
-parted -s ${target_disk} mkpart primary btrfs 3072MiB 100%
-mkfs.ext4 -F ${target_disk}1
-mkswap -f ${target_disk}2
-mkfs.btrfs -f ${target_disk}3
-mkdir -p /target
-mount ${target_disk}3 /target
-for d in bin etc lib lib64 root sbin usr var; do
-    cp -a /${d} /target/ 2>/dev/null || true
-done
-mkdir -p /target/boot
-mount ${target_disk}1 /target/boot
-cp /cdrom/install.amd/vmlinuz /target/boot/vmlinuz 2>/dev/null || cp /vmlinuz /target/boot/vmlinuz 2>/dev/null || true
-cp /cdrom/install.amd/initrd.gz /target/boot/initrd.img 2>/dev/null || cp /initrd.img /target/boot/initrd.img 2>/dev/null || true
-ln -s . /target/boot/boot 2>/dev/null || true
-echo '/dev/vda3 / btrfs defaults 0 0' > /target/etc/fstab
-echo '/dev/vda1 /boot ext4 defaults 0 2' >> /target/etc/fstab
-echo '/dev/vda2 none swap defaults 0 0' >> /target/etc/fstab
-dd if=/mnt/seed/mbr.bin of=/dev/vda bs=440 count=1 conv=notrunc 2>/dev/null || true
-dd if=/mnt/seed/boot_sig.bin of=/dev/vda bs=1 seek=510 count=2 conv=notrunc 2>/dev/null || true
-mkdir -p /target/boot/grub /target/grub
-printf 'insmod ext2\\ninsmod part_msdos\\nset timeout=0\\nset default=0\\nmenuentry "Debian" {\\n    insmod ext2\\n    insmod part_msdos\\n    set root=(hd0,msdos1)\\n    linux /vmlinuz root=/dev/vda3 console=ttyS0,115200n8 rw\\n    initrd /initrd.img\\n    boot\\n}\\n' > /target/boot/grub/grub.cfg
-cp /target/boot/grub/grub.cfg /target/grub/grub.cfg 2>/dev/null || true
-mkdir -p /target/etc/lis /target/var/lib/lis /target/var/tmp
-printf "PRE_INSTALL\\n" > /target/etc/lis/pre_install.txt
-printf "CHROOT_HOOK\\n" > /target/etc/lis/chroot_hook.txt
-printf "POST_INSTALL\\n" > /target/etc/lis/post_install.txt
-printf "USER_HOOK\\n" > /target/etc/lis/user_hook.txt
-printf "PRE_INSTALL\\n" > /target/var/tmp/pre_install.txt
-printf "CHROOT_HOOK\\n" > /target/var/tmp/chroot_hook.txt
-printf "POST_INSTALL\\n" > /target/var/tmp/post_install.txt
-printf "USER_HOOK\\n" > /target/var/tmp/user_hook.txt
-cp /mnt/seed/lis.json /target/etc/lis/lis.json 2>/dev/null || cp /lis.json /target/etc/lis/lis.json 2>/dev/null || true
-cp /mnt/seed/recipes/system.lis.json /target/var/lib/lis/system.lis.json 2>/dev/null || cp /recipes/system.lis.json /target/var/lib/lis/system.lis.json 2>/dev/null || true
-umount -R /target 2>/dev/null || true
-sync
-echo ===LIS_DEBIAN_FINISHED===
-(sleep 2 && poweroff -f) &
-exit 0
-"""
-            (staging / "unattended").write_text(unattended_script)
-
-        # Copy appliers to /appliers/ on the seed drive
-        appliers_src = pathlib.Path(__file__).resolve().parent / "appliers"
-        appliers_dst = staging / "appliers"
-        if appliers_src.exists():
-            shutil.copytree(appliers_src, appliers_dst)
-
-        # 4. Build FAT32 disk image using mcopy / mformat or loopback/mkfs.vfat
-        img_path = args.out.resolve()
-        if img_path.exists():
-            img_path.unlink()
-
-        # Create raw image file filled with zeros
-        with open(img_path, "wb") as f:
+        img = args.out.resolve()
+        if img.exists():
+            img.unlink()
+        with open(img, "wb") as f:
             f.truncate(args.size_mb * 1024 * 1024)
-
-        # Format with FAT32 / VFAT
-        res = subprocess.run(["mkfs.vfat", "-F", "32", "-n", args.label[:11], str(img_path)], capture_output=True, text=True)
+        res = subprocess.run(["mkfs.vfat", "-F", "32", "-n", args.label[:11], str(img)],
+                             capture_output=True, text=True)
         if res.returncode != 0:
             sys.exit(f"error formatting image: {res.stderr}")
 
-        # Populate image using mcopy if available, else debugfs / mount
-        if shutil.which("mcopy"):
-            subprocess.run(["mcopy", "-i", str(img_path), "-s", f"{staging}/lis.json", "::lis.json"], check=True)
-            if args.unattended:
-                subprocess.run(["mcopy", "-i", str(img_path), "-s", f"{staging}/unattended", "::unattended"], check=True)
-            subprocess.run(["mmd", "-i", str(img_path), "::recipes"], check=True)
-            subprocess.run(["mcopy", "-i", str(img_path), "-s", f"{target_recipe}", "::recipes/system.lis.json"], check=True)
-            if appliers_dst.exists():
-                subprocess.run(["mmd", "-i", str(img_path), "::appliers"], check=True)
-                for applier_file in appliers_dst.glob("*.py"):
-                    subprocess.run(["mcopy", "-i", str(img_path), "-s", str(applier_file), f"::appliers/{applier_file.name}"], check=True)
-        else:
-            # Fallback using 7z / fatcat / mounting if needed, or mtools
-            # Check if fatcat or 7z or sudo mount is available
-            print(f"staging files prepared in {staging}. Note: install 'mtools' (mcopy/mmd) for zero-root image population.")
+        mcopy(img, staging / "lis.json", "lis.json")
+        if args.unattended:
+            mcopy(img, marker, "unattended")
+        mmd(img, "recipes")
+        mcopy(img, target_recipe, "recipes/system.lis.json")
 
-        print(f"Created LIS seed disk image: {img_path} (Volume Label: {args.label}, Size: {args.size_mb}MB)")
-        print(f"  Includes: /lis.json, /recipes/system.lis.json, /unattended")
-        return 0
+        appliers_src = pathlib.Path(__file__).resolve().parent / "appliers"
+        if appliers_src.exists():
+            mmd(img, "appliers")
+            for applier in sorted(appliers_src.glob("*.py")):
+                mcopy(img, applier, f"appliers/{applier.name}")
+
+        if args.secrets:
+            if not args.secrets.is_dir():
+                sys.exit(f"error: --secrets '{args.secrets}' is not a directory")
+            mmd(img, "secrets")
+            for secret in sorted(args.secrets.iterdir()):
+                if secret.is_file():
+                    mcopy(img, secret, f"secrets/{secret.name}")
+
+    contents = ["/lis.json", "/recipes/system.lis.json", "/appliers/"]
+    if args.unattended:
+        contents.insert(1, "/unattended")
+    if args.secrets:
+        contents.append("/secrets/")
+    print(f"Created LIS seed image: {img} (label {args.label}, {args.size_mb}MB)")
+    print(f"  Contains: {', '.join(contents)}")
+    return 0
 
 
 if __name__ == "__main__":

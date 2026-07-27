@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""lis-test-e2e — Standalone Automated VM Installation & Verification Engine.
+"""lis-test-e2e — automated VM installation and verification engine.
 
-Usage: lis-test-e2e --distro nixos|ubuntu|arch|fedora|suse|debian|alpine|all [--iso ISO_PATH] [--recipe RECIPE.lis.json]
+Usage: lis-test-e2e --distro nixos|ubuntu|arch|fedora|suse|debian|alpine|all
+                    [--iso ISO_PATH] [--recipe RECIPE.lis.json]
 """
 
 import pathlib
@@ -11,7 +12,12 @@ import sys
 repo_root = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(repo_root))
 
-from tools.e2e.main import main
+# Runs take tens of minutes and are usually redirected to a file; block buffering
+# would hide every stage banner until the very end.
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
+from tools.e2e.main import main  # noqa: E402 — import after sys.path setup
 
 if __name__ == "__main__":
     sys.exit(main())

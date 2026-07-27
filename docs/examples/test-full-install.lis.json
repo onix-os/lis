@@ -2,7 +2,7 @@
   "lis": "0.1.0",
   "meta": {
     "name": "full-test-system",
-    "description": "Full end-to-end testing recipe for NixOS and Ubuntu QEMU verification",
+    "description": "End-to-end test recipe: every fact it declares is checked in the installed system by tools/e2e.",
     "generator": "lis-test-suite 0.1.0"
   },
   "target": {
@@ -22,10 +22,10 @@
     "partitions": [
       {
         "disk": "main",
-        "id": "esp",
-        "role": "esp",
+        "id": "boot",
+        "role": "boot",
         "size": "1GiB",
-        "fs": "vfat",
+        "fs": "ext4",
         "mountpoint": "/boot"
       },
       {
@@ -43,15 +43,27 @@
         "fs": "btrfs",
         "mountpoint": "/",
         "subvolumes": [
-          { "name": "@", "mountpoint": "/" },
-          { "name": "@home", "mountpoint": "/home" }
+          {
+            "name": "@",
+            "mountpoint": "/"
+          },
+          {
+            "name": "@home",
+            "mountpoint": "/home"
+          }
         ]
       }
     ]
   },
   "boot": {
     "loader": "grub",
-    "timeout": 5
+    "timeout": 5,
+    "kernel": {
+      "params": [
+        "console=tty0",
+        "console=ttyS0,115200n8"
+      ]
+    }
   },
   "system": {
     "hostname": "lis-test-host",
@@ -64,45 +76,53 @@
       "comment": "Test Fake User",
       "admin": true,
       "shell": "/bin/bash",
-      "groups": ["wheel", "video"],
+      "groups": [
+        "video"
+      ],
       "password": {
         "hash": "$6$saltsalt$fakeuserhash"
       },
       "scripts": {
         "post_install": [
           {
-            "content": "echo 'USER_POST_INSTALL_HOOK_PASSED' > /tmp/user_hook.txt",
+            "content": "echo USER_POST_INSTALL_HOOK_PASSED > /home/fakeuser/user_hook.txt",
             "chroot": true
           }
         ],
         "firstboot": [
           {
-            "content": "echo 'USER_FIRSTBOOT_HOOK_PASSED' > /tmp/user_firstboot.txt"
+            "content": "echo USER_FIRSTBOOT_HOOK_PASSED > /home/fakeuser/user_firstboot.txt"
           }
         ]
       }
     }
   ],
   "software": {
-    "role": "desktop:gnome",
-    "apps": ["firefox", "neovim"],
-    "packages": ["curl", "git"]
+    "role": "minimal",
+    "packages": [
+      "curl",
+      "git"
+    ]
   },
   "scripts": {
     "pre_install": [
       {
-        "content": "echo 'PRE_INSTALL_HOOK_PASSED' > /tmp/pre_install.txt"
+        "content": "echo PRE_INSTALL_HOOK_PASSED > /tmp/lis-pre-install.marker"
       }
     ],
     "post_install": [
       {
-        "content": "echo 'POST_INSTALL_HOOK_PASSED' > /tmp/post_install.txt",
+        "content": "install -d -m755 /var/lib/lis && echo POST_INSTALL_HOOK_PASSED > /var/lib/lis/post_install.txt",
+        "chroot": true
+      },
+      {
+        "content": "if command -v systemctl >/dev/null 2>&1; then install -d /etc/systemd/system/serial-getty@ttyS0.service.d; printf '[Service]\\nExecStart=\\nExecStart=-/sbin/agetty --autologin root --noclear %%I 115200 linux\\n' > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf; systemctl enable serial-getty@ttyS0.service; elif [ -f /etc/inittab ]; then sed -i '/ttyS0/d' /etc/inittab; echo 'ttyS0::respawn:/sbin/getty -n -l /bin/ash -L ttyS0 115200 vt100' >> /etc/inittab; fi",
         "chroot": true
       }
     ],
     "firstboot": [
       {
-        "content": "echo 'FIRSTBOOT_HOOK_PASSED' > /tmp/firstboot.txt"
+        "content": "install -d -m755 /var/lib/lis && echo FIRSTBOOT_HOOK_PASSED > /var/lib/lis/firstboot.txt"
       }
     ]
   }
