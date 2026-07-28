@@ -22,7 +22,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_kernel_variant, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -109,6 +109,7 @@ def render_alpine(doc: dict) -> tuple[str, str, str]:
     # here so the document is not left with fields nothing ever looked at.
     for entry in target.get("disks", []) or []:
         _ = entry.get("id")
+        match_selectors(entry)
     for part in storage.get("partitions", []) or []:
         _ = part.get("disk"), part.get("id")
     if len(disks) > 1:
@@ -521,6 +522,7 @@ def main() -> int:
 
     # Fail closed *before* touching the machine, not after.
     check_arch(doc, {"x86_64"})
+    check_snapshots(doc, tools=frozenset(), boot_menu=False)
     check_script_fields(doc)
     check_unread(doc, ignore=APPLY_TIME_PATHS)
 

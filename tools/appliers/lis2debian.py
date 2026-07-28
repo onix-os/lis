@@ -20,7 +20,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -112,6 +112,7 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
 
     disks = {}
     for disk in target.get("disks", []):
+        match_selectors(disk)
         path = (disk.get("match", {}) or {}).get("path")
         if not path:
             refuse(f"disk '{disk['id']}': d-i needs an explicit match.path — partman "
@@ -606,6 +607,7 @@ def main() -> int:
 
     # Fail closed *before* touching the machine, not after.
     check_arch(doc, {"x86_64"})
+    check_snapshots(doc, tools=frozenset(), boot_menu=False)
     check_script_fields(doc)
     check_unread(doc)
 

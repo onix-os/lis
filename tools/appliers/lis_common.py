@@ -29,8 +29,10 @@ WARNINGS: list[str] = []
 REFUSALS: list[str] = []
 
 
-def warn(msg: str) -> None:
+def warn(msg: str) -> None:  # noqa: D401
     """Advisory drift — honored differently, never fatal."""
+    if msg in WARNINGS:
+        return   # an applier with two render paths reports the same fact twice
     WARNINGS.append(msg)
     print(f"warning: {msg}", file=sys.stderr)
 
@@ -637,6 +639,41 @@ def system_commands(doc: dict, family: str) -> list[str]:
                        f"|| echo {shlex.quote(f'{key}={value}')} >> /etc/locale.conf")
 
     return out
+
+
+def check_snapshots(doc: dict, *, tools: set[str] | frozenset = frozenset(),
+                    boot_menu: bool = False) -> None:
+    """Consult every storage.snapshots field, refusing what is not supported.
+
+    `enabled` alone was consulted before, so a document could ask for timeshift
+    and a snapshot boot menu and get snapper with no menu, silently.
+    """
+    snapshots = (doc.get("storage", {}) or {}).get("snapshots") or {}
+    if not snapshots:
+        return
+    _ = snapshots.get("enabled")
+    tool = snapshots.get("tool")
+    if tool not in (None, "auto") and tool not in tools:
+        refuse(f"storage.snapshots.tool {tool!r} is not set up by this applier"
+               + (f" (supports {', '.join(sorted(tools))})" if tools else ""))
+    if snapshots.get("boot_menu") and not boot_menu:
+        refuse("storage.snapshots.boot_menu is not set up by this applier — "
+               "the bootloader would show no snapshot entries")
+
+
+def match_selectors(disk: dict) -> None:
+    """Report disk selectors beyond match.path, which nothing evaluates.
+
+    Every applier picks a device by path; a document that also constrains by
+    serial or model gets those constraints ignored, so the install could land
+    on a disk the document meant to exclude.
+    """
+    match = disk.get("match", {}) or {}
+    consume(match)
+    extra = sorted(set(match) - {"path"})
+    if extra and match.get("path"):
+        warn(f"target.disks['{disk.get('id')}'].match: {', '.join(extra)} "
+             "not evaluated — the device is selected by match.path alone")
 
 
 def security_packages(doc: dict, family: str) -> list[str]:

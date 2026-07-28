@@ -20,7 +20,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, consume, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, check_snapshots, match_selectors, consume, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, check_mirror, check_kernel_variant, check_user_sudo,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, warn)
@@ -275,6 +275,7 @@ def render_disko(doc: dict) -> str:
     disks = storage.get("disks", []) or (doc.get("target", {}) or {}).get("disks", [])
     disk_paths = {}
     for disk in disks:
+        match_selectors(disk)
         path = (disk.get("match", {}) or {}).get("path")
         if not path:
             refuse(f"disk '{disk['id']}': no match.path — disko needs a device path "
@@ -943,6 +944,7 @@ def main() -> int:
     report(disko_file, hw_file, config_file)
 
     # Fail closed *before* touching the machine, not after.
+    check_snapshots(doc, tools={"snapper"}, boot_menu=False)
     check_script_fields(doc)
     check_unread(doc, ignore=APPLY_TIME_PATHS)
 

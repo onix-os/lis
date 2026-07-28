@@ -23,7 +23,7 @@ import pathlib
 import re
 import sys
 
-from lis_common import (track, check_unread, system_commands, security_packages, uid_commands, password_field, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, check_snapshots, match_selectors, system_commands, security_packages, uid_commands, password_field, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, secret_ref, warn)
@@ -137,6 +137,7 @@ class StorageBuilder:
         wipe = bool(self.storage.get("wipe", False))
         for disk in self.target.get("disks", []):
             handle = disk["id"]
+            match_selectors(disk)
             match = disk.get("match", {}) or {}
             path = match.get("path")
             action_id = f"disk-{handle}"
@@ -957,6 +958,7 @@ def main() -> int:
 
     # Fail closed *before* touching the machine, not after.
     check_arch(doc, {"x86_64"})
+    check_snapshots(doc, tools=frozenset(), boot_menu=False)
     check_script_fields(doc, honors_chroot=True)
     check_unread(doc)
 
