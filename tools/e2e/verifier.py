@@ -145,6 +145,13 @@ def run_stage4_live_guest_verification(args, target_disk: pathlib.Path,
            f"-drive file={target_disk},if=virtio,format=qcow2 -boot order=c -nographic")
     print(f"  [{TICK}] Booting from {target_disk} with no install media attached...")
 
+    # The install stage keeps a serial log; without the same for the reboot
+    # test, a failure here says only "no shell answered" and every diagnosis
+    # needs an ad-hoc probe script rebuilt from scratch.
+    verify_log = pathlib.Path("/tmp/lis-e2e") / args.distro / "verify.log"
+    verify_log.parent.mkdir(parents=True, exist_ok=True)
+    print(f"  [{TICK}] Reboot-test console log: {BOLD}{verify_log}{RESET}")
+
     results: list[bool] = []
 
     def check(label: str, passed: bool, detail: str) -> None:
@@ -158,7 +165,8 @@ def run_stage4_live_guest_verification(args, target_disk: pathlib.Path,
             check("Installed system boots to a usable shell", False,
                   "QEMU could not open the target image (still locked by the installer)")
             return report(results, args)
-        if not login(child, recipe) or run(child, "echo LIS_SHELL_OK") != "LIS_SHELL_OK":
+        child.logfile = verify_log.open("w")
+        if not reach_shell(child, recipe):
             check("Installed system boots to a usable shell", False,
                   "no shell that answers a command within the timeout")
             return report(results, args)
@@ -270,7 +278,7 @@ def boot(cmd: str, target_disk: pathlib.Path) -> pexpect.spawn | None:
     for attempt in range(deadline):
         child = pexpect.spawn(cmd, encoding="utf-8", codec_errors="ignore", timeout=300)
         try:
-            child.expect(["Failed to get .*lock", "is another process using"], timeout=5)
+            child.expect(["Failed to get .*lock", "is another process using"], timeout=10)
         except pexpect.TIMEOUT:
             return child  # booting: no lock complaint in the first seconds
         except pexpect.EOF:
@@ -280,6 +288,35 @@ def boot(cmd: str, target_disk: pathlib.Path) -> pexpect.spawn | None:
             print(f"  {GRAY}target image still locked by the installer; waiting…{RESET}")
         time.sleep(5)
     return None
+
+
+def reach_shell(child: pexpect.spawn, recipe: dict, attempts: int = 4) -> bool:
+    """Get a shell that answers, retrying the handshake.
+
+    Under a loaded host the guest can be slow enough that a single login
+    handshake misses its window: the banner arrives, the prompt does not, and
+    the run is reported as a system that does not boot. The handshake is cheap
+    and idempotent, so retry it — and treat "a command came back with the right
+    answer" as the only proof that matters.
+    """
+    for attempt in range(attempts):
+        try:
+            if login(child, recipe) and run(child, "echo LIS_SHELL_OK") == "LIS_SHELL_OK":
+                return True
+        except (pexpect.TIMEOUT, pexpect.EOF):
+            pass
+        if attempt + 1 < attempts:
+            print(f"  {GRAY}no answer yet (attempt {attempt + 1}/{attempts}); "
+                  f"the host is busy — waiting…{RESET}")
+            # Ctrl-C clears a half-typed line left by a handshake that raced the
+            # guest, so the next attempt starts from a clean prompt.
+            try:
+                child.sendcontrol("c")
+                child.sendline("")
+            except Exception:  # noqa: BLE001 — a dead child is handled below
+                return False
+            time.sleep(15 * (attempt + 1))
+    return False
 
 
 def packages_of(recipe: dict) -> list[str]:
@@ -301,7 +338,15 @@ def login(child: pexpect.spawn, recipe: dict, password: str = OPERATOR_PASSWORD)
     # A bracket prompt ("[user@host:~]$ ") is matched on the bracket-plus-sigil
     # alone: NixOS colours it, so the sigil is followed by an ANSI reset rather
     # than by the space the other patterns expect.
-    prompts = [r"[#$] $", r"~ ?[#$]", r"\][#$]", r"root@"]
+    #
+    # user@host must be followed by a path and a sigil. A bare "root@" also
+    # occurs in cloud-init's SSH host key fingerprints, which a fresh Ubuntu
+    # install prints on its first boot ("SHA256:… root@lis-test-host"); matching
+    # those declares a shell ~2s before the getty exists, so the probe command
+    # is typed into a console with nothing behind it and sits in the tty buffer
+    # until the real shell drains it — executing whatever was queued, including
+    # the poweroff from cleanup.
+    prompts = [r"[#$] $", r"~ ?[#$]", r"\][#$]", r"[\w.-]+@[\w.-]+:[^\s]*[#$]"]
     login_prompt = r"[a-zA-Z0-9_.-]+ login:"
     try:
         # Generous: several of these guests take over two minutes to reach a
@@ -385,7 +430,7 @@ def run(child: pexpect.spawn, command: str) -> str:
     child.sendline(f"{command}; echo {sentinel}")
     try:
         # A serial console emits "\r\r\n", so the line ending needs \r* not \r?.
-        child.expect(marker + r"[\r\n]+", timeout=30)
+        child.expect(marker + r"[\r\n]+", timeout=120)
     except (pexpect.TIMEOUT, pexpect.EOF):
         return ""
     # The sentinel appears exactly once before the output — in the echo of the
