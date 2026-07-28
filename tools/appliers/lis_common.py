@@ -512,6 +512,28 @@ def check_unread(doc: dict, *, ignore: set[str] | frozenset = frozenset()) -> No
              "nothing about it reaches the target")
 
 
+# A login shell the document names must exist in the target, or the account is
+# unusable and anything running `su - <user>` fails outright.
+SHELL_PACKAGES = {"bash": "bash", "zsh": "zsh", "fish": "fish", "ash": None,
+                  "sh": None, "dash": "dash", "ksh": "ksh", "tcsh": "tcsh"}
+
+
+def shell_packages(doc: dict) -> list[str]:
+    """Packages needed for the login shells the document declares."""
+    out: list[str] = []
+    for user in doc.get("users", []) or []:
+        shell = user.get("shell")
+        if not shell:
+            continue
+        name = shell.rsplit("/", 1)[-1]
+        if name not in SHELL_PACKAGES:
+            warn(f"users['{user.get('name')}'].shell {shell!r} is not a shell "
+                 "this applier knows how to install; assuming it is present")
+        elif (pkg := SHELL_PACKAGES[name]) and pkg not in out:
+            out.append(pkg)
+    return out
+
+
 def check_arch(doc: dict, supported: set[str] | frozenset) -> None:
     """Refuse a target architecture this applier does not generate for.
 

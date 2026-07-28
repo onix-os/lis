@@ -22,7 +22,7 @@ import pathlib
 import sys
 import uuid
 
-from lis_common import (track, check_unread, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -232,6 +232,7 @@ def translate(doc: dict) -> tuple[dict, dict]:
 
     pkgs = list(software.get("packages", []))
     pkgs += driver_packages(doc, "arch")
+    pkgs += shell_packages(doc)
     for app in software.get("apps", []):
         if isinstance(app, str):
             pkgs.append(app)

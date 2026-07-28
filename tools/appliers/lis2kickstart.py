@@ -18,7 +18,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -325,6 +325,7 @@ def render_kickstart(doc: dict) -> str:
 
     pkgs = list(software.get("packages", []))
     pkgs += driver_packages(doc, "fedora")
+    pkgs += shell_packages(doc)
     flatpaks = list(software.get("flatpak", []))
     for app in software.get("apps", []):
         if isinstance(app, str):
