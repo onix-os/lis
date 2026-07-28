@@ -18,7 +18,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -253,6 +253,8 @@ def render_kickstart(doc: dict) -> str:
         if user["name"] == "root":
             continue
         cmd = f"user --name={user['name']}"
+        if (uid := user.get("uid")) is not None:
+            cmd += f" --uid={uid}"
         groups = list(user.get("groups", []))
         if user.get("admin") and "wheel" not in groups:
             groups.insert(0, "wheel")
@@ -373,13 +375,10 @@ def render_kickstart(doc: dict) -> str:
             if c := s.get("content"):
                 late.append(f"su - {user['name']} -c {json.dumps(c)}")
     late += sudoers_commands(doc)
+    late += uid_commands(doc)
     late += boot_timeout_commands(doc, "fedora", (doc.get("boot") or {}).get("loader", "grub"))
     for entry in doc.get("files", []) or []:
-        payload = b64(entry["content"])
-        late.append(f"install -d {json.dumps(str(pathlib.PurePath(entry['path']).parent))}")
-        late.append(f"echo {payload} | base64 -d > {json.dumps(entry['path'])}")
-        if mode := entry.get("mode"):
-            late.append(f"chmod {mode} {json.dumps(entry['path'])}")
+        late += file_commands(entry)
     for app in flatpaks:
         late.append(f"flatpak install -y --noninteractive flathub {app}")
     if desktop.get("autologin"):

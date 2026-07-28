@@ -23,7 +23,7 @@ import pathlib
 import re
 import sys
 
-from lis_common import (track, check_unread, password_field, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, uid_commands, password_field, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, secret_ref, warn)
@@ -671,6 +671,8 @@ def translate(doc: dict) -> dict:
 
     for cmd in sudoers_commands(doc):
         late.append(in_target(cmd))
+    for cmd in uid_commands(doc):
+        late.append(in_target(cmd))
     for cmd in boot_timeout_commands(doc, "ubuntu", (doc.get("boot") or {}).get("loader", "grub")):
         late.append(in_target(cmd))
 
@@ -704,6 +706,7 @@ def translate(doc: dict) -> dict:
             refuse(f"user '{user['name']}': no password hash and not marked locked")
         groups = ",".join(user.get("groups", []) + (["sudo"] if user.get("admin") else []))
         cmd = (f"curtin in-target -- useradd -m -p '{field or '!'}'"
+               + (f" -u {user['uid']}" if user.get("uid") is not None else "")
                + (f" -G '{groups}'" if groups else "")
                + (f" -c '{user['comment']}'" if user.get("comment") else "")
                + (" -s " + shell_path(user["shell"]) if user.get("shell") else "")
@@ -761,10 +764,14 @@ def translate(doc: dict) -> dict:
         auto["user-data"] = {"runcmd": runcmd}
 
     for entry in doc.get("files", []) or []:
-        auto.setdefault("user-data", {}).setdefault("write_files", []).append({
-            "path": entry["path"], "content": entry["content"],
-            **({"permissions": entry["mode"]} if entry.get("mode") else {}),
-        })
+        item = {"path": entry["path"], "content": entry["content"]}
+        if entry.get("encoding") == "base64":
+            item["encoding"] = "b64"       # cloud-init's spelling
+        if entry.get("mode"):
+            item["permissions"] = entry["mode"]
+        if entry.get("owner"):
+            item["owner"] = entry["owner"]
+        auto.setdefault("user-data", {}).setdefault("write_files", []).append(item)
 
     if desktop := doc.get("desktop"):
         translate_desktop(desktop, auto, packages)

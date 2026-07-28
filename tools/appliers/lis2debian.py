@@ -20,7 +20,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -465,6 +465,8 @@ def render_preseed(doc: dict) -> str:
 
     for cmd in sudoers_commands(doc):
         late.append(f"in-target sh -c {shquote(cmd)}")
+    for cmd in uid_commands(doc):
+        late.append(f"in-target sh -c {shquote(cmd)}")
     for cmd in boot_timeout_commands(doc, "debian", (doc.get("boot") or {}).get("loader", "grub")):
         late.append(f"in-target sh -c {shquote(cmd)}")
 
@@ -489,6 +491,7 @@ def render_preseed(doc: dict) -> str:
             refuse(f"user '{user['name']}': no password hash and not marked locked")
         groups = ",".join(user.get("groups", []) + (["sudo"] if user.get("admin") else []))
         late.append("in-target useradd -m -p " + shquote(field or "!")
+                    + (f" -u {user['uid']}" if user.get("uid") is not None else "")
                     + (f" -G {groups}" if groups else "")
                     + (f" -s {user['shell']}" if user.get("shell", "").startswith("/") else "")
                     + f" {user['name']}")
@@ -508,12 +511,8 @@ def render_preseed(doc: dict) -> str:
                         + shquote(f"chsh -s $(command -v {shell}) {user['name']}"))
 
     for entry in doc.get("files", []) or []:
-        parent = str(pathlib.PurePath(entry["path"]).parent)
-        late.append(f"in-target install -d {parent}")
-        late.append("in-target sh -c " + shquote(
-            f"echo {b64(entry['content'])} | base64 -d > {entry['path']}"))
-        if mode := entry.get("mode"):
-            late.append(f"in-target chmod {mode} {entry['path']}")
+        for cmd in file_commands(entry):
+            late.append("in-target sh -c " + shquote(cmd))
 
     firstboot = [s["content"] for s in scripts.get("firstboot", []) if s.get("content")]
     for user in users:

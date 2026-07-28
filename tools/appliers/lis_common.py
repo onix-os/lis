@@ -19,6 +19,7 @@ Two report channels:
 """
 
 import argparse
+import base64
 import json
 import pathlib
 import shlex
@@ -531,6 +532,59 @@ def password_field(user: dict) -> str | None:
     if password.get("locked"):
         return f"!{hash_}" if hash_ else "!"
     return hash_
+
+
+def file_payload(entry: dict) -> str:
+    """The file's bytes as base64, honoring `encoding`.
+
+    With `encoding: base64` the content is already base64: encoding it again
+    would write the base64 text itself into the target file rather than the
+    bytes it stands for.
+    """
+    content = entry.get("content", "")
+    if entry.get("encoding") == "base64":
+        return content
+    return base64.b64encode(content.encode()).decode()
+
+
+def file_commands(entry: dict, prefix: str = "") -> list[str]:
+    """Shell that materialises one files[] entry, mode and owner included.
+
+    `prefix` is emitted verbatim so a caller can pass a shell fragment such as
+    `"$target"`; quoting it along with the path would turn the variable into a
+    literal directory name and write the file outside the target root. Only the
+    document-supplied path is quoted.
+    """
+    path = shlex.quote(entry["path"])
+    parent = shlex.quote(str(pathlib.PurePath(entry["path"]).parent))
+    full, full_parent = f"{prefix}{path}", f"{prefix}{parent}"
+    out = [f"install -d {full_parent}",
+           f"echo {file_payload(entry)} | base64 -d > {full}"]
+    if mode := entry.get("mode"):
+        out.append(f"chmod {mode} {full}")
+    if owner := entry.get("owner"):
+        out.append(f"chown {shlex.quote(owner)} {full}")
+    return out
+
+
+def uid_commands(doc: dict) -> list[str]:
+    """Shell that gives each account the uid the document declares.
+
+    The primary account is created by the installer's own machinery — d-i's
+    questions, subiquity's identity, setup-alpine's USEROPTS — none of which
+    take a uid, so it is corrected afterwards. Guarded, so it is a no-op where
+    the uid was already set at creation, and the home directory follows.
+    """
+    out: list[str] = []
+    for user in doc.get("users", []) or []:
+        uid = user.get("uid")
+        if uid is None:
+            continue
+        name = user["name"]
+        out.append(f'if [ "$(id -u {name} 2>/dev/null)" != "{uid}" ]; then '
+                   f"usermod -u {uid} {name} && "
+                   f"chown -R {uid} /home/{name} 2>/dev/null || true; fi")
+    return out
 
 
 def shell_packages(doc: dict) -> list[str]:

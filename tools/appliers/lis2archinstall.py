@@ -22,7 +22,7 @@ import pathlib
 import sys
 import uuid
 
-from lis_common import (track, check_unread, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -367,6 +367,7 @@ def translate(doc: dict) -> tuple[dict, dict]:
                 firstboot.append(f"su - {user['name']} -c {json.dumps(content)}")
 
     commands += sudoers_commands(doc)
+    commands += uid_commands(doc)
     commands += boot_timeout_commands(
         doc, "arch", "systemd-boot" if bootloader == "Systemd-boot" else "grub")
 
@@ -379,11 +380,7 @@ def translate(doc: dict) -> tuple[dict, dict]:
         refuse("scripts.on_error has no archinstall equivalent")
 
     for entry in doc.get("files", []) or []:
-        commands.append(f"install -d {json.dumps(str(pathlib.PurePath(entry['path']).parent))}")
-        commands.append(f"printf '%s' {json.dumps(entry['content'])} > "
-                        f"{json.dumps(entry['path'])}")
-        if mode := entry.get("mode"):
-            commands.append(f"chmod {mode} {json.dumps(entry['path'])}")
+        commands += file_commands(entry)
 
     if firstboot:
         # archinstall's custom-commands run in the chroot during install, so a

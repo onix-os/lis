@@ -20,7 +20,7 @@ import pathlib
 import sys
 import xml.etree.ElementTree as ET
 
-from lis_common import (track, check_unread, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, kernel_params_commands, check_kernel_variant, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -109,6 +109,7 @@ def collect_scripts(doc: dict) -> tuple[list[str], list[str], list[str]]:
             if c := s.get("content"):
                 post.append(f"su - {user['name']} -c {json.dumps(c)}")
     post += sudoers_commands(doc)
+    post += uid_commands(doc)
     post += boot_timeout_commands(doc, "suse", (doc.get("boot") or {}).get("loader", "grub"))
     post += kernel_params_commands(doc, "suse")
 
@@ -117,14 +118,7 @@ def collect_scripts(doc: dict) -> tuple[list[str], list[str], list[str]]:
     # profile.json and autoyast.xml, so one implementation covers both engines.
     import base64 as _b64
     for entry in doc.get("files", []) or []:
-        payload = _b64.b64encode(entry["content"].encode()).decode()
-        parent = str(pathlib.PurePath(entry["path"]).parent)
-        post.append(f"install -d {json.dumps(parent)}")
-        post.append(f"echo {payload} | base64 -d > {json.dumps(entry['path'])}")
-        if mode := entry.get("mode"):
-            post.append(f"chmod {mode} {json.dumps(entry['path'])}")
-        if owner := entry.get("owner"):
-            post.append(f"chown {json.dumps(owner)} {json.dumps(entry['path'])}")
+        post += file_commands(entry)
 
     if mirror_url := (doc.get("mirror", {}) or {}).get("url"):
         post.append("zypper --non-interactive ar --refresh --priority 50 "
@@ -252,6 +246,7 @@ def render_agama(doc: dict) -> dict:
         for extra in normal[1:]:
             groups = ",".join(extra.get("groups", []))
             post.insert(0, f"useradd -m -p {json.dumps(password_field(extra) or '!')}"
+                        + (f" -u {extra['uid']}" if extra.get("uid") is not None else "")
                         + (f" -G {groups}" if groups else "") + f" {extra['name']}")
 
     if drives := agama_drives(doc):

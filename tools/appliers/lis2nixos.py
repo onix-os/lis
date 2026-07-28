@@ -851,14 +851,22 @@ def render_configuration(doc: dict) -> str:
                 f"  hardware.nvidia.open = {str(drivers['gpu'] == 'nvidia-open').lower()};"]
 
     for entry in doc.get("files", []):
+        content = entry["content"]
+        if entry.get("encoding") == "base64":
+            content = base64.b64decode(content).decode()
         if entry["path"].startswith("/etc/"):
             rest = entry["path"][len("/etc/"):]
-            out.append(f"  environment.etc.{nix_str(rest)}.text = {nix_str(entry['content'])};")
+            out.append(f"  environment.etc.{nix_str(rest)}.text = {nix_str(content)};")
             if entry.get("mode"):
                 out.append(f"  environment.etc.{nix_str(rest)}.mode = {nix_str(entry['mode'])};")
+            if owner := entry.get("owner"):
+                user, _, group = owner.partition(":")
+                out.append(f"  environment.etc.{nix_str(rest)}.user = {nix_str(user)};")
+                if group:
+                    out.append(f"  environment.etc.{nix_str(rest)}.group = {nix_str(group)};")
         else:
-            refuse(f"files['{entry['path']}'] outside /etc is not expressible in "
-                   "configuration.nix — use a systemd tmpfiles rule or an activation script")
+            refuse(f"files[] entry {entry['path']!r} is outside /etc; the default "
+                   "translator writes files through environment.etc")
 
     out += render_script_hooks(doc)
 
