@@ -18,7 +18,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -263,10 +263,11 @@ def render_kickstart(doc: dict) -> str:
         if shell := user.get("shell"):
             cmd += f" --shell={shell if shell.startswith('/') else '/usr/bin/' + shell}"
         password = user.get("password") or {}
-        if h := password.get("hash"):
-            cmd += f" --password={h} --iscrypted"
-        elif password.get("locked"):
-            cmd += " --lock"
+        if field := password_field(user):
+            if field != "!":
+                cmd += f" --password={field} --iscrypted"
+            if password.get("locked"):
+                cmd += " --lock"
         else:
             refuse(f"user '{user['name']}': no password hash and not marked locked")
         lines.append(cmd)

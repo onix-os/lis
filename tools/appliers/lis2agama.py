@@ -20,7 +20,7 @@ import pathlib
 import sys
 import xml.etree.ElementTree as ET
 
-from lis_common import (track, check_unread, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, kernel_params_commands, check_kernel_variant, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -235,8 +235,8 @@ def render_agama(doc: dict) -> dict:
     root = next((u for u in users if u["name"] == "root"), None)
     if root:
         entry = {}
-        if h := (root.get("password") or {}).get("hash"):
-            entry["hashedPassword"] = h
+        if field := password_field(root):
+            entry["hashedPassword"] = field
         if keys := root.get("ssh_authorized_keys"):
             entry["sshPublicKey"] = keys[0]
         if entry:
@@ -247,11 +247,11 @@ def render_agama(doc: dict) -> dict:
         profile["user"] = {
             "userName": primary["name"],
             "fullName": primary.get("comment", primary["name"]),
-            "hashedPassword": (primary.get("password") or {}).get("hash", "!"),
+            "hashedPassword": password_field(primary) or "!",
         }
         for extra in normal[1:]:
             groups = ",".join(extra.get("groups", []))
-            post.insert(0, f"useradd -m -p {json.dumps((extra.get('password') or {}).get('hash', '!'))}"
+            post.insert(0, f"useradd -m -p {json.dumps(password_field(extra) or '!')}"
                         + (f" -G {groups}" if groups else "") + f" {extra['name']}")
 
     if drives := agama_drives(doc):
@@ -441,7 +441,7 @@ def render_autoyast(doc: dict) -> str:
         node = ET.SubElement(user_list, "user")
         ET.SubElement(node, "username").text = user["name"]
         password = user.get("password") or {}
-        ET.SubElement(node, "user_password").text = password.get("hash", "!")
+        ET.SubElement(node, "user_password").text = password_field(user) or "!"
         boolean(node, "encrypted", True)
         if comment := user.get("comment"):
             ET.SubElement(node, "fullname").text = comment

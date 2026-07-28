@@ -22,7 +22,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, shell_packages, check_arch, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, password_field, shell_packages, check_arch, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_kernel_variant, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -219,8 +219,8 @@ def render_alpine(doc: dict) -> tuple[str, str, str]:
 
     root_user = next((u for u in users if u["name"] == "root"), None)
     root_password = (root_user or {}).get("password") or {}
-    if hash_ := root_password.get("hash"):
-        post.append(f'chroot "$target" usermod -p {shquote(hash_)} root')
+    if root_field := password_field(root_user or {}):
+        post.append(f'chroot "$target" usermod -p {shquote(root_field)} root')
     else:
         # setup-alpine -e leaves root open; a document that does not grant root
         # a password must not end up with a passwordless one.
@@ -236,11 +236,11 @@ def render_alpine(doc: dict) -> tuple[str, str, str]:
         for group in primary_user.get("groups", []) or []:
             post.append(f'chroot "$target" addgroup -S {group} 2>/dev/null || true')
             post.append(f'chroot "$target" addgroup {primary_user["name"]} {group}')
-        if hash_ := (primary_user.get("password") or {}).get("hash"):
+        if field := password_field(primary_user):
             # busybox has no usermod; chpasswd -e takes the crypt(3) hash
             # directly. Single-quoted, or the shell would eat the $-delimited
             # fields of the hash itself.
-            post.append(f'echo {shquote(primary_user["name"] + ":" + hash_)} '
+            post.append(f'echo {shquote(primary_user["name"] + ":" + field)} '
                         f'| chroot "$target" chpasswd -e')
         # USEROPTS carries neither of these either.
         if shell := primary_user.get("shell"):
@@ -262,8 +262,8 @@ def render_alpine(doc: dict) -> tuple[str, str, str]:
         if comment := user.get("comment"):
             add += f" -g {json.dumps(comment)}"
         post.append(f'chroot "$target" {add} {user["name"]}')
-        if hash_ := password.get("hash"):
-            post.append(f'chroot "$target" usermod -p {json.dumps(hash_)} {user["name"]}')
+        if field := password_field(user):
+            post.append(f'chroot "$target" usermod -p {json.dumps(field)} {user["name"]}')
         for group in groups.split(",") if groups else []:
             post.append(f'chroot "$target" addgroup {user["name"]} {group} || true')
 

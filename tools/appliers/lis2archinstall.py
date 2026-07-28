@@ -22,7 +22,7 @@ import pathlib
 import sys
 import uuid
 
-from lis_common import (track, check_unread, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -342,10 +342,8 @@ def translate(doc: dict) -> tuple[dict, dict]:
             "sudo": bool(user.get("admin", False)),
             "groups": groups,
         }
-        if h := password.get("hash"):
-            entry["enc_password"] = h
-        elif password.get("locked"):
-            entry["enc_password"] = "!"
+        if field := password_field(user):
+            entry["enc_password"] = field
         else:
             refuse(f"user '{user['name']}': no password hash and not marked locked "
                    "(SPEC §2.4 forbids inlining a plaintext password)")

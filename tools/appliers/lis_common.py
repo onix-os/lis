@@ -518,6 +518,21 @@ SHELL_PACKAGES = {"bash": "bash", "zsh": "zsh", "fish": "fish", "ash": None,
                   "sh": None, "dash": "dash", "ksh": "ksh", "tcsh": "tcsh"}
 
 
+def password_field(user: dict) -> str | None:
+    """The crypt(3) field for an account, with lock taking precedence.
+
+    SPEC §9: "`password.locked: true` disables password login." A document that
+    gives both a hash and `locked: true` is asking for a locked account, so the
+    hash alone is the wrong answer. `!` in front of the stored hash is what
+    `passwd -l` writes: login disabled, the hash kept for a later unlock.
+    """
+    password = user.get("password") or {}
+    hash_ = password.get("hash")
+    if password.get("locked"):
+        return f"!{hash_}" if hash_ else "!"
+    return hash_
+
+
 def shell_packages(doc: dict) -> list[str]:
     """Packages needed for the login shells the document declares."""
     out: list[str] = []

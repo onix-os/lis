@@ -23,7 +23,7 @@ import pathlib
 import re
 import sys
 
-from lis_common import (track, check_unread, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, password_field, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, secret_ref, warn)
@@ -553,10 +553,8 @@ def translate(doc: dict) -> dict:
             "realname": primary.get("comment", primary["name"]),
         }
         # autoinstall takes crypt(3) hashes directly — no plaintext needed.
-        if hash_ := (primary.get("password") or {}).get("hash"):
-            identity["password"] = hash_
-        elif (primary.get("password") or {}).get("locked"):
-            identity["password"] = "!"
+        if field := password_field(primary):
+            identity["password"] = field
         else:
             refuse(f"user '{primary['name']}': no password hash and not marked locked — "
                    "autoinstall cannot create a usable account (SPEC §2.4 forbids "
@@ -701,11 +699,11 @@ def translate(doc: dict) -> dict:
     # Extra users beyond the primary: created in-target.
     for user in users[1:]:
         password = user.get("password") or {}
-        hash_ = password.get("hash")
-        if not hash_ and not password.get("locked"):
+        field = password_field(user)
+        if not field:
             refuse(f"user '{user['name']}': no password hash and not marked locked")
         groups = ",".join(user.get("groups", []) + (["sudo"] if user.get("admin") else []))
-        cmd = (f"curtin in-target -- useradd -m -p '{hash_ or '!'}'"
+        cmd = (f"curtin in-target -- useradd -m -p '{field or '!'}'"
                + (f" -G '{groups}'" if groups else "")
                + (f" -c '{user['comment']}'" if user.get("comment") else "")
                + (" -s " + shell_path(user["shell"]) if user.get("shell") else "")
