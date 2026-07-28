@@ -651,7 +651,9 @@ def check_snapshots(doc: dict, *, tools: set[str] | frozenset = frozenset(),
     snapshots = (doc.get("storage", {}) or {}).get("snapshots") or {}
     if not snapshots:
         return
-    _ = snapshots.get("enabled")
+    if snapshots.get("enabled") and not tools:
+        refuse("storage.snapshots.enabled: this applier sets up no snapshot "
+               "tooling, so the installed system would take none")
     tool = snapshots.get("tool")
     if tool not in (None, "auto") and tool not in tools:
         refuse(f"storage.snapshots.tool {tool!r} is not set up by this applier"

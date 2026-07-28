@@ -162,6 +162,14 @@ def packages_of(doc: dict) -> tuple[list[str], list[str]]:
     pkgs += driver_packages(doc, "suse")
     pkgs += shell_packages(doc)
     pkgs += security_packages(doc, "suse")
+    snapshots = (doc.get("storage", {}) or {}).get("snapshots") or {}
+    if snapshots.get("enabled"):
+        pkgs.append("snapper")
+        if snapshots.get("boot_menu"):
+            # The snapshot submenu in GRUB comes from this plugin, not from
+            # snapper itself; claiming boot_menu support without it would be a
+            # capability declared and not delivered.
+            pkgs.append("grub2-snapper-plugin")
     if kernel_pkg := check_kernel_variant(
             doc, {"lts": "kernel-longterm", "realtime": "kernel-rt"}, "openSUSE"):
         pkgs.append(kernel_pkg)
