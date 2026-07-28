@@ -22,7 +22,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_kernel_variant, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -196,6 +196,7 @@ def render_alpine(doc: dict) -> tuple[str, str, str]:
     # setup-alpine installs these before the post script runs, so a declared
     # login shell exists by the time anything tries to use it.
     packages += shell_packages(doc)
+    packages += security_packages(doc, "alpine")
     if kernel_pkg := check_kernel_variant(doc, {"lts": "linux-lts"}, "Alpine"):
         packages.append(kernel_pkg)
     for app in software.get("apps", []):
@@ -279,6 +280,8 @@ def render_alpine(doc: dict) -> tuple[str, str, str]:
     for cmd in sudoers_commands(doc):
         post.append(f'chroot "$target" sh -c {json.dumps(cmd)}')
     for cmd in uid_commands(doc):
+        post.append(f'chroot "$target" sh -c {json.dumps(cmd)}')
+    for cmd in system_commands(doc, "alpine"):
         post.append(f'chroot "$target" sh -c {json.dumps(cmd)}')
 
     for stage in ("post_storage", "post_install", "post", "pre_reboot", "on_success"):

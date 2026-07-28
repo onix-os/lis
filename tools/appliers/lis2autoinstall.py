@@ -23,7 +23,7 @@ import pathlib
 import re
 import sys
 
-from lis_common import (track, check_unread, uid_commands, password_field, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, system_commands, security_packages, uid_commands, password_field, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, secret_ref, warn)
@@ -636,6 +636,7 @@ def translate(doc: dict) -> dict:
         packages += driver_packages(doc, "ubuntu", skip=frozenset({"gpu"}))
     else:
         packages += driver_packages(doc, "ubuntu")
+        packages += security_packages(doc, "ubuntu")
 
     if proxy := (doc.get("proxy", {}) or {}).get("http"):
         auto["proxy"] = proxy
@@ -672,6 +673,8 @@ def translate(doc: dict) -> dict:
     for cmd in sudoers_commands(doc):
         late.append(in_target(cmd))
     for cmd in uid_commands(doc):
+        late.append(in_target(cmd))
+    for cmd in system_commands(doc, "ubuntu"):
         late.append(in_target(cmd))
     for cmd in boot_timeout_commands(doc, "ubuntu", (doc.get("boot") or {}).get("loader", "grub")):
         late.append(in_target(cmd))

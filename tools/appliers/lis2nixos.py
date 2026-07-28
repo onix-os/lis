@@ -20,7 +20,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, consume, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, check_mirror, check_kernel_variant, check_user_sudo,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, warn)
@@ -712,6 +712,28 @@ def render_configuration(doc: dict) -> str:
             doc, {"lts": "linuxPackages", "hardened": "linuxPackages_hardened",
                   "realtime": "linuxPackages_rt"}, "NixOS"):
         out.append(f"  boot.kernelPackages = pkgs.{kernel_set};")
+    module = ((system.get("security") or {}).get("module"))
+    if module == "apparmor":
+        out.append("  security.apparmor.enable = true;")
+    elif module == "none":
+        out.append("  security.apparmor.enable = false;")
+    elif module == "selinux":
+        refuse("system.security.module 'selinux' is not supported by NixOS")
+
+    hwclock = system.get("hwclock")
+    if hwclock == "localtime":
+        out.append("  time.hardwareClockInLocalTime = true;")
+
+    if extra := system.get("extra_locales"):
+        locales = ["en_US.UTF-8/UTF-8"] + [f"{l}/{l.split('.')[-1]}" for l in extra]
+        out.append(f"  i18n.supportedLocales = {nix_list(locales)};")
+    if overrides := system.get("locale_overrides"):
+        consume(overrides)
+        out.append("  i18n.extraLocaleSettings = {")
+        for key, value in sorted(overrides.items()):
+            out.append(f"    {key} = {nix_str(value)};")
+        out.append("  };")
+
     if mirror_url := (doc.get("mirror", {}) or {}).get("url"):
         out.append(f"  nix.settings.substituters = [ {nix_str(mirror_url)} ];")
     proxy = doc.get("proxy", {}) or {}

@@ -446,6 +446,28 @@ def track(doc: dict) -> TrackedDict:
     return TrackedDict(doc)
 
 
+def consume(container) -> None:
+    """Mark every leaf under a container the applier is using wholesale.
+
+    Needed for maps with document-defined keys — `system.locale_overrides` has
+    no fixed field names, so an applier consumes it by iterating `items()`,
+    which the tracker deliberately does not count (bulk traversal is how the
+    birth certificate would otherwise mark the whole document as read).
+    """
+    if isinstance(container, TrackedDict):
+        for key, value in dict.items(container):
+            sub = _join(container._path, key)
+            _READS.add(sub)
+            if isinstance(value, (dict, list)):
+                consume(_wrap(value, sub))
+    elif isinstance(container, TrackedList):
+        for value in list.__iter__(container):
+            if isinstance(value, (dict, list)):
+                consume(_wrap(value, container._path + "[]"))
+            else:
+                _READS.add(container._path)
+
+
 def declared_paths(node, path: str = "") -> set[str]:
     """Every leaf path the document actually declares, list indices collapsed."""
     out: set[str] = set()
@@ -565,6 +587,75 @@ def file_commands(entry: dict, prefix: str = "") -> list[str]:
     if owner := entry.get("owner"):
         out.append(f"chown {shlex.quote(owner)} {full}")
     return out
+
+
+# Locale generation, the hardware clock and the LSM have no answer-file key in
+# most installers, but every applier has a post-install stage that can set them.
+LOCALE_GEN = {
+    "debian": "locale-gen", "ubuntu": "locale-gen", "arch": "locale-gen",
+    "fedora": None,   # glibc-langpack-* supplies locales; no locale-gen
+    "suse": None,     # locales ship with glibc-locale
+    "alpine": None,   # musl: no locale generation at all
+}
+
+LSM_PACKAGES = {
+    "apparmor": {"debian": "apparmor", "ubuntu": "apparmor", "arch": "apparmor",
+                 "suse": "apparmor-parser", "fedora": None, "alpine": None},
+    "selinux": {"fedora": "selinux-policy-targeted", "debian": "selinux-basics",
+                "ubuntu": "selinux-basics", "suse": "selinux-policy",
+                "arch": None, "alpine": None},
+}
+
+
+def system_commands(doc: dict, family: str) -> list[str]:
+    """Post-install shell for system.* facts no answer file carries."""
+    system = doc.get("system", {}) or {}
+    out: list[str] = []
+
+    if hwclock := system.get("hwclock"):
+        # /etc/adjtime's third line is what every distro reads at boot.
+        mode = "LOCAL" if hwclock == "localtime" else "UTC"
+        out.append(f"printf '0.0 0 0.0\n0\n{mode}\n' > /etc/adjtime")
+
+    if extra := system.get("extra_locales"):
+        gen = LOCALE_GEN.get(family)
+        if gen is None:
+            warn(f"system.extra_locales {extra!r} is not generated on this "
+                 "distro; install the matching locale packages instead")
+        else:
+            for loc in extra:
+                charset = loc.split(".")[-1] if "." in loc else "UTF-8"
+                out.append(f"grep -q {shlex.quote(loc)} /etc/locale.gen 2>/dev/null "
+                           f"|| echo {shlex.quote(f'{loc} {charset}')} >> /etc/locale.gen")
+            out.append(gen)
+
+    if overrides := system.get("locale_overrides"):
+        consume(overrides)
+        for key, value in sorted(overrides.items()):
+            out.append(f"grep -q '^{key}=' /etc/locale.conf 2>/dev/null "
+                       f"&& sed -i {shlex.quote(f's/^{key}=.*/{key}={value}/')} /etc/locale.conf "
+                       f"|| echo {shlex.quote(f'{key}={value}')} >> /etc/locale.conf")
+
+    return out
+
+
+def security_packages(doc: dict, family: str) -> list[str]:
+    """Packages for system.security.module, refusing what the distro lacks."""
+    module = ((doc.get("system", {}) or {}).get("security") or {}).get("module")
+    if module in (None, "auto"):
+        return []
+    if module == "none":
+        return []
+    table = LSM_PACKAGES.get(module, {})
+    if family not in table:
+        refuse(f"system.security.module {module!r} has no mapping for this distro")
+        return []
+    pkg = table[family]
+    if pkg is None:
+        refuse(f"system.security.module {module!r} is not supported on this "
+               "distro by the default translator")
+        return []
+    return [pkg]
 
 
 def uid_commands(doc: dict) -> list[str]:

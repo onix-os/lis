@@ -22,7 +22,7 @@ import pathlib
 import sys
 import uuid
 
-from lis_common import (track, check_unread, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -233,6 +233,7 @@ def translate(doc: dict) -> tuple[dict, dict]:
     pkgs = list(software.get("packages", []))
     pkgs += driver_packages(doc, "arch")
     pkgs += shell_packages(doc)
+    pkgs += security_packages(doc, "arch")
     for app in software.get("apps", []):
         if isinstance(app, str):
             pkgs.append(app)
@@ -368,6 +369,7 @@ def translate(doc: dict) -> tuple[dict, dict]:
 
     commands += sudoers_commands(doc)
     commands += uid_commands(doc)
+    commands += system_commands(doc, "arch")
     commands += boot_timeout_commands(
         doc, "arch", "systemd-boot" if bootloader == "Systemd-boot" else "grub")
 

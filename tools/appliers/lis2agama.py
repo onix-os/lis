@@ -20,7 +20,7 @@ import pathlib
 import sys
 import xml.etree.ElementTree as ET
 
-from lis_common import (track, check_unread, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, kernel_params_commands, check_kernel_variant, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -110,6 +110,7 @@ def collect_scripts(doc: dict) -> tuple[list[str], list[str], list[str]]:
                 post.append(f"su - {user['name']} -c {json.dumps(c)}")
     post += sudoers_commands(doc)
     post += uid_commands(doc)
+    post += system_commands(doc, "suse")
     post += boot_timeout_commands(doc, "suse", (doc.get("boot") or {}).get("loader", "grub"))
     post += kernel_params_commands(doc, "suse")
 
@@ -159,6 +160,7 @@ def packages_of(doc: dict) -> tuple[list[str], list[str]]:
     pkgs = list(software.get("packages", []))
     pkgs += driver_packages(doc, "suse")
     pkgs += shell_packages(doc)
+    pkgs += security_packages(doc, "suse")
     if kernel_pkg := check_kernel_variant(
             doc, {"lts": "kernel-longterm", "realtime": "kernel-rt"}, "openSUSE"):
         pkgs.append(kernel_pkg)

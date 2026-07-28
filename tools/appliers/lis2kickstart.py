@@ -18,7 +18,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -219,6 +219,12 @@ def render_kickstart(doc: dict) -> str:
     utc = "" if system.get("hwclock") == "localtime" else " --utc"
     lines.append(f"timezone {system.get('timezone', 'UTC')}{utc}")
     lines.append("text")
+    module = ((system.get("security") or {}).get("module"))
+    if module == "selinux":
+        lines.append("selinux --enforcing")
+    elif module == "none":
+        lines.append("selinux --disabled")
+
     if mirror_url := (doc.get("mirror", {}) or {}).get("url"):
         lines.append(f"url --url={mirror_url}")
 
@@ -329,6 +335,7 @@ def render_kickstart(doc: dict) -> str:
     pkgs = list(software.get("packages", []))
     pkgs += driver_packages(doc, "fedora")
     pkgs += shell_packages(doc)
+    pkgs += security_packages(doc, "fedora")
     flatpaks = list(software.get("flatpak", []))
     for app in software.get("apps", []):
         if isinstance(app, str):
@@ -376,6 +383,7 @@ def render_kickstart(doc: dict) -> str:
                 late.append(f"su - {user['name']} -c {json.dumps(c)}")
     late += sudoers_commands(doc)
     late += uid_commands(doc)
+    late += system_commands(doc, "fedora")
     late += boot_timeout_commands(doc, "fedora", (doc.get("boot") or {}).get("loader", "grub"))
     for entry in doc.get("files", []) or []:
         late += file_commands(entry)
