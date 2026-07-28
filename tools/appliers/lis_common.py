@@ -615,7 +615,11 @@ def system_commands(doc: dict, family: str) -> list[str]:
     out: list[str] = []
 
     if hwclock := system.get("hwclock"):
-        # /etc/adjtime's third line is what every distro reads at boot.
+        # /etc/adjtime's third line is what every distro reads at boot. Built
+        # from plain echoes: a printf escape would put a real newline in the
+        # command, and a preseed value cannot span lines.
+        mode = "LOCAL" if hwclock == "localtime" else "UTC"
+        out.append("{ echo '0.0 0 0.0'; echo 0; echo " + mode + "; } > /etc/adjtime")
         mode = "LOCAL" if hwclock == "localtime" else "UTC"
         out.append(f"printf '0.0 0 0.0\n0\n{mode}\n' > /etc/adjtime")
 
@@ -711,9 +715,8 @@ def uid_commands(doc: dict) -> list[str]:
         if uid is None:
             continue
         name = user["name"]
-        out.append(f'if [ "$(id -u {name} 2>/dev/null)" != "{uid}" ]; then '
-                   f"usermod -u {uid} {name} && "
-                   f"chown -R {uid} /home/{name} 2>/dev/null || true; fi")
+        out.append(f"usermod -u {uid} {name} 2>/dev/null || true")
+        out.append(f"chown -R {uid} /home/{name} 2>/dev/null || true")
     return out
 
 

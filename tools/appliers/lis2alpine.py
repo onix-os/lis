@@ -197,6 +197,8 @@ def render_alpine(doc: dict) -> tuple[str, str, str]:
     # setup-alpine installs these before the post script runs, so a declared
     # login shell exists by the time anything tries to use it.
     packages += shell_packages(doc)
+    if any(u.get("uid") is not None for u in doc.get("users", []) or []):
+        packages.append("shadow")   # busybox has no usermod applet
     packages += security_packages(doc, "alpine")
     if kernel_pkg := check_kernel_variant(doc, {"lts": "linux-lts"}, "Alpine"):
         packages.append(kernel_pkg)

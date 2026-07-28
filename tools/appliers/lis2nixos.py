@@ -654,6 +654,7 @@ def render_configuration(doc: dict) -> str:
         out.append("  time.hardwareClockInLocalTime = true;")
     if system.get("locale"):
         out.append(f"  i18n.defaultLocale = {nix_str(system['locale'])};")
+    consume(system.get("locale_overrides", {}) or {})
     for key, value in (system.get("locale_overrides", {}) or {}).items():
         out.append(f"  i18n.extraLocaleSettings.{key} = {nix_str(value)};")
     keymap = system.get("keymap", {}) or {}
@@ -721,19 +722,12 @@ def render_configuration(doc: dict) -> str:
     elif module == "selinux":
         refuse("system.security.module 'selinux' is not supported by NixOS")
 
-    hwclock = system.get("hwclock")
-    if hwclock == "localtime":
-        out.append("  time.hardwareClockInLocalTime = true;")
-
+    # hwclock and locale_overrides are emitted where the rest of the i18n and
+    # time settings are; duplicating them here defined the same Nix option
+    # twice, which is an evaluation error rather than a merge.
     if extra := system.get("extra_locales"):
         locales = ["en_US.UTF-8/UTF-8"] + [f"{l}/{l.split('.')[-1]}" for l in extra]
         out.append(f"  i18n.supportedLocales = {nix_list(locales)};")
-    if overrides := system.get("locale_overrides"):
-        consume(overrides)
-        out.append("  i18n.extraLocaleSettings = {")
-        for key, value in sorted(overrides.items()):
-            out.append(f"    {key} = {nix_str(value)};")
-        out.append("  };")
 
     if mirror_url := (doc.get("mirror", {}) or {}).get("url"):
         out.append(f"  nix.settings.substituters = [ {nix_str(mirror_url)} ];")
