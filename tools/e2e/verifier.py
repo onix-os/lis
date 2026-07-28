@@ -315,10 +315,23 @@ def login(child: pexpect.spawn, recipe: dict, password: str = OPERATOR_PASSWORD)
     if idx == 0:
         # An autologin console prints the very same "host login:" banner and
         # then hands over a shell unprompted, so the banner alone does not mean
-        # credentials are wanted. Give the shell a moment to appear first.
+        # credentials are wanted. Wait generously: Ubuntu runs `pro status` and
+        # landscape hooks to build its MOTD, which can take most a minute
+        # between the banner and the prompt.
         try:
-            child.expect(prompts, timeout=20)
+            child.expect(prompts, timeout=120)
             return True
+        except pexpect.EOF:
+            return False
+        except pexpect.TIMEOUT:
+            pass
+        # Still nothing. Nudge the console: a real login prompt re-displays
+        # itself, an autologin shell answers with its prompt. Typing a username
+        # into a live root shell would wedge the session, so disambiguate first.
+        child.sendline("")
+        try:
+            if child.expect([*prompts, login_prompt], timeout=30) < len(prompts):
+                return True
         except pexpect.EOF:
             return False
         except pexpect.TIMEOUT:
