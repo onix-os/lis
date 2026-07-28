@@ -201,7 +201,11 @@ def run_stage4_live_guest_verification(args, target_disk: pathlib.Path,
 
         for entry in recipe.get("files", []) or []:
             value = run(child, f"cat {entry['path']} 2>/dev/null")
-            want = entry["content"].strip()
+            want = entry["content"]
+            if entry.get("encoding") == "base64":
+                import base64 as _b64
+                want = _b64.b64decode(want).decode()
+            want = want.strip()
             check(f"File ({entry['path']})", want in value,
                   f"content {want!r} present" if want in value else "missing or wrong")
             if mode := entry.get("mode"):
@@ -209,6 +213,32 @@ def run_stage4_live_guest_verification(args, target_disk: pathlib.Path,
                 check(f"  mode {mode} for {entry['path']}",
                       value.strip() == mode.lstrip("0"),
                       f"found {value.strip()!r}")
+            if owner := entry.get("owner"):
+                value = run(child, f"stat -c %U:%G {entry['path']} 2>/dev/null")
+                check(f"  owner {owner} for {entry['path']}",
+                      value.strip() == owner, f"found {value.strip()!r}")
+
+        for user in expected.users:
+            if (uid := user.get("uid")) is not None:
+                value = run(child, f"id -u {user['name']} 2>/dev/null")
+                check(f"  uid {uid} for {user['name']}", value.strip() == str(uid),
+                      f"found {value.strip()!r}")
+
+        if (hwclock := (recipe.get("system") or {}).get("hwclock")):
+            # /etc/adjtime's third line is what the system reads at boot.
+            value = run(child, "tail -n1 /etc/adjtime 2>/dev/null || echo MISSING")
+            want = "LOCAL" if hwclock == "localtime" else "UTC"
+            check(f"Hardware clock ({hwclock})", value.strip() == want,
+                  f"/etc/adjtime says {value.strip()!r}")
+
+        for key, want in ((recipe.get("system") or {}).get("locale_overrides") or {}).items():
+            # Distros keep this in different files; any of them satisfies it.
+            value = run(child, "cat /etc/locale.conf /etc/environment "
+                               f"/etc/default/locale 2>/dev/null | grep -c '^{key}={want}'"
+                               " || echo 0")
+            ok = value.strip().isdigit() and int(value.strip()) > 0
+            check(f"Locale override ({key}={want})", ok,
+                  "applied" if ok else "not found in any locale config")
 
         for user in expected.users:
             if user.get("sudo") != "nopasswd":

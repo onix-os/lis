@@ -72,6 +72,10 @@
     "keymap": {
       "console": "us",
       "layout": "us"
+    },
+    "hwclock": "utc",
+    "locale_overrides": {
+      "LC_TIME": "en_US.UTF-8"
     }
   },
   "users": [
@@ -99,7 +103,8 @@
           }
         ]
       },
-      "sudo": "nopasswd"
+      "sudo": "nopasswd",
+      "uid": 1234
     }
   ],
   "software": {
@@ -134,8 +139,10 @@
   "files": [
     {
       "path": "/etc/lis-test-file",
-      "content": "FILES_SECTION_PASSED\n",
-      "mode": "0644"
+      "content": "RklMRVNfU0VDVElPTl9QQVNTRUQK",
+      "encoding": "base64",
+      "mode": "0644",
+      "owner": "root:root"
     }
   ]
 }
