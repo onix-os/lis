@@ -336,6 +336,246 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
                     help="downgrade refusals to warnings and continue (opts out of SPEC §2.3)")
 
 
+# ── access tracking ──────────────────────────────────────────────────
+#
+# Hand-written per-field checks only catch the fields somebody remembered to
+# check, which is how 112 leaf paths came to be dropped in silence. Instead the
+# document itself records which paths an applier actually consulted; anything
+# declared but never read is, by definition, intent that did not reach the
+# target.
+
+_READS: set[str] = set()
+
+
+def _join(prefix: str, key) -> str:
+    return f"{prefix}.{key}" if prefix else str(key)
+
+
+# Wrappers are memoised per (underlying object, path). Handing out a fresh
+# wrapper on every access would silently break identity comparisons in the
+# appliers — `[sub for sub in subvolumes if sub is not root]` matches nothing
+# if each iteration yields a new object, which changes what gets generated.
+_WRAPPERS: dict = {}
+
+
+def _wrap(value, path: str):
+    if isinstance(value, (TrackedDict, TrackedList)):
+        return value
+    if not isinstance(value, (dict, list)):
+        return value
+    key = (id(value), path)
+    wrapper = _WRAPPERS.get(key)
+    if wrapper is None:
+        wrapper = (TrackedDict(value, path) if isinstance(value, dict)
+                   else TrackedList(value, path))
+        # Keep the original alive so its id cannot be reused by another object.
+        _WRAPPERS[key] = wrapper
+        _ORIGINALS.append(value)
+    return wrapper
+
+
+_ORIGINALS: list = []
+
+
+class TrackedDict(dict):
+    """A dict that records which keys were asked for, and where.
+
+    Only explicit key access counts — `d[k]`, `d.get(k)`, `k in d`. Bulk
+    traversal (`items()`, `values()`, iteration, and therefore `json.dumps` of
+    the whole document for the birth certificate) deliberately does not, or
+    serialising the document once would mark every field as honored.
+    """
+
+    __slots__ = ("_path",)
+
+    def __init__(self, data, path: str = ""):
+        super().__init__(data)
+        self._path = path
+
+    def __getitem__(self, key):
+        value = super().__getitem__(key)
+        _READS.add(_join(self._path, key))
+        return _wrap(value, _join(self._path, key))
+
+    def get(self, key, default=None):
+        _READS.add(_join(self._path, key))
+        if key in self:
+            return _wrap(super().__getitem__(key), _join(self._path, key))
+        return default
+
+    def __contains__(self, key):
+        _READS.add(_join(self._path, key))
+        return super().__contains__(key)
+
+    def copy(self):
+        """A mutable copy that still records reads against the same path.
+
+        `dict(section)` silently returns a plain dict and disables tracking for
+        everything read from it afterwards, which is how a consumed field can
+        still look ignored. Callers that need to mutate should use this.
+        """
+        return TrackedDict(dict(self), self._path)
+
+
+class TrackedList(list):
+    """A list whose elements carry the `path[]` prefix of their container."""
+
+    __slots__ = ("_path",)
+
+    def __init__(self, data, path: str = ""):
+        super().__init__(data)
+        self._path = path
+
+    def __getitem__(self, index):
+        value = super().__getitem__(index)
+        if isinstance(index, slice):
+            return [_wrap(v, self._path + "[]") for v in value]
+        return _wrap(value, self._path + "[]")
+
+    def __iter__(self):
+        for value in super().__iter__():
+            yield _wrap(value, self._path + "[]")
+
+
+def track(doc: dict) -> TrackedDict:
+    """Wrap a document so every field access is recorded."""
+    _READS.clear()
+    _WRAPPERS.clear()
+    _ORIGINALS.clear()
+    return TrackedDict(doc)
+
+
+def declared_paths(node, path: str = "") -> set[str]:
+    """Every leaf path the document actually declares, list indices collapsed."""
+    out: set[str] = set()
+    if isinstance(node, dict):
+        if not node and path:
+            out.add(path)
+        for key, value in node.items():
+            out |= declared_paths(value, _join(path, key))
+    elif isinstance(node, list):
+        if not node and path:
+            out.add(path)
+        elif all(not isinstance(v, (dict, list)) for v in node):
+            # A list of scalars is consumed whole (software.packages,
+            # users[].groups, boot.kernel.params): there is no per-item access
+            # to record, so the list itself is the leaf.
+            out.add(path)
+        else:
+            for value in node:
+                out |= declared_paths(value, path + "[]")
+    elif path:
+        out.add(path)
+    return out
+
+
+def read_paths() -> set[str]:
+    """Paths recorded so far, plus every prefix of them.
+
+    An applier that reads `storage.partitions` and iterates it has consulted
+    the partitions; the leaves it then ignores are what matter, so a read of a
+    container does not excuse its children, but a read of a child does mark the
+    container as visited.
+    """
+    out: set[str] = set()
+    for path in _READS:
+        parts = path.replace("[]", "").split(".")
+        for i in range(1, len(parts) + 1):
+            out.add(".".join(parts[:i]))
+        out.add(path)
+    return out
+
+
+def check_unread(doc: dict, *, ignore: set[str] | frozenset = frozenset()) -> None:
+    """Warn about declared intent this applier never even looked at.
+
+    `ignore` names paths the applier has deliberately decided about elsewhere
+    (it refused them, or they are document identity rather than install intent).
+    """
+    declared = declared_paths(doc)
+    unread = set()
+    for path in declared:
+        flat = path.replace("[]", "")
+        if flat.split(".")[0] in NON_INTENT_SECTIONS:
+            continue
+        if path in ignore or flat in ignore:
+            continue
+        # Only the leaf itself counts. Excusing a leaf because its container
+        # was read would excuse everything: every applier opens `system`,
+        # `storage` and `users` to descend into them, which says nothing about
+        # whether it ever looked at the fields inside.
+        if flat in _READS_FLAT():
+            continue
+        unread.add(path)
+    for path in sorted(unread):
+        warn(f"{path} is declared but this applier never reads it — "
+             "nothing about it reaches the target")
+
+
+def check_arch(doc: dict, supported: set[str] | frozenset) -> None:
+    """Refuse a target architecture this applier does not generate for.
+
+    Every applier emits arch-specific output — i386-pc GRUB, an EF02 partition,
+    a platform string — so quietly translating an aarch64 document with x86
+    scaffolding produces something that cannot boot.
+    """
+    arch = (doc.get("target", {}) or {}).get("arch")
+    if arch and arch not in supported:
+        refuse(f"target.arch {arch!r} is not generated by this applier "
+               f"(supports {', '.join(sorted(supported))})")
+
+
+SCRIPT_STAGES = ("pre", "pre_install", "post_storage", "post", "post_install",
+                 "pre_reboot", "on_success", "on_error", "firstboot")
+
+
+def check_script_fields(doc: dict, *, honors_chroot: bool = False,
+                        chroots_by_default: bool = True) -> None:
+    """Report per-script metadata the applier cannot act on.
+
+    Deliberately does not touch `content`: reading it here would mark it as
+    consulted and hide an applier that drops the script body entirely.
+    """
+    def inspect(items, label):
+        for item in items or []:
+            if interp := item.get("interpreter"):
+                warn(f"{label}.interpreter {interp!r} is not applied — the "
+                     "script runs under the applier's own shell")
+            if item.get("source"):
+                refuse(f"{label}.source names an external script body this "
+                       "applier does not fetch; inline it as content")
+            if (policy := item.get("on_failure")) is not None:
+                warn(f"{label}.on_failure {policy!r} is not applied — the "
+                     "installer's own failure handling governs")
+            flag = item.get("chroot")
+            if not honors_chroot and flag is not None:
+                if bool(flag) is not chroots_by_default:
+                    warn(f"{label}.chroot {flag!r} is not applied — this "
+                         "applier always runs the script "
+                         + ("inside the target" if chroots_by_default
+                            else "on the installer host"))
+
+    scripts = doc.get("scripts", {}) or {}
+    for stage in SCRIPT_STAGES:
+        inspect(scripts.get(stage), f"scripts.{stage}[]")
+    for user in doc.get("users", []) or []:
+        user_scripts = user.get("scripts", {}) or {}
+        for stage in ("post", "post_install", "firstboot"):
+            inspect(user_scripts.get(stage), f"users['{user.get('name')}'].scripts.{stage}[]")
+
+
+# Paths consumed only on the --apply path, which a translate-only run never
+# reaches. Naming them here keeps the tracker from reporting a field that is
+# honored, without weakening it for fields that are not.
+APPLY_TIME_PATHS = frozenset({
+    "scripts.pre_install[].content", "scripts.pre[].content",
+})
+
+
+def _READS_FLAT() -> set[str]:
+    return {p.replace("[]", "") for p in _READS}
+
+
 def load_doc(path: pathlib.Path) -> dict:
     """Read a LIS document. Canonical form is JSON; YAML authoring is also accepted.
 

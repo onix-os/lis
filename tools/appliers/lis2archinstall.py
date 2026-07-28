@@ -22,7 +22,7 @@ import pathlib
 import sys
 import uuid
 
-from lis_common import (ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -257,8 +257,7 @@ def translate(doc: dict) -> tuple[dict, dict]:
         "timezone": system.get("timezone", "UTC"),
         "ntp": bool((system.get("time", {}) or {}).get("ntp", True)),
         "locale_config": {
-            "kb_layout": ((system.get("keymap", {}) or {}).get("layout")
-                          or (system.get("keymap", {}) or {}).get("console", "us")),
+            "kb_layout": _kb_layout(system),
             "sys_enc": "UTF-8",
             "sys_lang": system.get("locale", "en_US.UTF-8"),
         },
@@ -350,6 +349,8 @@ def translate(doc: dict) -> tuple[dict, dict]:
             refuse(f"user '{user['name']}': no password hash and not marked locked "
                    "(SPEC §2.4 forbids inlining a plaintext password)")
         creds_users.append(entry)
+        if comment := user.get("comment"):
+            commands.append(f"usermod -c {json.dumps(comment)} {user['name']}")
         if shell := user.get("shell"):
             commands.append(f"chsh -s {shell if shell.startswith('/') else '/usr/bin/' + shell} "
                             f"{user['name']}")
@@ -442,6 +443,16 @@ def translate(doc: dict) -> tuple[dict, dict]:
     return config, creds
 
 
+def _kb_layout(system: dict) -> str:
+    """archinstall takes a single kb_layout; report the map it cannot carry."""
+    km = system.get("keymap", {}) or {}
+    console, layout = km.get("console"), km.get("layout")
+    if console and layout and console != layout:
+        warn(f"system.keymap.console {console!r} is not applied — archinstall "
+             f"takes one kb_layout, and layout {layout!r} was declared")
+    return layout or console or "us"
+
+
 def resolve_rest_sizes(config: dict) -> None:
     """Turn 'rest' and percent sizes into byte counts against the real disks.
 
@@ -500,7 +511,7 @@ def main() -> int:
                     help="run archinstall on the live system with the generated profile")
     args = ap.parse_args()
 
-    doc = load_doc(args.file)
+    doc = track(load_doc(args.file))
     check_version(doc, args.file)
     check_firmware(doc)
     check_unhandled(doc, ALL_SECTIONS)
@@ -519,6 +530,10 @@ def main() -> int:
     report(cfg_file, creds_file)
 
     # Fail closed *before* touching the machine, not after.
+    check_arch(doc, {"x86_64"})
+    check_script_fields(doc)
+    check_unread(doc)
+
     if status := enforce(args.strict):
         return status
 

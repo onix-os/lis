@@ -20,7 +20,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -309,7 +309,11 @@ def render_preseed(doc: dict) -> str:
 
     lines.append(f"d-i debian-installer/locale string {system.get('locale', 'en_US.UTF-8')}")
     km = system.get("keymap", {}) or {}
-    layout = km.get("layout") or km.get("console", "us")
+    console = km.get("console")
+    layout = km.get("layout") or console or "us"
+    if console and km.get("layout") and console != km["layout"]:
+        warn(f"system.keymap.console {console!r} is not applied — the preseed "
+             f"takes one xkb layout, and layout {km['layout']!r} was declared")
     lines.append(f"d-i keyboard-configuration/xkb-keymap select {layout}")
     if km.get("variant"):
         lines.append("d-i keyboard-configuration/variant select " + km["variant"])
@@ -488,6 +492,20 @@ def render_preseed(doc: dict) -> str:
                     + (f" -s {user['shell']}" if user.get("shell", "").startswith("/") else "")
                     + f" {user['name']}")
 
+    for user in users:
+        # d-i creates the first account from its own questions, which have no
+        # vocabulary for a login shell.
+        shell = user.get("shell")
+        if not shell:
+            continue
+        if shell.startswith("/"):
+            late.append(f"in-target chsh -s {shquote(shell)} {user['name']}")
+        else:
+            # An intent name obliges the applier to install the shell too.
+            late.append(f"in-target apt-get install -y {shell}")
+            late.append(f"in-target sh -c "
+                        + shquote(f"chsh -s $(command -v {shell}) {user['name']}"))
+
     for entry in doc.get("files", []) or []:
         parent = str(pathlib.PurePath(entry["path"]).parent)
         late.append(f"in-target install -d {parent}")
@@ -567,7 +585,7 @@ def main() -> int:
                     help="load the answers into a running debian-installer's debconf")
     args = ap.parse_args()
 
-    doc = load_doc(args.file)
+    doc = track(load_doc(args.file))
     check_version(doc, args.file)
     check_firmware(doc)
     check_unhandled(doc, ALL_SECTIONS)
@@ -584,6 +602,10 @@ def main() -> int:
     report(cfg_file)
 
     # Fail closed *before* touching the machine, not after.
+    check_arch(doc, {"x86_64"})
+    check_script_fields(doc)
+    check_unread(doc)
+
     if status := enforce(args.strict):
         return status
 

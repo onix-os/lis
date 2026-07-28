@@ -23,7 +23,7 @@ import pathlib
 import re
 import sys
 
-from lis_common import (ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, secret_ref, warn)
@@ -203,7 +203,7 @@ class StorageBuilder:
 
             if handle in consumed:
                 continue  # a crypt/raid/lvm layer owns this device
-            spec = dict(part)
+            spec = part.copy()
             spec["fs"] = role_fs(part)
             spec["mountpoint"] = role_mountpoint(part)
             self.defer_fs(action_id, spec, f"partition '{handle}'")
@@ -512,10 +512,19 @@ def storage_config(doc: dict) -> tuple[list | None, list[str]]:
 
 # ── document → cloud-config ──────────────────────────────────────
 
+def _kb_layout(keymap: dict) -> str:
+    """autoinstall carries one xkb layout; report a console map it cannot keep."""
+    console, layout = keymap.get("console"), keymap.get("layout")
+    if console and layout and console != layout:
+        warn(f"system.keymap.console {console!r} is not applied — autoinstall "
+             f"takes one keyboard layout, and layout {layout!r} was declared")
+    return layout or console or "us"
+
+
 def translate(doc: dict) -> dict:
     system = doc.get("system", {}) or {}
     boot = doc.get("boot", {}) or {}
-    software = dict(doc.get("software", {}) or {})
+    software = doc.get("software", {}) or {}
     network = doc.get("network", {}) or {}
     scripts = doc.get("scripts", {}) or {}
     installer = doc.get("installer", {}) or {}
@@ -530,11 +539,14 @@ def translate(doc: dict) -> dict:
         "version": 1,
         "locale": system.get("locale", "en_US.UTF-8"),
         "timezone": system.get("timezone", "UTC"),
-        "keyboard": {"layout": keymap.get("layout") or keymap.get("console") or "us",
+        "keyboard": {"layout": _kb_layout(keymap),
                      "variant": keymap.get("variant", "")},
     }
 
     if primary:
+        if primary.get("admin") is False:
+            warn(f"users['{primary['name']}'].admin false is not applied — "
+                 "the autoinstall identity user is always an administrator")
         identity = {
             "hostname": system.get("hostname", "ubuntu"),
             "username": primary["name"],
@@ -915,7 +927,7 @@ def main() -> int:
                     help="install the seed for subiquity and hand off to the native installer")
     args = ap.parse_args()
 
-    doc = load_doc(args.file)
+    doc = track(load_doc(args.file))
     check_version(doc, args.file)
     check_firmware(doc)
     check_unhandled(doc, ALL_SECTIONS)
@@ -936,6 +948,10 @@ def main() -> int:
     report(user_data_file, meta_data_file)
 
     # Fail closed *before* touching the machine, not after.
+    check_arch(doc, {"x86_64"})
+    check_script_fields(doc, honors_chroot=True)
+    check_unread(doc)
+
     if status := enforce(args.strict):
         return status
 

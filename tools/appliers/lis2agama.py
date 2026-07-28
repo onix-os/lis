@@ -20,7 +20,7 @@ import pathlib
 import sys
 import xml.etree.ElementTree as ET
 
-from lis_common import (ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, kernel_params_commands, check_kernel_variant, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -515,7 +515,7 @@ def main() -> int:
                     help="apply profile.json with the Agama CLI and start the install")
     args = ap.parse_args()
 
-    doc = load_doc(args.file)
+    doc = track(load_doc(args.file))
     check_version(doc, args.file)
     check_firmware(doc)
     check_unhandled(doc, ALL_SECTIONS)
@@ -537,6 +537,10 @@ def main() -> int:
     report(profile_file, autoyast_file)
 
     # Fail closed *before* touching the machine, not after.
+    check_arch(doc, {"x86_64"})
+    check_script_fields(doc)
+    check_unread(doc)
+
     if status := enforce(args.strict):
         return status
 

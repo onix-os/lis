@@ -22,7 +22,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, check_arch, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_kernel_variant, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -49,12 +49,19 @@ def render_alpine(doc: dict) -> tuple[str, str, str]:
 
     km = system.get("keymap", {}) or {}
     # setup-keymap takes a layout and a variant file, e.g. `de de-nodeadkeys`.
-    layout = km.get("layout") or km.get("console") or "us"
+    console = km.get("console")
+    layout = km.get("layout") or console or "us"
+    if console and km.get("layout") and console != km["layout"]:
+        warn(f"system.keymap.console {console!r} is not applied — setup-keymap "
+             f"takes one layout, and layout {km['layout']!r} was declared")
     variant = f"{layout}-{km['variant']}" if km.get("variant") else layout
     lines.append(f'KEYMAPOPTS="{layout} {variant}"')
     lines.append(f'HOSTNAMEOPTS="{system.get("hostname", "alpine")}"')
     lines.append(f'TIMEZONEOPTS="{system.get("timezone", "UTC")}"')
 
+    if locale := system.get("locale"):
+        warn(f"system.locale {locale!r} is not applied — Alpine is musl-based "
+             "and setup-alpine has no locale step")
     manager = network.get("manager", "auto")
     if manager not in ("auto", "networkmanager"):
         refuse(f"network.manager {manager!r}: setup-alpine configures /etc/network/interfaces")
@@ -97,6 +104,13 @@ def render_alpine(doc: dict) -> tuple[str, str, str]:
     disks = [d for d in disks if d]
     if len(disks) != len(target.get("disks", [])):
         refuse("some target.disks have no match.path — setup-disk needs a device path")
+    # This applier installs to a single device, so the disk and partition
+    # handles are structural rather than actionable — but they are consulted
+    # here so the document is not left with fields nothing ever looked at.
+    for entry in target.get("disks", []) or []:
+        _ = entry.get("id")
+    for part in storage.get("partitions", []) or []:
+        _ = part.get("disk"), part.get("id")
     if len(disks) > 1:
         refuse(f"{len(disks)} disks declared: setup-disk installs to a single device")
     disk = disks[0] if disks else "/dev/vda"
@@ -225,13 +239,26 @@ def render_alpine(doc: dict) -> tuple[str, str, str]:
             # fields of the hash itself.
             post.append(f'echo {shquote(primary_user["name"] + ":" + hash_)} '
                         f'| chroot "$target" chpasswd -e')
+        # USEROPTS carries neither of these either.
+        if shell := primary_user.get("shell"):
+            post.append(f'chroot "$target" sed -i '
+                        + shquote(f"s|^\\({primary_user['name']}:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*\\):.*|\\1:{shell}|")
+                        + ' /etc/passwd')
+        if comment := primary_user.get("comment"):
+            post.append(f'chroot "$target" chfn -f {json.dumps(comment)} '
+                        f'{primary_user["name"]} 2>/dev/null || true')
 
     for user in normal[1:]:
         password = user.get("password") or {}
         if not password.get("hash") and not password.get("locked"):
             refuse(f"user '{user['name']}': no password hash and not marked locked")
         groups = ",".join(user.get("groups", []))
-        post.append(f'chroot "$target" adduser -D {user["name"]}')
+        add = 'adduser -D'
+        if shell := user.get("shell"):
+            add += f" -s {shell}"
+        if comment := user.get("comment"):
+            add += f" -g {json.dumps(comment)}"
+        post.append(f'chroot "$target" {add} {user["name"]}')
         if hash_ := password.get("hash"):
             post.append(f'chroot "$target" usermod -p {json.dumps(hash_)} {user["name"]}')
         for group in groups.split(",") if groups else []:
@@ -460,7 +487,7 @@ def main() -> int:
                     help="run setup-alpine with the answerfile, then the post script")
     args = ap.parse_args()
 
-    doc = load_doc(args.file)
+    doc = track(load_doc(args.file))
     check_version(doc, args.file)
     check_firmware(doc)
     check_unhandled(doc, ALL_SECTIONS)
@@ -489,6 +516,10 @@ def main() -> int:
     report(*written)
 
     # Fail closed *before* touching the machine, not after.
+    check_arch(doc, {"x86_64"})
+    check_script_fields(doc)
+    check_unread(doc, ignore=APPLY_TIME_PATHS)
+
     if status := enforce(args.strict):
         return status
 

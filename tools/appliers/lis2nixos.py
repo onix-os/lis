@@ -20,7 +20,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, check_mirror, check_kernel_variant, check_user_sudo,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, warn)
@@ -892,7 +892,7 @@ def main() -> int:
                     help="partition with disko and run nixos-install on the live system")
     args = ap.parse_args()
 
-    doc = load_doc(args.file)
+    doc = track(load_doc(args.file))
     check_version(doc, args.file)
     check_firmware(doc)
     check_unhandled(doc, ALL_SECTIONS)
@@ -913,11 +913,21 @@ def main() -> int:
     report(disko_file, hw_file, config_file)
 
     # Fail closed *before* touching the machine, not after.
+    check_script_fields(doc)
+    check_unread(doc, ignore=APPLY_TIME_PATHS)
+
     if status := enforce(args.strict):
         return status
 
     if args.apply:
         import subprocess
+        # The translation warns that pre-install hooks run here; run them, or
+        # that warning is a promise the applier does not keep.
+        for stage in ("pre_install", "pre"):
+            for item in (doc.get("scripts", {}) or {}).get(stage, []) or []:
+                if content := item.get("content"):
+                    print(f"running scripts.{stage} on the installer host")
+                    subprocess.run(content, shell=True, check=False)
         print(f"partitioning disks via disko: {disko_file}")
         disko = ("nix --extra-experimental-features 'nix-command flakes' "
                  f"run github:nix-community/disko/latest -- --mode disko {disko_file}")
