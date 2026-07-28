@@ -80,7 +80,7 @@
         "video"
       ],
       "password": {
-        "hash": "$6$saltsalt$fakeuserhash"
+        "hash": "$6$lise2esalt$FZ.sWLZOpKWcO0Ov5XiGDzqVm0dxHB3.H1mFLg.aoFV/ZgVrxSq/bc1xkKj4PiTHxfgi9MxhH/kL.32Lu94CT1"
       },
       "scripts": {
         "post_install": [
@@ -116,7 +116,7 @@
         "chroot": true
       },
       {
-        "content": "if command -v systemctl >/dev/null 2>&1; then install -d /etc/systemd/system/serial-getty@ttyS0.service.d; printf '[Service]\\nExecStart=\\nExecStart=-/sbin/agetty --autologin root --noclear %%I 115200 linux\\n' > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf; systemctl enable serial-getty@ttyS0.service; elif [ -f /etc/inittab ]; then sed -i '/ttyS0/d' /etc/inittab; echo 'ttyS0::respawn:/sbin/getty -n -l /bin/ash -L ttyS0 115200 vt100' >> /etc/inittab; fi",
+        "content": "if [ -e /etc/NIXOS ]; then :; elif command -v systemctl >/dev/null 2>&1; then install -d /etc/systemd/system/serial-getty@ttyS0.service.d; printf '[Service]\\nExecStart=\\nExecStart=-/sbin/agetty --autologin root --noclear %%I 115200 linux\\n' > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf; systemctl enable serial-getty@ttyS0.service; elif [ -f /etc/inittab ]; then sed -i '/ttyS0/d' /etc/inittab; echo 'ttyS0::respawn:/sbin/getty -n -l /bin/ash -L ttyS0 115200 vt100' >> /etc/inittab; fi",
         "chroot": true
       }
     ],

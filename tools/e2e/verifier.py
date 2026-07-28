@@ -214,6 +214,12 @@ def run_stage4_live_guest_verification(args, target_disk: pathlib.Path,
     return report(results, args)
 
 
+# Plaintext behind the crypt(3) hash in docs/examples/test-full-install.lis.json.
+# The document must not contain it (SPEC §2.4); an operator knows it out of band,
+# and so does this harness, because it wrote the recipe.
+OPERATOR_PASSWORD = "lis-e2e"
+
+
 def boot(cmd: str, target_disk: pathlib.Path) -> pexpect.spawn | None:
     """Start the guest, waiting out the installer VM's lingering write lock.
 
@@ -250,10 +256,13 @@ def packages_of(recipe: dict) -> list[str]:
     return [n for n in names if n in {"git", "curl", "htop", "neovim", "firefox", "vim"}]
 
 
-def login(child: pexpect.spawn, recipe: dict) -> bool:
+def login(child: pexpect.spawn, recipe: dict, password: str = OPERATOR_PASSWORD) -> bool:
     """Reach a root shell on the booted guest, without creating anything."""
     # busybox prints "~ # " with a space, bash "root@host:~#" — both are shells.
-    prompts = [r"[#$] $", r"~ ?[#$]", r"\]#", r"root@"]
+    # A bracket prompt ("[user@host:~]$ ") is matched on the bracket-plus-sigil
+    # alone: NixOS colours it, so the sigil is followed by an ANSI reset rather
+    # than by the space the other patterns expect.
+    prompts = [r"[#$] $", r"~ ?[#$]", r"\][#$]", r"root@"]
     login_prompt = r"[a-zA-Z0-9_.-]+ login:"
     try:
         idx = child.expect([login_prompt, *prompts, pexpect.TIMEOUT], timeout=240)
@@ -262,28 +271,36 @@ def login(child: pexpect.spawn, recipe: dict) -> bool:
     if idx == len(prompts) + 1:
         return False
     if idx == 0:
-        # A password we can use has to come from the document; the harness does
-        # not invent one. Only `password.plain` is usable for console login.
+        # A document carries only a crypt(3) hash (SPEC §9); the plaintext is
+        # operator knowledge supplied out of band, which for the bundled test
+        # recipe is OPERATOR_PASSWORD. Logging in this way is the only route on
+        # a target whose /etc is immutable and cannot be given a serial
+        # autologin by a post-install hook (NixOS).
         for user in recipe.get("users", []) or []:
-            plain = (user.get("password") or {}).get("plain")
-            if not plain:
+            if not (user.get("password") or {}).get("hash"):
                 continue
             child.sendline(user["name"])
-            child.expect(["[Pp]assword:"], timeout=30)
-            child.sendline(plain)
             try:
+                child.expect(["[Pp]assword:"], timeout=30)
+                child.sendline(password)
                 child.expect(prompts, timeout=60)
-                return True
             except (pexpect.TIMEOUT, pexpect.EOF):
                 return False
-        # No usable credential: the installers configured by these appliers enable
-        # serial autologin for root only when the document asks for it.
-        try:
-            child.sendline("root")
-            child.expect(prompts, timeout=30)
+            if user.get("admin") or user.get("sudo"):
+                # The checks read root-owned artifacts (the birth certificate is
+                # mode 600), so escalate through the account's own sudo rights.
+                child.sendline("sudo -i")
+                try:
+                    idx2 = child.expect(["[Pp]assword.*:", *prompts], timeout=60)
+                    if idx2 == 0:
+                        child.sendline(password)
+                        child.expect(prompts, timeout=60)
+                except (pexpect.TIMEOUT, pexpect.EOF):
+                    return False
             return True
-        except (pexpect.TIMEOUT, pexpect.EOF):
-            return False
+        # Nothing in the document can open a session: report it rather than
+        # guessing at a credential.
+        return False
     return True
 
 

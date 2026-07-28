@@ -253,6 +253,17 @@ def render_disko(doc: dict) -> str:
     lvm = storage.get("lvm", []) or []
     topology = Topology(storage)
 
+    firmware = ((doc.get("target", {}) or {}).get("firmware") or "auto").lower()
+    # A 1 MiB BIOS boot partition is only meaningful when GRUB is installed to
+    # the MBR; on UEFI it is dead space. Its name must not collide with a
+    # partition the document itself declares (LIS ids are free-form).
+    declared = {p.get("id") for p in partitions}
+    bios_grub = None
+    if firmware == "bios":
+        bios_grub = "bios_grub"
+        while bios_grub in declared:
+            bios_grub = "lis_" + bios_grub
+
     disks = storage.get("disks", []) or (doc.get("target", {}) or {}).get("disks", [])
     disk_paths = {}
     for disk in disks:
@@ -273,12 +284,13 @@ def render_disko(doc: dict) -> str:
                 "        type = \"disk\";",
                 f"        device = {nix_str(path)};",
                 "        content = {", "          type = \"gpt\";",
-                "          partitions = {",
-                "            boot = {",
-                "              size = \"1M\";",
-                "              type = \"EF02\";",
-                "              priority = 1;",
-                "            };"]
+                "          partitions = {"]
+        if bios_grub:
+            out += [f"            {nix_str(bios_grub)} = {{",
+                    "              size = \"1M\";",
+                    "              type = \"EF02\";",
+                    "              priority = 1;",
+                    "            };"]
         index = 0
         for part in [p for p in partitions if p["disk"] == disk["id"]]:
             if part.get("existing"):
@@ -483,6 +495,33 @@ def nix_script(body: str) -> str:
     return "''\n" + body.replace("''", "''''").replace("${", "''${") + "\n    ''"
 
 
+# Running a hook as its user cannot go through `su`: activation happens inside
+# the nixos-install chroot, where PAM has no working stack and su dies with
+# "Authentication service cannot retrieve authentication info". setpriv drops
+# privilege without consulting PAM at all.
+AS_USER_FN = """lis_as_user() {
+  _u=$1
+  _h=$(getent passwd "$_u" | cut -d: -f6)
+  setpriv --reuid="$_u" --regid="$(id -gn "$_u")" --init-groups \\
+    env HOME="$_h" USER="$_u" LOGNAME="$_u" sh -c "$2"
+}"""
+
+
+# Absolute shell paths a document may name, mapped to the package NixOS needs.
+SHELL_PATHS = {
+    "/bin/bash": "bashInteractive", "/usr/bin/bash": "bashInteractive",
+    "/bin/sh": "bashInteractive",
+    "/bin/zsh": "zsh", "/usr/bin/zsh": "zsh",
+    "/bin/fish": "fish", "/usr/bin/fish": "fish",
+}
+
+# Packages put on PATH for LIS script hooks, on both activation and first boot.
+# pkgs.shadow splits su into its own output, so pkgs.shadow alone yields
+# "su: command not found" in a hook that switches user.
+HOOK_PATH = ("[ pkgs.bash pkgs.coreutils pkgs.shadow pkgs.shadow.su pkgs.util-linux "
+             "pkgs.gnused pkgs.gnugrep pkgs.gawk pkgs.findutils pkgs.systemd ]")
+
+
 def render_script_hooks(doc: dict) -> list[str]:
     """LIS script hooks → activation scripts and a first-boot unit.
 
@@ -499,13 +538,15 @@ def render_script_hooks(doc: dict) -> list[str]:
     for user in doc.get("users", []) or []:
         for s in (user.get("scripts", {}) or {}).get("post_install", []):
             if c := s.get("content"):
-                activation.append(f"su - {user['name']} -c {json.dumps(c)}")
+                activation.append(
+                    f"lis_as_user {user['name']} {json.dumps(c)}")
 
     firstboot = [s["content"] for s in scripts.get("firstboot", []) if s.get("content")]
     for user in doc.get("users", []) or []:
         for s in (user.get("scripts", {}) or {}).get("firstboot", []):
             if c := s.get("content"):
-                firstboot.append(f"su - {user['name']} -c {json.dumps(c)}")
+                firstboot.append(
+                    f"lis_as_user {user['name']} {json.dumps(c)}")
 
     for stage in ("pre_install", "pre"):
         if scripts.get(stage):
@@ -520,11 +561,21 @@ def render_script_hooks(doc: dict) -> list[str]:
     activation.append(f"echo {birth} | base64 -d > /var/lib/lis/system.lis.json")
     activation.append("chmod 600 /var/lib/lis/system.lis.json")
 
+    # Activation scripts run with a deliberately minimal PATH, so a hook that
+    # calls anything outside coreutils (su, systemctl, sed) dies with 127 and
+    # NixOS only prints a one-line "snippet failed". Give hooks a real PATH.
     if activation:
-        out.append("  system.activationScripts.lis-hooks.text = "
-                   + nix_script("\n".join(activation)) + ";")
+        out += ["  system.activationScripts.lis-hooks = {",
+                # Hooks may reference the accounts the document declares, so they
+                # must not run before the snippet that creates them.
+                "    deps = [ \"users\" ];",
+                "    text ="
+                f"      \"export PATH=\\\"${{lib.makeBinPath {HOOK_PATH}}}:$PATH\\\"\\n\" +",
+                "      " + nix_script(AS_USER_FN + "\n" + "\n".join(activation)) + ";",
+                "  };"]
     if firstboot:
-        body = ("install -d -m755 /var/lib/lis\n" + "\n".join(firstboot)
+        body = ("install -d -m755 /var/lib/lis\n" + AS_USER_FN + "\n"
+                + "\n".join(firstboot)
                 + "\ntouch /var/lib/lis/.firstboot-done")
         out += ["  systemd.services.lis-firstboot = {",
                 "    description = \"LIS first boot\";",
@@ -533,7 +584,7 @@ def render_script_hooks(doc: dict) -> list[str]:
                 "    unitConfig.ConditionPathExists = "
                 "\"!/var/lib/lis/.firstboot-done\";",
                 "    serviceConfig.Type = \"oneshot\";",
-                "    path = [ pkgs.shadow pkgs.coreutils ];",
+                f"    path = {HOOK_PATH};",
                 "    script = " + nix_script(body) + ";",
                 "  };"]
     return out
@@ -657,7 +708,6 @@ def render_configuration(doc: dict) -> str:
     out.append("")
 
     wheel_nopasswd = False
-    out.append("  users.users.root.initialPassword = \"root\";")
     for user in doc.get("users", []):
         out.append(f"  users.users.{user['name']} = {{")
         if user["name"] != "root":
@@ -673,21 +723,34 @@ def render_configuration(doc: dict) -> str:
             out.append(f"    extraGroups = {nix_list(groups)};")
         password = user.get("password") or {}
         if password.get("plain"):
-            out.append(f"    initialPassword = {nix_str(password['plain'])};")
+            # SPEC §2.4: documents never carry plaintext secrets.
+            refuse(f"user '{user['name']}': password.plain is a plaintext secret")
         elif password.get("locked"):
             out.append("    hashedPassword = \"!\";")
         elif password.get("hash"):
             out.append(f"    hashedPassword = {nix_str(password['hash'])};")
         else:
-            out.append("    initialPassword = \"root\";")
+            # SPEC §9: "Omitting `password` leaves the account passwordless-locked."
+            out.append("    hashedPassword = \"!\";")
         if user.get("ssh_authorized_keys"):
             out.append(f"    openssh.authorizedKeys.keys = {nix_list(user['ssh_authorized_keys'])};")
         shell = user.get("shell")
         if shell in ("zsh", "fish"):
             out.append(f"    shell = pkgs.{shell};")
-        elif shell and shell.startswith("/"):
+        elif shell == "bash":
+            out.append("    shell = pkgs.bashInteractive;")
+        elif shell in SHELL_PATHS:
+            # NixOS has no /bin/bash: outside the store only /bin/sh and
+            # /usr/bin/env exist, so a literal path would produce an account
+            # whose login fails with "Cannot execute". Map to the package that
+            # the path names.
+            out.append(f"    shell = pkgs.{SHELL_PATHS[shell]};")
+        elif shell and shell.startswith("/nix/store/"):
             out.append(f"    shell = {nix_str(shell)};")
-        elif shell and shell != "bash":
+        elif shell and shell.startswith("/"):
+            refuse(f"user '{user['name']}': shell {shell!r} is an absolute path "
+                   "that does not exist on NixOS outside the store")
+        elif shell:
             refuse(f"user '{user['name']}': shell {shell!r} has no pkgs attribute")
         if user.get("dotfiles"):
             refuse(f"users['{user['name']}'].dotfiles is not applied by the default translator")

@@ -26,6 +26,10 @@ from lis_common import (add_common_args, check_firmware, check_version, enforce,
 NS = "http://www.suse.com/1.0/yast2ns"
 CONFIG_NS = "http://www.suse.com/1.0/configns"
 
+# YaST names its keymaps differently from the X layout codes LIS carries.
+YAST_KEYMAP = {"us": "english-us", "uk": "english-uk", "gb": "english-uk",
+               "de": "german", "fr": "french", "es": "spanish", "it": "italian"}
+
 FS_MAP = {"ext4": "ext4", "xfs": "xfs", "btrfs": "btrfs", "vfat": "vfat", "swap": "swap"}
 
 
@@ -36,9 +40,9 @@ def size_str(size: str, what: str) -> str | None:
     if size.endswith("%"):
         refuse(f"{what}: percent size {size!r} is not expressible in an openSUSE profile")
         return None
-    for unit in ("TiB", "GiB", "MiB"):
+    for unit, suffix in (("TiB", "T"), ("GiB", "G"), ("MiB", "M")):
         if size.endswith(unit):
-            return f"{int(size[: -len(unit)])} {unit}"
+            return f"{int(size[: -len(unit)])}{suffix}"
     refuse(f"{what}: unparseable size {size!r}")
     return None
 
@@ -303,7 +307,8 @@ def render_autoyast(doc: dict) -> str:
     ET.SubElement(profile, "timezone").append(text_node("timezone",
                                                         system.get("timezone", "UTC")))
     keyboard = ET.SubElement(profile, "keyboard")
-    ET.SubElement(keyboard, "keymap").text = (system.get("keymap", {}) or {}).get("console", "us")
+    console_map = (system.get("keymap", {}) or {}).get("console", "us")
+    ET.SubElement(keyboard, "keymap").text = YAST_KEYMAP.get(console_map, console_map)
     if hostname := system.get("hostname"):
         networking = ET.SubElement(profile, "networking")
         dns = ET.SubElement(networking, "dns")
@@ -325,7 +330,7 @@ def render_autoyast(doc: dict) -> str:
             fs = role_fs(part)
             node = ET.SubElement(plist, "partition")
             if size := size_str(part.get("size", "rest"), f"partition '{part.get('id', i)}'"):
-                ET.SubElement(node, "size").text = size.replace(" ", "")
+                ET.SubElement(node, "size").text = size
             else:
                 ET.SubElement(node, "size").text = "max"
             if fs not in (None, "none"):
@@ -345,6 +350,17 @@ def render_autoyast(doc: dict) -> str:
                     ET.SubElement(entry, "path").text = sub["name"].lstrip("@") or "@"
 
     software = ET.SubElement(profile, "software")
+    # AutoYaST needs a base product or it stops on "None or wrong base product"
+    # and waits for someone to pick one. LIS has no field for it, so this is
+    # stated rather than guessed silently.
+    product = (doc.get("x-suse", {}) or {}).get("product")
+    if not product:
+        product = "Leap"
+        warn("no x-suse.product declared; the AutoYaST profile targets "
+             f"{product!r} — set x-suse.product for other media")
+    products = ET.SubElement(software, "products")
+    products.set(f"{{{CONFIG_NS}}}type", "list")
+    ET.SubElement(products, "product").text = product
     if patterns:
         node = ET.SubElement(software, "patterns")
         node.set(f"{{{CONFIG_NS}}}type", "list")
@@ -356,6 +372,7 @@ def render_autoyast(doc: dict) -> str:
         for pkg in pkgs:
             ET.SubElement(node, "package").text = pkg
 
+    group_members: dict[str, list[str]] = {}
     user_list = ET.SubElement(profile, "users")
     user_list.set(f"{{{CONFIG_NS}}}type", "list")
     for user in users:
@@ -369,16 +386,22 @@ def render_autoyast(doc: dict) -> str:
         if shell := user.get("shell"):
             ET.SubElement(node, "shell").text = (
                 shell if shell.startswith("/") else f"/usr/bin/{shell}")
-        groups = list(user.get("groups", []))
-        if user.get("admin") and "wheel" not in groups:
-            groups.append("wheel")
-        if groups:
-            ET.SubElement(node, "user_defaults").text = ",".join(groups)
+        for group in list(user.get("groups", [])) + (
+                ["wheel"] if user.get("admin") else []):
+            group_members.setdefault(group, []).append(user["name"])
+
+    if group_members:
+        group_list = ET.SubElement(profile, "groups")
+        group_list.set(f"{{{CONFIG_NS}}}type", "list")
+        for group, members in group_members.items():
+            node = ET.SubElement(group_list, "group")
+            ET.SubElement(node, "groupname").text = group
+            ET.SubElement(node, "userlist").text = ",".join(dict.fromkeys(members))
 
     scripts = ET.SubElement(profile, "scripts")
     add_script_list(scripts, "pre-scripts", pre)
     add_script_list(scripts, "chroot-scripts", post, chrooted=True)
-    add_script_list(scripts, "init-scripts", firstboot)
+    add_script_list(scripts, "init-scripts", firstboot, interpreter=False)
 
     ET.indent(profile, space="  ")
     return ('<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE profile>\n'
@@ -397,15 +420,27 @@ def text_node(name: str, value: str):
     return node
 
 
-def add_script_list(parent, kind: str, bodies: list[str], chrooted=False) -> None:
+def add_script_list(parent, kind: str, bodies: list[str], chrooted=False,
+                    interpreter=True) -> None:
+    """One <pre-scripts>/<chroot-scripts>/<init-scripts> block.
+
+    The three differ in what a <script> may contain, and the schema is strict:
+    `chrooted` is only legal under chroot-scripts, and init-scripts accept no
+    `interpreter` at all (they run at first boot from a generated init file).
+    The LIST reference is mandatory, hence config:type="list".
+    """
     if not bodies:
         return
     node = ET.SubElement(parent, kind)
     node.set(f"{{{CONFIG_NS}}}type", "list")
     for i, body in enumerate(bodies):
+        # Element order matches the documented example exactly — interpreter,
+        # filename, source. The schema is not an interleave here, so a different
+        # order makes the whole <scripts> section fail to match.
         script = ET.SubElement(node, "script")
+        if interpreter:
+            ET.SubElement(script, "interpreter").text = "shell"
         ET.SubElement(script, "filename").text = f"lis-{kind}-{i}.sh"
-        ET.SubElement(script, "interpreter").text = "shell"
         if chrooted:
             boolean(script, "chrooted", True)
         ET.SubElement(script, "source").text = "\n" + body + "\n"

@@ -26,6 +26,9 @@ from lis_common import (add_common_args, check_firmware, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
 
 SECTOR = {"unit": "B", "value": 512}
+UNIT_BYTES = {"B": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30, "TiB": 1 << 40}
+# obj_ids whose size the document left open ('rest' / percent).
+REST_SIZED: set[str] = set()
 
 
 def b64(text: str) -> str:
@@ -45,11 +48,15 @@ BOOTLOADER_MAP = {"grub": "Grub", "systemd-boot": "Systemd-boot", "limine": "Lim
 
 
 def size_obj(size: str, what: str) -> dict:
-    """LIS size → archinstall Size object. 'rest' is resolved by archinstall itself."""
-    if size in ("rest", "100%"):
-        return {"unit": "Percent", "value": 100, "sector_size": SECTOR}
-    if size.endswith("%"):
-        return {"unit": "Percent", "value": int(size[:-1]), "sector_size": SECTOR}
+    """LIS size → archinstall Size object.
+
+    archinstall's Unit enum is absolute lengths only (B/KiB/MiB/... /sectors) —
+    there is no percent member — so 'rest' and percent sizes cannot be written
+    into the profile. They are left as a placeholder here and resolved against
+    the real device by resolve_rest_sizes() at apply time.
+    """
+    if size == "rest" or size.endswith("%"):
+        return {"unit": "B", "value": 0, "sector_size": SECTOR, "lis_rest": True}
     for unit in ("GiB", "MiB", "TiB"):
         if size.endswith(unit):
             return {"unit": unit, "value": int(size[: -len(unit)]), "sector_size": SECTOR}
@@ -133,12 +140,23 @@ def disk_config(doc: dict) -> dict | None:
             "wipe": True,
             "dev_path": None,
         }
+        if entry["size"].pop("lis_rest", False):
+            REST_SIZED.add(obj_id)
         starts[path] = cursor + start_of(part.get("size", "rest"))
 
         if role == "esp":
-            entry["mountpoint"] = part.get("mountpoint") or "/boot"
+            entry["mountpoint"] = role_mountpoint(part) or "/boot"
             entry["flags"] = ["boot", "esp"]
-        elif role != "swap" and handle not in consumed:
+        elif role == "boot":
+            # archinstall finds the boot partition by flag, not by mountpoint:
+            # is_boot() is `PartitionFlag.BOOT in flags and mountpoint`. Without
+            # the flag it installs the system and then refuses to lay down a
+            # bootloader with "Could not detect boot at mountpoint /mnt".
+            entry["mountpoint"] = role_mountpoint(part) or "/boot"
+            entry["flags"] = ["boot"]
+        elif role == "swap":
+            entry["flags"] = ["swap"]
+        elif handle not in consumed:
             entry["mountpoint"] = part.get("mountpoint") or ("/" if role == "root" else None)
         if subs := part.get("subvolumes"):
             if fs != "btrfs":
@@ -186,6 +204,8 @@ def lvm_config(storage: dict, pv_ids: dict[str, str]) -> dict | None:
                 "mount_options": vol.get("mount_options", []),
                 "flags": [],
             }
+            if entry["length"].pop("lis_rest", False):
+                REST_SIZED.add(entry["obj_id"])
             if subs := vol.get("subvolumes"):
                 if fs != "btrfs":
                     refuse(f"lvm volume '{vol['name']}': subvolumes on a {fs} filesystem")
@@ -201,6 +221,7 @@ def lvm_config(storage: dict, pv_ids: dict[str, str]) -> dict | None:
 def translate(doc: dict) -> tuple[dict, dict]:
     system = doc.get("system", {}) or {}
     boot = doc.get("boot", {}) or {}
+    target = doc.get("target", {}) or {}
     storage = doc.get("storage", {}) or {}
     software = doc.get("software", {}) or {}
     desktop = doc.get("desktop", {}) or {}
@@ -228,7 +249,7 @@ def translate(doc: dict) -> tuple[dict, dict]:
         refuse(f"boot.kernel.variant {variant!r} has no Arch kernel package")
 
     config: dict = {
-        "archinstall-language": "English",
+        "archinstall_language": "English",
         "hostname": system.get("hostname", "archlinux"),
         "timezone": system.get("timezone", "UTC"),
         "ntp": bool((system.get("time", {}) or {}).get("ntp", True)),
@@ -237,15 +258,17 @@ def translate(doc: dict) -> tuple[dict, dict]:
             "sys_enc": "UTF-8",
             "sys_lang": system.get("locale", "en_US.UTF-8"),
         },
-        "bootloader": bootloader,
+        "bootloader_config": {"bootloader": bootloader, "uki": False,
+                              "removable": target.get("firmware") != "bios"},
         "kernels": [KERNEL_MAP.get(variant, "linux")],
         "packages": pkgs,
         "services": (software.get("services", {}) or {}).get("enable", []),
         "swap": bool((storage.get("swap", {}) or {}).get("zram", True)),
-        "silent": True,
     }
-    if params := (boot.get("kernel", {}) or {}).get("params"):
-        config["kernel-cmdline"] = " ".join(params)
+    # archinstall has no kernel command line key — `kernels` names packages, not
+    # parameters — so boot.kernel.params has to be written into the installed
+    # bootloader instead. Setting an invented key would drop them silently.
+    kernel_params = " ".join((boot.get("kernel", {}) or {}).get("params", []))
     if dc := disk_config(doc):
         config["disk_config"] = dc
     elif storage:
@@ -309,20 +332,20 @@ def translate(doc: dict) -> tuple[dict, dict]:
         if user["name"] == "root":
             continue
         password = user.get("password") or {}
-        creds_users.append({
+        groups = list(user.get("groups", []))
+        entry: dict = {
             "username": user["name"],
-            "!password": None,
             "sudo": bool(user.get("admin", False)),
-        })
+            "groups": groups,
+        }
         if h := password.get("hash"):
-            commands.append(f"usermod -p '{h}' {user['name']}")
+            entry["enc_password"] = h
         elif password.get("locked"):
-            commands.append(f"usermod -L {user['name']}")
+            entry["enc_password"] = "!"
         else:
             refuse(f"user '{user['name']}': no password hash and not marked locked "
                    "(SPEC §2.4 forbids inlining a plaintext password)")
-        if groups := user.get("groups"):
-            commands.append(f"usermod -aG {','.join(groups)} {user['name']}")
+        creds_users.append(entry)
         if shell := user.get("shell"):
             commands.append(f"chsh -s {shell if shell.startswith('/') else '/usr/bin/' + shell} "
                             f"{user['name']}")
@@ -371,27 +394,89 @@ def translate(doc: dict) -> tuple[dict, dict]:
         commands.append("systemctl enable lis-firstboot.service")
 
     # Birth certificate (delivery.md §8).
+    if kernel_params:
+        if bootloader == "Grub":
+            commands.append(
+                "sed -i " + json.dumps(
+                    f's|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT="'
+                    f'{kernel_params}"|')
+                + " /etc/default/grub")
+            commands.append("grub-mkconfig -o /boot/grub/grub.cfg")
+        elif bootloader == "Systemd-boot":
+            commands.append(
+                "for e in /boot/loader/entries/*.conf; do "
+                f"[ -f \"$e\" ] && sed -i \"s|^options .*|& {kernel_params}|\" "
+                "\"$e\"; done")
+        else:
+            refuse(f"boot.kernel.params cannot be applied to the {bootloader} "
+                   "bootloader by this applier")
+
     commands.append("install -d -m755 /var/lib/lis")
     commands.append(f"echo {b64(json.dumps(doc, separators=(',', ':')))} | base64 -d "
                     "> /var/lib/lis/system.lis.json")
     commands.append("chmod 600 /var/lib/lis/system.lis.json")
 
     if commands:
-        config["custom-commands"] = commands
+        config["custom_commands"] = commands
     x_arch = doc.get("x-arch", {}) or {}
     if extra := x_arch.get("packages"):
         config["packages"] = config["packages"] + extra
 
     root = next((u for u in doc.get("users", []) if u["name"] == "root"), None)
-    creds = {"users": creds_users}
-    if root:
-        password = root.get("password") or {}
-        if password.get("hash"):
-            commands.append(f"usermod -p '{password['hash']}' root")
-        elif password.get("locked"):
-            commands.append("passwd -l root")
+    creds: dict = {"users": creds_users}
+    root_password = (root or {}).get("password") or {}
+    if root_password.get("hash"):
+        creds["root_enc_password"] = root_password["hash"]
+    else:
+        # No root entry, or one without a usable hash: lock the account rather
+        # than leave whatever archinstall would default to.
+        commands.append("passwd -l root")
     return config, creds
 
+
+def resolve_rest_sizes(config: dict) -> None:
+    """Turn 'rest' and percent sizes into byte counts against the real disks.
+
+    archinstall's `Unit` enum has no percent member — a size is an absolute
+    length — so "use whatever is left" cannot be expressed in the profile at
+    all. It is only knowable once the target device is in front of us, which is
+    why this runs at apply time rather than at translation time.
+    """
+    import subprocess
+
+    disk_config = config.get("disk_config") or {}
+    for mod in disk_config.get("device_modifications", []):
+        device = mod.get("device")
+        if not device:
+            continue
+        try:
+            out = subprocess.run(["lsblk", "-bdno", "SIZE", device],
+                                 capture_output=True, text=True, check=True)
+            total = int(out.stdout.strip())
+        except (subprocess.CalledProcessError, ValueError, FileNotFoundError) as err:
+            sys.exit(f"error: cannot read the size of {device} to resolve a "
+                     f"'rest' partition: {err}")
+        # Leave a mebibyte at the end for the backup GPT header.
+        end = total - (1 << 20)
+        for part in mod.get("partitions", []):
+            if part.get("obj_id") not in REST_SIZED:
+                continue
+            start = part.get("start", {})
+            start_bytes = start.get("value", 1) * UNIT_BYTES.get(start.get("unit"), 1 << 20)
+            length = end - start_bytes
+            if length <= 0:
+                sys.exit(f"error: no space left on {device} for the 'rest' partition")
+            part["size"] = {"unit": "B", "value": length, "sector_size": SECTOR}
+
+    lvm = disk_config.get("lvm_config") or {}
+    for group in lvm.get("vol_groups", []):
+        for vol in group.get("lvm_volumes", []):
+            if vol.get("obj_id") in REST_SIZED:
+                # The volume group's free extents are not visible until the PVs
+                # exist, so archinstall is asked for a whole-VG volume instead.
+                vol["length"] = {"unit": "B", "value": 0, "sector_size": SECTOR}
+                warn(f"lvm volume '{vol['name']}': 'rest' is applied as the "
+                     "remaining volume group space")
 
 def gfx_driver(doc: dict) -> str | None:
     gpu = (doc.get("drivers", {}) or {}).get("gpu")
@@ -430,6 +515,8 @@ def main() -> int:
         if not shutil.which("archinstall"):
             sys.exit("error: --apply requested, but 'archinstall' is not on PATH "
                      "(are you running on the Arch live ISO?)")
+        resolve_rest_sizes(config)
+        cfg_file.write_text(json.dumps(config, indent=2) + "\n")
         cmd = ["archinstall", "--config", str(cfg_file), "--creds", str(creds_file), "--silent"]
         print(f"executing native installer: {' '.join(cmd)}")
         return subprocess.run(cmd).returncode

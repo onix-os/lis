@@ -66,6 +66,13 @@ def render_storage(doc: dict, lines: list[str]) -> None:
     if storage.get("wipe"):
         lines.append("clearpart --all --initlabel"
                      + (f" --drives={','.join(disks.values())}" if disks else ""))
+        if firmware == "bios" and disks:
+            # Anaconda labels a cleared disk GPT, and GRUB then needs somewhere
+            # to put its core image: "please create a 1MiB 'biosboot' type
+            # partition". The document does not model it — it is an artifact of
+            # the firmware/label combination, not declared intent.
+            lines.append(f"part biosboot --fstype=biosboot --size=1 "
+                         f"--ondisk={next(iter(disks.values()))}")
     else:
         refuse("storage.wipe: false — Anaconda kickstart cannot preserve an "
                "unaccounted existing layout in an unattended run (schema.md §20.8)")

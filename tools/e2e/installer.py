@@ -21,6 +21,8 @@ from tools.e2e.colors import BOLD, GRAY, print_stage_header, TICK, RESET
 APPLIERS = pathlib.Path(__file__).resolve().parent.parent / "appliers"
 HTTP_PORT = 8088
 SERIAL = "console=ttyS0,115200n8"
+# The openSUSE NET image installs from a remote repository.
+SUSE_REPO = "http://download.opensuse.org/distribution/leap/15.6/repo/oss/"
 
 
 class InstallFailed(Exception):
@@ -59,13 +61,20 @@ def run_applier(name: str, recipe: pathlib.Path, out_dir: pathlib.Path) -> pathl
     return out_dir
 
 
-def serve(directory: pathlib.Path) -> None:
-    """Expose a directory to the guest at http://10.0.2.2:8088/ (QEMU user net)."""
+def serve(directory: pathlib.Path, log: pathlib.Path | None = None) -> None:
+    """Expose a directory to the guest at http://10.0.2.2:8088/ (QEMU user net).
+
+    The access log is kept: when an installer says it cannot retrieve its
+    profile, the first thing worth knowing is whether it ever asked.
+    """
     subprocess.run(f"pkill -f 'http.server {HTTP_PORT}' || true", shell=True)
+    sink = open(log, "w") if log else subprocess.DEVNULL
     subprocess.Popen([sys.executable, "-m", "http.server", str(HTTP_PORT),
                       "--directory", str(directory)],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                     stdout=sink, stderr=sink)
     time.sleep(1)
+    if log:
+        print(f"  [{TICK}] HTTP access log: {GRAY}{log}{RESET}")
 
 
 def build_cidata(seed_files: pathlib.Path, out: pathlib.Path) -> pathlib.Path:
@@ -200,7 +209,7 @@ def install_ubuntu(target_disk, seed_disk, iso, ram, recipe, work):
 
 def install_debian(target_disk, seed_disk, iso, ram, recipe, work):
     out = run_applier("lis2debian.py", recipe, work / "preseed")
-    serve(out)
+    serve(out, work / "http.log")
     vmlinuz, initrd = work / "debian-vmlinuz", work / "debian-initrd.gz"
     extract(iso, {"/install.amd/vmlinuz": vmlinuz, "/install.amd/initrd.gz": initrd})
     child = qemu(target_disk, ram, iso=iso, extra_drives=[seed_disk],
@@ -215,7 +224,7 @@ def install_debian(target_disk, seed_disk, iso, ram, recipe, work):
 
 def install_fedora(target_disk, seed_disk, iso, ram, recipe, work):
     out = run_applier("lis2kickstart.py", recipe, work / "kickstart")
-    serve(out)
+    serve(out, work / "http.log")
     vmlinuz, initrd = work / "fedora-vmlinuz", work / "fedora-initrd.img"
     extract(iso, {"/images/pxeboot/vmlinuz": vmlinuz, "/images/pxeboot/initrd.img": initrd})
     label = iso_label(iso)
@@ -231,13 +240,17 @@ def install_fedora(target_disk, seed_disk, iso, ram, recipe, work):
 
 def install_suse(target_disk, seed_disk, iso, ram, recipe, work):
     out = run_applier("lis2agama.py", recipe, work / "autoyast")
-    serve(out)
+    serve(out, work / "http.log")
     vmlinuz, initrd = work / "suse-linux", work / "suse-initrd"
     extract(iso, {"/boot/x86_64/loader/linux": vmlinuz,
                   "/boot/x86_64/loader/initrd": initrd})
     child = qemu(target_disk, ram, iso=iso, extra_drives=[seed_disk],
                  kernel=vmlinuz, initrd=initrd,
-                 append=f"{SERIAL} autoyast=http://10.0.2.2:{HTTP_PORT}/autoyast.xml "
+                 # linuxrc does not bring up the network on its own, and the NET
+                 # image carries no packages — without netsetup it cannot fetch
+                 # the profile, and without install= it has nothing to install.
+                 append=f"{SERIAL} netsetup=dhcp install={SUSE_REPO} "
+                        f"autoyast=http://10.0.2.2:{HTTP_PORT}/autoyast.xml "
                         "autoyast_validation=0", timeout=3600,
                  log=work / "serial.log")
     wait_for_finish(child, "suse",
@@ -248,16 +261,22 @@ def install_suse(target_disk, seed_disk, iso, ram, recipe, work):
 
 def install_from_live_shell(distro, target_disk, seed_disk, iso, ram, work,
                             *, applier, boot_hint, login=None, timeout=2400,
-                            bootstrap=None):
+                            bootstrap=None, become_root=False):
     """Boot a live ISO, mount the LIS seed, and let the applier drive the install."""
     child = qemu(target_disk, ram, iso=iso, extra_drives=[seed_disk], boot="order=d",
                  timeout=timeout, log=work / "serial.log")
     boot_hint(child)
-    prompts = [r"root@archiso", r"root@nixos", r"nixos@nixos", r"localhost", r"\]#", r"# "]
+    prompts = [r"root@archiso", r"root@nixos", r"nixos@nixos", r"localhost",
+               r"\]#", r"~ ?[#$]", r"# "]
     if login:
         child.expect(["login:", *prompts], timeout=600)
         child.sendline(login)
     child.expect(prompts, timeout=900)
+    if become_root:
+        # Some live images autologin as an unprivileged user, and mounting the
+        # seed then fails with EACCES before anything else can go wrong.
+        child.sendline("sudo -i")
+        child.expect(prompts, timeout=120)
     child.sendline("mkdir -p /run/lis/seed && mount /dev/vdb /run/lis/seed")
     child.expect(prompts, timeout=120)
     if bootstrap:
@@ -315,11 +334,12 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path,
         install_suse(target_disk, seed_disk, iso_path, ram, recipe, work)
     elif distro == "arch":
         install_from_live_shell(distro, target_disk, seed_disk, iso_path, ram, work,
-                                applier="lis2archinstall.py", boot_hint=isolinux_serial)
+                                applier="lis2archinstall.py", boot_hint=isolinux_serial,
+                                login="root")
     elif distro == "nixos":
         install_from_live_shell(distro, target_disk, seed_disk, iso_path, ram, work,
                                 applier="lis2nixos.py", boot_hint=isolinux_serial,
-                                timeout=3600)
+                                timeout=3600, become_root=True)
     elif distro == "alpine":
         install_from_live_shell(distro, target_disk, seed_disk, iso_path, ram, work,
                                 applier="lis2alpine.py", boot_hint=lambda c: None,
