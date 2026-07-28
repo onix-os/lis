@@ -20,7 +20,9 @@ import json
 import pathlib
 import sys
 
-from lis_common import (add_common_args, check_firmware, check_version, enforce,
+from lis_common import (ALL_SECTIONS, add_common_args, check_firmware,
+                        check_unhandled, check_section_fields, check_mirror, check_kernel_variant, check_user_sudo,
+                        check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, warn)
 
 
@@ -252,6 +254,12 @@ def render_disko(doc: dict) -> str:
     partitions = storage.get("partitions", [])
     lvm = storage.get("lvm", []) or []
     topology = Topology(storage)
+
+    if not storage.get("wipe", False):
+        # --apply runs `disko --mode destroy,format,mount`; disko recreates the
+        # table unconditionally, so honouring wipe: false is not possible here.
+        refuse("storage.wipe: false — disko destroys and recreates the "
+               "declared disks; it cannot preserve an existing layout")
 
     firmware = ((doc.get("target", {}) or {}).get("firmware") or "auto").lower()
     # A 1 MiB BIOS boot partition is only meaningful when GRUB is installed to
@@ -700,6 +708,12 @@ def render_configuration(doc: dict) -> str:
             out.append(f"  services.openssh.settings.PasswordAuthentication = {str(ssh['password_auth']).lower()};")
         if ssh.get("permit_root"):
             out.append(f"  services.openssh.settings.PermitRootLogin = {nix_str(ssh['permit_root'])};")
+    if kernel_set := check_kernel_variant(
+            doc, {"lts": "linuxPackages", "hardened": "linuxPackages_hardened",
+                  "realtime": "linuxPackages_rt"}, "NixOS"):
+        out.append(f"  boot.kernelPackages = pkgs.{kernel_set};")
+    if mirror_url := (doc.get("mirror", {}) or {}).get("url"):
+        out.append(f"  nix.settings.substituters = [ {nix_str(mirror_url)} ];")
     proxy = doc.get("proxy", {}) or {}
     if proxy.get("http"):
         out.append(f"  networking.proxy.default = {nix_str(proxy['http'])};")
@@ -827,6 +841,11 @@ def render_configuration(doc: dict) -> str:
                     f"  services.displayManager.autoLogin.user = {nix_str(desktop['autologin'])};"]
 
     drivers = doc.get("drivers", {}) or {}
+    gpu = drivers.get("gpu")
+    if gpu in ("amdgpu", "intel"):
+        out.append(f"  services.xserver.videoDrivers = [ {nix_str(gpu)} ];")
+    elif gpu not in (None, "auto", "none", "nvidia", "nvidia-open"):
+        refuse(f"drivers.gpu {gpu!r} has no NixOS mapping")
     if drivers.get("gpu") in ("nvidia", "nvidia-open"):
         out += ["  services.xserver.videoDrivers = [ \"nvidia\" ];",
                 f"  hardware.nvidia.open = {str(drivers['gpu'] == 'nvidia-open').lower()};"]
@@ -876,6 +895,12 @@ def main() -> int:
     doc = load_doc(args.file)
     check_version(doc, args.file)
     check_firmware(doc)
+    check_unhandled(doc, ALL_SECTIONS)
+    check_boot_extras(doc, {"kernel", "loader", "params", "timeout", "variant"})
+    check_mirror(doc, {"url"})
+    check_section_fields(doc, "desktop", {"audio", "autologin", "bluetooth", "printing"})
+    check_section_fields(doc, "installer", set())
+    check_keymap(doc, {"console", "font", "layout", "variant"})
 
     args.out.mkdir(parents=True, exist_ok=True)
     disko_file = args.out / "disko.nix"

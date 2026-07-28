@@ -22,7 +22,9 @@ import pathlib
 import sys
 import uuid
 
-from lis_common import (add_common_args, check_firmware, check_version, enforce,
+from lis_common import (ALL_SECTIONS, add_common_args, check_firmware,
+                        check_unhandled, check_section_fields, sudoers_commands, boot_timeout_commands, driver_packages,
+                        check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
 
 SECTOR = {"unit": "B", "value": 512}
@@ -229,6 +231,7 @@ def translate(doc: dict) -> tuple[dict, dict]:
     scripts = doc.get("scripts", {}) or {}
 
     pkgs = list(software.get("packages", []))
+    pkgs += driver_packages(doc, "arch")
     for app in software.get("apps", []):
         if isinstance(app, str):
             pkgs.append(app)
@@ -254,7 +257,8 @@ def translate(doc: dict) -> tuple[dict, dict]:
         "timezone": system.get("timezone", "UTC"),
         "ntp": bool((system.get("time", {}) or {}).get("ntp", True)),
         "locale_config": {
-            "kb_layout": (system.get("keymap", {}) or {}).get("console", "us"),
+            "kb_layout": ((system.get("keymap", {}) or {}).get("layout")
+                          or (system.get("keymap", {}) or {}).get("console", "us")),
             "sys_enc": "UTF-8",
             "sys_lang": system.get("locale", "en_US.UTF-8"),
         },
@@ -361,6 +365,10 @@ def translate(doc: dict) -> tuple[dict, dict]:
         for script_item in (user.get("scripts", {}) or {}).get("firstboot", []):
             if content := script_item.get("content"):
                 firstboot.append(f"su - {user['name']} -c {json.dumps(content)}")
+
+    commands += sudoers_commands(doc)
+    commands += boot_timeout_commands(
+        doc, "arch", "systemd-boot" if bootloader == "Systemd-boot" else "grub")
 
     for stage in ("post_install", "post", "pre_reboot", "on_success"):
         for item in scripts.get(stage, []):
@@ -495,6 +503,11 @@ def main() -> int:
     doc = load_doc(args.file)
     check_version(doc, args.file)
     check_firmware(doc)
+    check_unhandled(doc, ALL_SECTIONS)
+    check_boot_extras(doc, {"kernel", "loader", "params", "timeout", "variant"})
+    check_section_fields(doc, "desktop", {"audio", "display_manager"})
+    check_section_fields(doc, "installer", set())
+    check_keymap(doc, {"console", "layout"})
 
     config, creds = translate(doc)
     args.out.mkdir(parents=True, exist_ok=True)

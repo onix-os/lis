@@ -20,7 +20,9 @@ import pathlib
 import sys
 import xml.etree.ElementTree as ET
 
-from lis_common import (add_common_args, check_firmware, check_version, enforce,
+from lis_common import (ALL_SECTIONS, add_common_args, check_firmware,
+                        check_unhandled, check_section_fields, sudoers_commands, kernel_params_commands, check_kernel_variant, check_mirror, boot_timeout_commands, driver_packages,
+                        check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
 
 NS = "http://www.suse.com/1.0/yast2ns"
@@ -106,6 +108,41 @@ def collect_scripts(doc: dict) -> tuple[list[str], list[str], list[str]]:
         for s in (user.get("scripts", {}) or {}).get("post_install", []):
             if c := s.get("content"):
                 post.append(f"su - {user['name']} -c {json.dumps(c)}")
+    post += sudoers_commands(doc)
+    post += boot_timeout_commands(doc, "suse", (doc.get("boot") or {}).get("loader", "grub"))
+    post += kernel_params_commands(doc, "suse")
+
+    # files[] and proxy go through the chroot scripts that both outputs already
+    # carry, rather than through AutoYaST-only elements: the same list reaches
+    # profile.json and autoyast.xml, so one implementation covers both engines.
+    import base64 as _b64
+    for entry in doc.get("files", []) or []:
+        payload = _b64.b64encode(entry["content"].encode()).decode()
+        parent = str(pathlib.PurePath(entry["path"]).parent)
+        post.append(f"install -d {json.dumps(parent)}")
+        post.append(f"echo {payload} | base64 -d > {json.dumps(entry['path'])}")
+        if mode := entry.get("mode"):
+            post.append(f"chmod {mode} {json.dumps(entry['path'])}")
+        if owner := entry.get("owner"):
+            post.append(f"chown {json.dumps(owner)} {json.dumps(entry['path'])}")
+
+    if mirror_url := (doc.get("mirror", {}) or {}).get("url"):
+        post.append("zypper --non-interactive ar --refresh --priority 50 "
+                    f"{json.dumps(mirror_url)} lis-mirror")
+
+    proxy = doc.get("proxy", {}) or {}
+    if proxy:
+        # /etc/sysconfig/proxy is where SUSE reads it from.
+        settings = [("PROXY_ENABLED", "yes")]
+        if proxy.get("http"):
+            settings.append(("HTTP_PROXY", proxy["http"]))
+        if proxy.get("https"):
+            settings.append(("HTTPS_PROXY", proxy["https"]))
+        if proxy.get("no_proxy"):
+            settings.append(("NO_PROXY", ",".join(proxy["no_proxy"])))
+        body = "".join(f'{k}="{v}"\n' for k, v in settings)
+        payload = _b64.b64encode(body.encode()).decode()
+        post.append(f"echo {payload} | base64 -d > /etc/sysconfig/proxy")
     firstboot = [s["content"] for s in scripts.get("firstboot", []) if s.get("content")]
     for user in doc.get("users", []) or []:
         for s in (user.get("scripts", {}) or {}).get("firstboot", []):
@@ -126,6 +163,10 @@ def packages_of(doc: dict) -> tuple[list[str], list[str]]:
     software = doc.get("software", {}) or {}
     desktop = doc.get("desktop", {}) or {}
     pkgs = list(software.get("packages", []))
+    pkgs += driver_packages(doc, "suse")
+    if kernel_pkg := check_kernel_variant(
+            doc, {"lts": "kernel-longterm", "realtime": "kernel-rt"}, "openSUSE"):
+        pkgs.append(kernel_pkg)
     for app in software.get("apps", []):
         if isinstance(app, str):
             pkgs.append(app)
@@ -162,7 +203,10 @@ def render_agama(doc: dict) -> dict:
     storage = doc.get("storage", {}) or {}
     network = doc.get("network", {}) or {}
     users = doc.get("users", []) or []
-    keymap = (system.get("keymap", {}) or {}).get("console", "us")
+    km = system.get("keymap", {}) or {}
+    keymap = km.get("layout") or km.get("console", "us")
+    if km.get("variant"):
+        keymap = f"{keymap}({km['variant']})"
     pkgs, patterns = packages_of(doc)
     pre, post, firstboot = collect_scripts(doc)
 
@@ -306,8 +350,25 @@ def render_autoyast(doc: dict) -> str:
     ET.SubElement(lang, "language").text = system.get("locale", "en_US.UTF-8").split(".")[0]
     ET.SubElement(profile, "timezone").append(text_node("timezone",
                                                         system.get("timezone", "UTC")))
+    # AutoYaST configures the bootloader after chroot-scripts run, so editing
+    # /etc/default/grub from a script is overwritten. bootloader/global carries
+    # both the menu timeout and the kernel command line natively
+    # (schema: bl_global → bl_timeout INTEGER, append STRING).
+    boot_cfg = doc.get("boot", {}) or {}
+    bl_timeout = boot_cfg.get("timeout")
+    bl_append = (boot_cfg.get("kernel", {}) or {}).get("params")
+    if bl_timeout is not None or bl_append:
+        bl_global = ET.SubElement(ET.SubElement(profile, "bootloader"), "global")
+        if bl_timeout is not None:
+            node = ET.SubElement(bl_global, "timeout")
+            node.set(f"{{{CONFIG_NS}}}type", "integer")
+            node.text = str(int(bl_timeout))
+        if bl_append:
+            ET.SubElement(bl_global, "append").text = " ".join(bl_append)
+
     keyboard = ET.SubElement(profile, "keyboard")
-    console_map = (system.get("keymap", {}) or {}).get("console", "us")
+    _km = system.get("keymap", {}) or {}
+    console_map = _km.get("console") or _km.get("layout") or "us"
     ET.SubElement(keyboard, "keymap").text = YAST_KEYMAP.get(console_map, console_map)
     if hostname := system.get("hostname"):
         networking = ET.SubElement(profile, "networking")
@@ -457,6 +518,12 @@ def main() -> int:
     doc = load_doc(args.file)
     check_version(doc, args.file)
     check_firmware(doc)
+    check_unhandled(doc, ALL_SECTIONS)
+    check_boot_extras(doc, {"loader", "timeout", "kernel", "variant", "params"})
+    check_mirror(doc, {"url"})
+    check_section_fields(doc, "desktop", {"bluetooth", "printing"})
+    check_section_fields(doc, "installer", {"on_finish"})
+    check_keymap(doc, {"console", "layout", "variant"})
 
     check_unsupported(doc)
     profile = render_agama(doc)

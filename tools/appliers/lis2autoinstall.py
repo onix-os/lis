@@ -23,7 +23,9 @@ import pathlib
 import re
 import sys
 
-from lis_common import (add_common_args, check_firmware, check_version, enforce,
+from lis_common import (ALL_SECTIONS, add_common_args, check_firmware,
+                        check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
+                        check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, secret_ref, warn)
 
 # Where the installer mounts the LIS seed volume; `seed:` secret references resolve here.
@@ -594,8 +596,8 @@ def translate(doc: dict) -> dict:
     if (storage.get("swap", {}) or {}).get("zram"):
         packages.append("zram-config")
         warn("storage.swap.zram honored by installing the zram-config package")
-    if packages:
-        auto["packages"] = packages
+    # Assigned once every contributor below (drivers, desktop) has run: keying
+    # off an empty list here would drop everything they add.
     if software.get("exclude"):
         refuse("software.exclude has no autoinstall equivalent (packages are additive)")
     if snaps := software.get("snap"):
@@ -619,9 +621,11 @@ def translate(doc: dict) -> dict:
         warn("boot.kernel.params applied via late-command GRUB_CMDLINE_LINUX edit")
 
     if drivers.get("gpu") in ("nvidia", "nvidia-open"):
+        # autoinstall has a native switch for third-party (restricted) drivers.
         auto["drivers"] = {"install": True}
-    elif drivers.get("gpu") not in (None, "auto", "none", "intel", "amd"):
-        refuse(f"drivers.gpu {drivers['gpu']!r} has no autoinstall mapping")
+        packages += driver_packages(doc, "ubuntu", skip=frozenset({"gpu"}))
+    else:
+        packages += driver_packages(doc, "ubuntu")
 
     if proxy := (doc.get("proxy", {}) or {}).get("http"):
         auto["proxy"] = proxy
@@ -654,6 +658,11 @@ def translate(doc: dict) -> dict:
     if ssh.get("permit_root"):
         late.append(in_target(
             f'echo "PermitRootLogin {ssh["permit_root"]}" >> /etc/ssh/sshd_config'))
+
+    for cmd in sudoers_commands(doc):
+        late.append(in_target(cmd))
+    for cmd in boot_timeout_commands(doc, "ubuntu", (doc.get("boot") or {}).get("loader", "grub")):
+        late.append(in_target(cmd))
 
     for stage in ("post_install", "post", "pre_reboot", "on_success"):
         for s in scripts.get(stage, []):
@@ -749,6 +758,10 @@ def translate(doc: dict) -> dict:
 
     if desktop := doc.get("desktop"):
         translate_desktop(desktop, auto, packages)
+
+    if packages:
+        auto["packages"] = packages
+
     if doc.get("registration"):
         refuse("registration (Ubuntu Pro attach) is not expressible in autoinstall; "
                "attach via a firstboot script with a seed: token reference")
@@ -905,6 +918,12 @@ def main() -> int:
     doc = load_doc(args.file)
     check_version(doc, args.file)
     check_firmware(doc)
+    check_unhandled(doc, ALL_SECTIONS)
+    check_boot_extras(doc, {"kernel", "loader", "params", "timeout", "variant"})
+    check_mirror(doc, {"url"})
+    check_section_fields(doc, "desktop", {"audio", "autologin", "display_manager"})
+    check_section_fields(doc, "installer", {"interactive", "on_finish"})
+    check_keymap(doc, {"console", "layout", "variant"})
 
     cloud_config = translate(doc)
     args.out.mkdir(parents=True, exist_ok=True)

@@ -68,7 +68,11 @@
   "system": {
     "hostname": "lis-test-host",
     "timezone": "UTC",
-    "locale": "en_US.UTF-8"
+    "locale": "en_US.UTF-8",
+    "keymap": {
+      "console": "us",
+      "layout": "us"
+    }
   },
   "users": [
     {
@@ -94,7 +98,8 @@
             "content": "echo USER_FIRSTBOOT_HOOK_PASSED > /home/fakeuser/user_firstboot.txt"
           }
         ]
-      }
+      },
+      "sudo": "nopasswd"
     }
   ],
   "software": {
@@ -125,5 +130,12 @@
         "content": "install -d -m755 /var/lib/lis && echo FIRSTBOOT_HOOK_PASSED > /var/lib/lis/firstboot.txt"
       }
     ]
-  }
+  },
+  "files": [
+    {
+      "path": "/etc/lis-test-file",
+      "content": "FILES_SECTION_PASSED\n",
+      "mode": "0644"
+    }
+  ]
 }

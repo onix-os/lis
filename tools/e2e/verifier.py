@@ -191,6 +191,45 @@ def run_stage4_live_guest_verification(args, target_disk: pathlib.Path,
             check(f"Hook {label} → {path}", marker in value,
                   f"marker {marker!r} present" if marker in value else "marker missing")
 
+        for entry in recipe.get("files", []) or []:
+            value = run(child, f"cat {entry['path']} 2>/dev/null")
+            want = entry["content"].strip()
+            check(f"File ({entry['path']})", want in value,
+                  f"content {want!r} present" if want in value else "missing or wrong")
+            if mode := entry.get("mode"):
+                value = run(child, f"stat -c %a {entry['path']} 2>/dev/null")
+                check(f"  mode {mode} for {entry['path']}",
+                      value.strip() == mode.lstrip("0"),
+                      f"found {value.strip()!r}")
+
+        for user in expected.users:
+            if user.get("sudo") != "nopasswd":
+                continue
+            # Check the effect, not one distro's mechanism: a drop-in file, a
+            # line in /etc/sudoers and NixOS's generated wheelNeedsPassword all
+            # satisfy the same intent, and `sudo -l` reports whichever applies.
+            name = user["name"]
+            value = run(child, f"{{ sudo -l -U {name} 2>/dev/null; "
+                               f"cat /etc/sudoers.d/99-lis-{name} 2>/dev/null; "
+                               "cat /etc/sudoers 2>/dev/null; } "
+                               "| grep -c NOPASSWD || echo 0")
+            ok = value.strip().isdigit() and int(value.strip()) > 0
+            check(f"Passwordless sudo ({name})", ok,
+                  "granted" if ok else "no NOPASSWD rule for this account")
+
+        if (timeout := (recipe.get("boot") or {}).get("timeout")) is not None:
+            # Distros disagree on where this lands: /etc/default/grub on most,
+            # only the generated grub.cfg on NixOS, loader.conf for systemd-boot.
+            # cat-then-grep, because grep exits 2 on an unmatched glob even when
+            # another file did match — which reads as a failure that is not one.
+            value = run(child, "cat /etc/default/grub /boot/grub/grub.cfg "
+                               "/boot/grub2/grub.cfg /boot/loader/loader.conf "
+                               f"2>/dev/null | grep -cE 'GRUB_TIMEOUT={timeout}$|"
+                               f"set timeout={timeout}$|^timeout {timeout}$' || echo 0")
+            ok = value.strip().isdigit() and int(value.strip()) > 0
+            check(f"Boot menu timeout ({timeout}s)", ok,
+                  "applied to the bootloader" if ok else "not found in any loader config")
+
         for pkg in packages_of(recipe):
             value = run(child, f"command -v {pkg} >/dev/null 2>&1 && echo YES || echo NO")
             check(f"Package installed ({pkg})", "YES" in value,
