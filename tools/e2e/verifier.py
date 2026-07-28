@@ -265,12 +265,25 @@ def login(child: pexpect.spawn, recipe: dict, password: str = OPERATOR_PASSWORD)
     prompts = [r"[#$] $", r"~ ?[#$]", r"\][#$]", r"root@"]
     login_prompt = r"[a-zA-Z0-9_.-]+ login:"
     try:
-        idx = child.expect([login_prompt, *prompts, pexpect.TIMEOUT], timeout=240)
+        # Generous: several of these guests take over two minutes to reach a
+        # console on an unloaded host, and a slow boot must not be reported as
+        # a system that does not boot.
+        idx = child.expect([login_prompt, *prompts, pexpect.TIMEOUT], timeout=600)
     except pexpect.EOF:
         return False
     if idx == len(prompts) + 1:
         return False
     if idx == 0:
+        # An autologin console prints the very same "host login:" banner and
+        # then hands over a shell unprompted, so the banner alone does not mean
+        # credentials are wanted. Give the shell a moment to appear first.
+        try:
+            child.expect(prompts, timeout=20)
+            return True
+        except pexpect.EOF:
+            return False
+        except pexpect.TIMEOUT:
+            pass
         # A document carries only a crypt(3) hash (SPEC §9); the plaintext is
         # operator knowledge supplied out of band, which for the bundled test
         # recipe is OPERATOR_PASSWORD. Logging in this way is the only route on

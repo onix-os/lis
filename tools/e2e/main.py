@@ -14,7 +14,7 @@ from tools.e2e.colors import (
 )
 from tools.e2e.iso import download_iso_if_missing
 from tools.e2e.installer import (DocumentRefused, InstallFailed,
-                                 run_stage2_qemu_installer)
+                                 run_stage2_qemu_installer, set_http_port)
 from tools.e2e.verifier import verify_installed_disk, run_stage4_live_guest_verification
 
 DISTROS = ["alpine", "nixos", "ubuntu", "arch", "fedora", "suse", "debian"]
@@ -62,6 +62,8 @@ def run_single_distro_test(args) -> int:
     if not recipe_path.exists():
         sys.exit(f"{RED}error: recipe file '{recipe_path}' not found{RESET}")
     recipe = json.loads(recipe_path.read_text())
+
+    set_http_port(args.distro)
 
     BUILD_DIR.mkdir(exist_ok=True)
     target_disk = BUILD_DIR / f"e2e-{args.distro}-target.qcow2"

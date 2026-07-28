@@ -19,7 +19,18 @@ import pexpect
 from tools.e2e.colors import BOLD, GRAY, print_stage_header, TICK, RESET
 
 APPLIERS = pathlib.Path(__file__).resolve().parent.parent / "appliers"
-HTTP_PORT = 8088
+# One port per distro: a run serves its profile over HTTP and kills any stale
+# server on its own port, so a single shared port would make two concurrent
+# runs silently steal each other's server (the second never binds, and the
+# guest then reports "Failed to download" as if the network were broken).
+HTTP_PORT_BASE = 8088
+HTTP_PORT = HTTP_PORT_BASE
+
+
+def set_http_port(distro: str) -> None:
+    from tools.e2e.main import DISTROS
+    global HTTP_PORT
+    HTTP_PORT = HTTP_PORT_BASE + (DISTROS.index(distro) if distro in DISTROS else 0)
 SERIAL = "console=ttyS0,115200n8"
 # The openSUSE NET image installs from a remote repository.
 SUSE_REPO = "http://download.opensuse.org/distribution/leap/15.6/repo/oss/"
