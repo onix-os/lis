@@ -149,7 +149,12 @@ def disk_config(doc: dict) -> dict | None:
             "status": "create",
             "type": "primary",
             "obj_id": obj_id,
-            "fs_type": FS_MAP.get(fs, fs) if fs not in (None, "none") else None,
+            # parted needs a filesystem type to write the partition entry, so
+            # archinstall raises "File system type is not set" for a member with
+            # none. ext4 is only the type recorded in the partition table; the
+            # LVM/RAID step claims the device before anything is made on it.
+            "fs_type": (FS_MAP.get(fs, fs) if fs not in (None, "none")
+                        else ("ext4" if handle in consumed else None)),
             "start": {"unit": "MiB", "value": cursor, "sector_size": SECTOR},
             "size": size_obj(part.get("size", "rest"), f"partition '{handle}'"),
             "mountpoint": None,
