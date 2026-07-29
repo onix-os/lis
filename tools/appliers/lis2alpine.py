@@ -167,10 +167,22 @@ def render_alpine(doc: dict) -> tuple[str, str, str]:
     # without `modules=`, mount fails before the filesystem type is registered.
     kernel_opts = list(((doc.get("boot", {}) or {}).get("kernel", {}) or {})
                        .get("params", []))
-    if root and (fs := role_fs(root)) and fs not in (None, "none"):
-        modules = ["sd-mod", "usb-storage", "virtio-blk", "virtio-pci", fs]
+    root_fs = role_fs(root) if root else next(
+        (v.get("fs") for g in (storage.get("lvm", []) or [])
+         for v in g.get("volumes", []) or [] if v.get("mountpoint") == "/"), None)
+    if root_fs and root_fs not in (None, "none"):
+        modules = ["sd-mod", "usb-storage", "virtio-blk", "virtio-pci", root_fs]
+        if storage.get("encryption"):
+            # nlplug-findfs can only luksOpen a device once dm-crypt and the
+            # cipher are loaded, and Alpine's initramfs loads exactly what this
+            # list names — nothing more.
+            modules += ["dm-crypt", "dm-mod", "aes", "xts", "sha256"]
+        if storage.get("lvm"):
+            modules.append("dm-mod")
+        if storage.get("raid"):
+            modules += ["raid1", "raid0", "raid10", "md-mod"]
         kernel_opts.append("modules=" + ",".join(dict.fromkeys(modules)))
-        kernel_opts.append(f"rootfstype={fs}")
+        kernel_opts.append(f"rootfstype={root_fs}")
     if kernel_opts:
         env.append("KERNELOPTS=" + shquote(" ".join(kernel_opts)))
     if root and (fs := role_fs(root)) and fs != "none":
