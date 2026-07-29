@@ -20,7 +20,7 @@ import pathlib
 import sys
 import xml.etree.ElementTree as ET
 
-from lis_common import (track, check_unread, luks_key_path, seed_mount_commands, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, enrollment_commands, luks_key_path, seed_mount_commands, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, kernel_params_commands, check_kernel_variant, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -77,9 +77,6 @@ def check_unsupported(doc: dict) -> None:
         refuse("software.snap is not available on openSUSE")
     if software.get("exclude"):
         refuse("software.exclude has no openSUSE profile equivalent (patterns are additive)")
-    if doc.get("keys"):
-        refuse("keys[] hardware-token enrollment is not expressible in an openSUSE "
-               "profile; enroll with systemd-cryptenroll from a firstboot script")
     if doc.get("registration"):
         warn("registration handled by SUSEConnect in a post script — supply the token "
              "from the seed, never inline")
@@ -119,6 +116,7 @@ def collect_scripts(doc: dict) -> tuple[list[str], list[str], list[str]]:
                 post.append(f"su - {user['name']} -c {json.dumps(c)}")
     post += sudoers_commands(doc)
     post += uid_commands(doc)
+    post += enrollment_commands(doc)
     post += system_commands(doc, "suse")
     post += boot_timeout_commands(doc, "suse", (doc.get("boot") or {}).get("loader", "grub"))
     post += kernel_params_commands(doc, "suse")

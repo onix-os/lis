@@ -22,7 +22,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, luks_key_path, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, enrollment_commands, luks_key_path, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_kernel_variant, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -290,6 +290,8 @@ def render_alpine(doc: dict) -> tuple[str, str, str]:
         post.append(f'chroot "$target" sh -c {json.dumps(cmd)}')
     for cmd in uid_commands(doc, busybox=True):
         post.append(f'chroot "$target" sh -c {json.dumps(cmd)}')
+    for cmd in enrollment_commands(doc):
+        post.append(f'chroot "$target" sh -c {json.dumps(cmd)}')
     for cmd in system_commands(doc, "alpine"):
         post.append(f'chroot "$target" sh -c {json.dumps(cmd)}')
 
@@ -327,8 +329,6 @@ def render_alpine(doc: dict) -> tuple[str, str, str]:
         refuse("scripts.on_error has no setup-alpine equivalent")
     if doc.get("desktop", {}).get("autologin"):
         refuse("desktop.autologin is not expressible for Alpine by this applier")
-    if doc.get("keys"):
-        refuse("keys[] hardware-token enrollment is not expressible for Alpine")
     if doc.get("registration"):
         refuse("registration does not apply to Alpine")
     if (boot := doc.get("boot", {}) or {}).get("loader") not in (None, "auto", "grub", "syslinux"):

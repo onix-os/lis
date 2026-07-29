@@ -18,7 +18,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, luks_key_path, seed_mount_commands, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, enrollment_commands, luks_key_path, seed_mount_commands, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -147,10 +147,9 @@ def render_storage(doc: dict, lines: list[str]) -> None:
                 refuse(f"encryption '{crypt['id']}': no key material — declare a "
                        "keys[] entry with a seed: source, or place the passphrase "
                        f"at {SEED_MOUNT}/secrets/luks-{crypt['id']}.key")
-            for method in crypt.get("unlock", []) or []:
-                if method not in ("passphrase", "keyfile"):
-                    refuse(f"encryption '{crypt['id']}': unlock method {method!r} must be "
-                           "enrolled after installation, not by Anaconda")
+            # Non-passphrase methods are enrolled from %post with
+            # systemd-cryptenroll (see enrollment_commands), so they are honored
+            # rather than refused — Anaconda simply is not the thing doing it.
         if part.get("label"):
             flags.append(f"--label={part['label']}")
         subvolumes = part.get("subvolumes") or []
@@ -399,6 +398,7 @@ def render_kickstart(doc: dict) -> str:
                 late.append(f"su - {user['name']} -c {json.dumps(c)}")
     late += sudoers_commands(doc)
     late += uid_commands(doc)
+    late += enrollment_commands(doc)
     late += system_commands(doc, "fedora")
     late += boot_timeout_commands(doc, "fedora", (doc.get("boot") or {}).get("loader", "grub"))
     for entry in doc.get("files", []) or []:
@@ -442,9 +442,6 @@ def render_kickstart(doc: dict) -> str:
 
     if scripts.get("on_error"):
         refuse("scripts.on_error has no kickstart equivalent")
-    if doc.get("keys"):
-        refuse("keys[] hardware-token enrollment is not expressible in kickstart; "
-               "enroll with systemd-cryptenroll from a firstboot script")
     if doc.get("registration"):
         warn("registration handled by subscription-manager in %post — supply the token "
              "from the seed, never inline")

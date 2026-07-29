@@ -20,7 +20,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, resolve_disk_paths, check_snapshots, match_selectors, consume, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, enrollment_commands, resolve_disk_paths, check_snapshots, match_selectors, consume, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, check_mirror, check_kernel_variant, check_user_sudo,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, warn)
@@ -551,6 +551,7 @@ def render_script_hooks(doc: dict) -> list[str]:
                     f"lis_as_user {user['name']} {json.dumps(c)}")
 
     firstboot = [s["content"] for s in scripts.get("firstboot", []) if s.get("content")]
+    firstboot += enrollment_commands(doc)
     for user in doc.get("users", []) or []:
         for s in (user.get("scripts", {}) or {}).get("firstboot", []):
             if c := s.get("content"):
@@ -889,7 +890,9 @@ def render_configuration(doc: dict) -> str:
 
     # Keys matrix
     if doc.get("keys"):
-        warn("hardware key matrix (keys[]) enrollment is handled by installer cryptenroll; emitted configuration assumes enrolled LUKS/PAM")
+        warn("keys[] enrollment runs from the first-boot unit via "
+             "systemd-cryptenroll; the generated configuration assumes the "
+             "slot exists on the next boot")
     if doc.get("registration"):
         refuse("registration does not apply to NixOS")
     if (storage.get("snapshots", {}) or {}).get("enabled"):

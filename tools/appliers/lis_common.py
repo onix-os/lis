@@ -766,6 +766,47 @@ def luks_key_path(doc: dict, cid: str) -> str | None:
     return None
 
 
+def enrollment_commands(doc: dict) -> list[str]:
+    """Shell that enrolls hardware tokens against the LUKS containers.
+
+    No installer answer file has a vocabulary for this, but every target ships
+    systemd-cryptenroll and every applier can run a command inside the installed
+    system — so a `keys[]` entry is intent that can be honored rather than
+    refused. Enrollment needs the existing passphrase, which comes from the seed.
+    """
+    out: list[str] = []
+    containers = (doc.get("storage", {}) or {}).get("encryption", []) or []
+    tokens = {e.get("type"): e for e in (doc.get("keys", []) or [])
+              if "disk_encryption" in (e.get("purpose", []) or [])}
+    for container in containers:
+        cid = container["id"]
+        key_path = luks_key_path(doc, cid)
+        for method in container.get("unlock", []) or []:
+            if method in ("passphrase", "keyfile"):
+                continue
+            if method == "tpm2":
+                flag = "--tpm2-device=auto"
+            elif method == "fido2":
+                flag = "--fido2-device=auto"
+            else:
+                refuse(f"encryption '{cid}': unlock method {method!r} has no "
+                       "unattended enrollment path")
+                continue
+            if method == "fido2" and not tokens.get("fido2"):
+                warn(f"encryption '{cid}': fido2 enrollment needs the token "
+                     "present at install time; it will fail if none is attached")
+            if not key_path:
+                refuse(f"encryption '{cid}': {method} enrollment needs the existing "
+                       "passphrase from the seed to authorise a new key slot")
+                continue
+            # cryptsetup names the backing device; enrol against that, not the
+            # mapper node, which does not exist once the system is running.
+            out.append(f"dev=$(blkid -t TYPE=crypto_LUKS -o device | head -n1); "
+                       f"[ -n \"$dev\" ] && PASSWORD=$(cat {key_path}) "
+                       f"systemd-cryptenroll {flag} \"$dev\" || true")
+    return out
+
+
 def seed_mount_commands() -> list[str]:
     """Shell that makes the LIS seed readable inside an installer environment."""
     return [f"mkdir -p {SEED_MOUNT}",
