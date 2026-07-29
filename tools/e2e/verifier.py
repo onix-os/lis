@@ -199,6 +199,18 @@ def run_stage4_live_guest_verification(args, target_disk: pathlib.Path,
             check(f"Hook {label} → {path}", marker in value,
                   f"marker {marker!r} present" if marker in value else "marker missing")
 
+        if (recipe.get("storage", {}) or {}).get("encryption"):
+            # Without this, an install that quietly skipped LUKS still passes
+            # every other check — the exact silent drift the spec forbids.
+            value = run(child, "findmnt -no SOURCE / 2>/dev/null")
+            on_crypt = "/dev/mapper/" in value or "dm-" in value
+            check("Root is on an encrypted device", on_crypt,
+                  f"root device is {value.strip()!r}")
+            value = run(child, "lsblk -no TYPE 2>/dev/null | grep -c crypt || echo 0")
+            ok = value.strip().isdigit() and int(value.strip()) > 0
+            check("  a LUKS mapping exists", ok,
+                  f"{value.strip()} crypt device(s)")
+
         for entry in recipe.get("files", []) or []:
             value = run(child, f"cat {entry['path']} 2>/dev/null")
             want = entry["content"]
