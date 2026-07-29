@@ -22,13 +22,16 @@ import pathlib
 import sys
 import uuid
 
-from lis_common import (track, check_unread, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, luks_key_path, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
 
 SECTOR = {"unit": "B", "value": 512}
 UNIT_BYTES = {"B": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30, "TiB": 1 << 40}
+# LIS partition handle → the obj_id archinstall knows it by.
+PV_IDS: dict[str, str] = {}
+
 # obj_ids whose size the document left open ('rest' / percent).
 REST_SIZED: set[str] = set()
 
@@ -86,11 +89,15 @@ def disk_config(doc: dict) -> dict | None:
         names = ", ".join(a["name"] for a in storage["raid"])
         refuse(f"storage.raid ({names}): archinstall has no mdadm array vocabulary — "
                "build the array first and adopt it, or use an applier that supports RAID")
-    if storage.get("encryption"):
-        ids = ", ".join(c["id"] for c in storage["encryption"])
-        refuse(f"storage.encryption ({ids}): not yet implemented for archinstall — the "
-               "credentials file must be filled from seed key material at apply "
-               "time (delivery.md §6), or the container prepared before install")
+    for container in storage.get("encryption", []) or []:
+        if not luks_key_path(doc, container["id"]):
+            refuse(f"storage.encryption ({container['id']}): no key material — declare "
+                   "a keys[] entry with a seed: source, or place the passphrase at "
+                   f"{SEED_MOUNT}/secrets/luks-{container['id']}.key")
+        for method in container.get("unlock", []) or []:
+            if method not in ("passphrase", "keyfile"):
+                warn(f"storage.encryption ({container['id']}): unlock method "
+                     f"{method!r} must be enrolled after installation")
 
     disks = {}
     for disk in target.get("disks", []):
@@ -107,7 +114,8 @@ def disk_config(doc: dict) -> dict | None:
         consumed.update(group.get("devices", []))
 
     mods: dict[str, dict] = {}
-    pv_ids: dict[str, str] = {}          # LIS partition handle → archinstall obj_id
+    pv_ids = PV_IDS                      # LIS partition handle → archinstall obj_id
+    pv_ids.clear()
     starts: dict[str, int] = {}
     for i, part in enumerate(storage.get("partitions", [])):
         path = disks.get(part.get("disk"))
@@ -276,6 +284,18 @@ def translate(doc: dict) -> tuple[dict, dict]:
     # bootloader instead. Setting an invented key would drop them silently.
     kernel_params = " ".join((boot.get("kernel", {}) or {}).get("params", []))
     if dc := disk_config(doc):
+        # Schema read from archinstall itself (models/device.py DiskEncryption):
+        # disk_config carries disk_encryption {encryption_type, partitions:
+        # [obj_id], lvm_volumes: []}, and the passphrase travels separately in
+        # the credentials file as `encryption_password`.
+        encrypted = [c["over"] for c in (storage.get("encryption", []) or [])]
+        obj_ids = [PV_IDS[h] for h in encrypted if h in PV_IDS]
+        if obj_ids:
+            dc["disk_encryption"] = {
+                "encryption_type": "luks",
+                "partitions": obj_ids,
+                "lvm_volumes": [],
+            }
         config["disk_config"] = dc
     elif storage:
         refuse("storage section could not be translated into an archinstall disk config")
@@ -530,6 +550,21 @@ def main() -> int:
     cfg_file = args.out / "user_configuration.json"
     creds_file = args.out / "user_credentials.json"
     cfg_file.write_text(json.dumps(config, indent=2) + "\n")
+    if args.apply:
+        # Resolved only when actually installing (delivery.md §6): a plain
+        # translation stays shareable, and the passphrase never lands in an
+        # artifact someone might commit. The file is already mode 0600.
+        for container in (doc.get("storage", {}) or {}).get("encryption", []) or []:
+            key_path = luks_key_path(doc, container["id"])
+            if not key_path:
+                continue
+            try:
+                creds["encryption_password"] = pathlib.Path(key_path).read_text().strip()
+            except OSError as err:
+                sys.exit(f"error: --apply needs key material for "
+                         f"'{container['id']}' at {key_path}: {err}")
+            break
+
     creds_file.write_text(json.dumps(creds, indent=2) + "\n")
     creds_file.chmod(0o600)
     report(cfg_file, creds_file)
