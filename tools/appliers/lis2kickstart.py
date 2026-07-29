@@ -18,7 +18,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, luks_key_path, seed_mount_commands, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -43,6 +43,10 @@ def size_mib(size: str, what: str) -> str:
             return f"--size={int(size[: -len(unit)]) * factor}"
     refuse(f"{what}: unparseable size {size!r}")
     return "--size=4096"
+
+
+# Containers whose `part` line must be written by %pre, as (id, key path).
+DEFERRED_CRYPT: list[tuple[str, str]] = []
 
 
 def render_storage(doc: dict, lines: list[str]) -> None:
@@ -81,6 +85,7 @@ def render_storage(doc: dict, lines: list[str]) -> None:
                "unaccounted existing layout in an unattended run (schema.md §20.8)")
 
     encryption = {c["over"]: c for c in storage.get("encryption", []) or []}
+    deferred_crypt = DEFERRED_CRYPT
     consumed: dict[str, tuple[str, str]] = {}
     for group in storage.get("lvm", []) or []:
         for dev in group.get("devices", []):
@@ -132,12 +137,16 @@ def render_storage(doc: dict, lines: list[str]) -> None:
         flags.append(f"--ondisk={ondisk}")
         if crypt := encryption.get(handle):
             flags.append("--encrypted")
-            if keyfile := (crypt.get("key", {}) or {}).get("keyfile"):
-                flags.append(f"--escrowcert={keyfile}")
+            if key_path := luks_key_path(doc, crypt["id"]):
+                # Anaconda wants the passphrase inline, so this `part` line is
+                # written by a %pre script that reads the seed and %include'd:
+                # the served kickstart never carries the secret.
+                deferred_crypt.append((crypt["id"], key_path))
+                flags.append("@@LIS_PASSPHRASE@@")
             else:
-                refuse(f"encryption '{crypt['id']}': not yet implemented for kickstart — the "
-                   "passphrase must come from seed key material at apply time "
-                   "(delivery.md §6), or the container be prepared in %pre")
+                refuse(f"encryption '{crypt['id']}': no key material — declare a "
+                       "keys[] entry with a seed: source, or place the passphrase "
+                       f"at {SEED_MOUNT}/secrets/luks-{crypt['id']}.key")
             for method in crypt.get("unlock", []) or []:
                 if method not in ("passphrase", "keyfile"):
                     refuse(f"encryption '{crypt['id']}': unlock method {method!r} must be "
@@ -151,7 +160,13 @@ def render_storage(doc: dict, lines: list[str]) -> None:
         if subvolumes and not owner:
             # kickstart carves subvolumes off a labelled btrfs volume, so the
             # partition becomes an unformatted member of that volume.
-            flags = [f"part btrfs.{handle}", size, f"--ondisk={ondisk}"]
+            # Keep the encryption flags: rebuilding the line from scratch
+            # would drop them, creating the volume unencrypted while the
+            # document asked for LUKS.
+            crypt_flags = [f for f in flags
+                           if f in ("--encrypted",) or f.startswith(("--escrowcert",
+                                                                     "@@LIS_PASSPHRASE@@"))]
+            flags = [f"part btrfs.{handle}", size, f"--ondisk={ondisk}", *crypt_flags]
             lines.append(" ".join(flags))
             btrfs_volumes.append((handle, part.get("mountpoint")
                                   or ("/" if role == "root" else None), subvolumes))
@@ -437,6 +452,23 @@ def render_kickstart(doc: dict) -> str:
         lines.insert(1, f"# proxy: {proxy}")
         warn("proxy.http is applied to the installer environment only")
 
+    if DEFERRED_CRYPT:
+        # Anaconda has no keyfile option for --passphrase, so the lines that
+        # carry it are generated inside the installer from seed key material
+        # and pulled in with %include. The served kickstart stays secret-free.
+        crypt_lines = [l for l in lines if "@@LIS_PASSPHRASE@@" in l]
+        lines = [l for l in lines if "@@LIS_PASSPHRASE@@" not in l]
+        pre = ["", "%pre --erroronfail", *seed_mount_commands()]
+        for cid, key_path in DEFERRED_CRYPT:
+            pre.append(f'LIS_PASS_{cid.replace("-", "_")}=$(cat {key_path})')
+        pre.append("cat > /tmp/lis-crypt.ks <<LIS_EOF")
+        for line in crypt_lines:
+            for cid, _ in DEFERRED_CRYPT:
+                line = line.replace("@@LIS_PASSPHRASE@@",
+                                    f'--passphrase=$LIS_PASS_{cid.replace("-", "_")}')
+            pre.append(line)
+        pre += ["LIS_EOF", "%end", "", "%include /tmp/lis-crypt.ks"]
+        lines += pre
     return "\n".join(lines) + "\n"
 
 

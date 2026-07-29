@@ -739,6 +739,40 @@ def shell_packages(doc: dict) -> list[str]:
     return out
 
 
+SEED_MOUNT = "/run/lis/seed"
+
+
+def luks_key_path(doc: dict, cid: str) -> str | None:
+    """Where an applier will find the key material for a LUKS container.
+
+    A path, never a value: `delivery.md` §6 requires appliers to resolve
+    `seed:` references at apply time, and a path keeps the generated profile
+    shareable — the secret exists only on the seed volume.
+    """
+    for entry in doc.get("keys", []) or []:
+        if "disk_encryption" not in (entry.get("purpose", []) or []):
+            continue
+        if entry.get("type") in ("keyfile", "gpg", "age"):
+            if path := secret_ref(entry.get("source")):
+                return path
+    container = next((c for c in (doc.get("storage", {}) or {}).get("encryption", []) or []
+                      if c.get("id") == cid), {})
+    if (container.get("key") or {}).get("keyfile"):
+        keyfile = container["key"]["keyfile"]
+        return keyfile if keyfile.startswith("/") else f"{SEED_MOUNT}/{keyfile.lstrip('/')}"
+    if (container.get("key") or {}).get("passphrase"):
+        # `passphrase: true` declares *how* it unlocks, not the secret itself.
+        return f"{SEED_MOUNT}/secrets/luks-{cid}.key"
+    return None
+
+
+def seed_mount_commands() -> list[str]:
+    """Shell that makes the LIS seed readable inside an installer environment."""
+    return [f"mkdir -p {SEED_MOUNT}",
+            f'dev=$(blkid -L LIS || blkid -L LISDATA || true)',
+            f'[ -n "$dev" ] && mount -o ro "$dev" {SEED_MOUNT} 2>/dev/null || true']
+
+
 def resolve_disk_paths(doc: dict) -> None:
     """Fill in `match.path` for disks selected by rule, using the real machine.
 
