@@ -29,6 +29,9 @@ from lis_common import (track, check_unread, chroot_intents, registration_comman
 
 SECTOR = {"unit": "B", "value": 512}
 UNIT_BYTES = {"B": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30, "TiB": 1 << 40}
+# Where this applier mounts a layout it built itself before handing it over.
+PRE_MOUNT = "/mnt/lis"
+
 # LIS partition handle → the obj_id archinstall knows it by.
 PV_IDS: dict[str, str] = {}
 
@@ -86,9 +89,13 @@ def disk_config(doc: dict) -> dict | None:
     target = doc.get("target", {}) or {}
 
     if storage.get("raid"):
-        names = ", ".join(a["name"] for a in storage["raid"])
-        refuse(f"storage.raid ({names}): archinstall has no mdadm array vocabulary — "
-               "build the array first and adopt it, or use an applier that supports RAID")
+        # archinstall has no mdadm vocabulary, but its own DiskLayoutType offers
+        # Pre_mount = 'pre_mounted_config': the array is built here at apply time
+        # and archinstall installs into the mounted result. Read from
+        # archinstall/lib/models/device.py.
+        warn(f"storage.raid ({', '.join(a['name'] for a in storage['raid'])}): the "
+             "array is assembled by this applier before archinstall runs, which "
+             "then installs into the pre-mounted layout")
     for container in storage.get("encryption", []) or []:
         if not luks_key_path(doc, container["id"]):
             refuse(f"storage.encryption ({container['id']}): no key material — declare "
@@ -283,7 +290,10 @@ def translate(doc: dict) -> tuple[dict, dict]:
     # parameters — so boot.kernel.params has to be written into the installed
     # bootloader instead. Setting an invented key would drop them silently.
     kernel_params = " ".join((boot.get("kernel", {}) or {}).get("params", []))
-    if dc := disk_config(doc):
+    if storage.get("raid"):
+        config["disk_config"] = {"config_type": "pre_mounted_config",
+                                 "mountpoint": PRE_MOUNT}
+    elif dc := disk_config(doc):
         # Schema read from archinstall itself (models/device.py DiskEncryption):
         # disk_config carries disk_encryption {encryption_type, partitions:
         # [obj_id], lvm_volumes: []}, and the passphrase travels separately in
@@ -472,6 +482,46 @@ def _kb_layout(system: dict) -> str:
     return layout or console or "us"
 
 
+def build_pre_mounted(doc: dict) -> int:
+    """Assemble the arrays this document declares and mount the result.
+
+    archinstall cannot create an mdadm array, but it can install into one that
+    already exists — that is what its Pre_mount layout is for.
+    """
+    import subprocess
+
+    storage = doc.get("storage", {}) or {}
+    disks = {d["id"]: (d.get("match", {}) or {}).get("path")
+             for d in (doc.get("target", {}) or {}).get("disks", [])}
+    index: dict[str, int] = {}
+    node_of: dict[str, str] = {}
+    for part in storage.get("partitions", []) or []:
+        disk = part.get("disk")
+        index[disk] = index.get(disk, 0) + 1
+        node_of[part.get("id")] = f"{disks.get(disk, '')}{index[disk]}"
+
+    steps: list[str] = []
+    for array in storage.get("raid", []) or []:
+        members = " ".join(node_of.get(d, "") for d in array.get("devices", []))
+        node = f"/dev/md/{array['name']}"
+        steps.append(f"mdadm --create {node} --run --level={array['level']} "
+                     f"--raid-devices={len(array.get('devices', []))} {members}")
+        target = next((p for p in storage.get("partitions", [])
+                       if p.get("id") == array["name"]), {})
+        fs = role_fs(target) or "ext4"
+        steps.append(f"mkfs.{fs} -f {node}" if fs in ("btrfs", "xfs")
+                     else f"mkfs.{fs} -F {node}")
+        if role_mountpoint(target) == "/" or not role_mountpoint(target):
+            steps += [f"mkdir -p {PRE_MOUNT}", f"mount {node} {PRE_MOUNT}"]
+    for step in steps:
+        print(f"pre-mount: {step}")
+        result = subprocess.run(step, shell=True)
+        if result.returncode:
+            print(f"error: pre-mount step failed: {step}")
+            return result.returncode
+    return 0
+
+
 def resolve_rest_sizes(config: dict) -> None:
     """Turn 'rest' and percent sizes into byte counts against the real disks.
 
@@ -585,6 +635,13 @@ def main() -> int:
             sys.exit("error: --apply requested, but 'archinstall' is not on PATH "
                      "(are you running on the Arch live ISO?)")
         resolve_rest_sizes(config)
+        if (doc.get("storage", {}) or {}).get("raid"):
+            # pre_mounted_config only means anything if something is actually
+            # mounted there; build the array, put the filesystems on it and
+            # mount before archinstall looks.
+            rc = build_pre_mounted(doc)
+            if rc:
+                return rc
         cfg_file.write_text(json.dumps(config, indent=2) + "\n")
         cmd = ["archinstall", "--config", str(cfg_file), "--creds", str(creds_file), "--silent"]
         print(f"executing native installer: {' '.join(cmd)}")
