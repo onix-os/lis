@@ -208,14 +208,17 @@ def run_stage4_live_guest_verification(args, target_disk: pathlib.Path,
         if (recipe.get("storage", {}) or {}).get("encryption"):
             # Without this, an install that quietly skipped LUKS still passes
             # every other check — the exact silent drift the spec forbids.
-            value = run(child, "findmnt -no SOURCE / 2>/dev/null")
-            on_crypt = "/dev/mapper/" in value or "dm-" in value
+            # busybox has neither findmnt nor lsblk, so read the same facts
+            # from /proc and /dev, which every target has.
+            value = run(child, "awk '$2==\"/\" {print $1; exit}' /proc/mounts")
+            on_crypt = "/dev/mapper/" in value or "/dev/dm-" in value
             check("Root is on an encrypted device", on_crypt,
                   f"root device is {value.strip()!r}")
-            value = run(child, "lsblk -no TYPE 2>/dev/null | grep -c crypt || echo 0")
+            value = run(child, "ls /dev/mapper 2>/dev/null | grep -vc '^control$' "
+                               "|| echo 0")
             ok = value.strip().isdigit() and int(value.strip()) > 0
-            check("  a LUKS mapping exists", ok,
-                  f"{value.strip()} crypt device(s)")
+            check("  a device-mapper node exists", ok,
+                  f"{value.strip()} mapper node(s)")
 
         for entry in recipe.get("files", []) or []:
             value = run(child, f"cat {entry['path']} 2>/dev/null")
