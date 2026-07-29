@@ -246,9 +246,11 @@ def lvm_config(storage: dict, pv_ids: dict[str, str]) -> dict | None:
     # archinstall's LVM path formats the boot partition and nothing else
     # (filesystem.py: perform_filesystem_operations), so any other plain
     # partition is created but never made — swapon then fails on it.
+    in_group = {d for g in (storage.get("lvm", []) or [])
+                for d in g.get("devices", [])}
     for part in storage.get("partitions", []) or []:
         handle = part.get("id")
-        if handle in consumed or part.get("role") in ("esp", "boot"):
+        if handle in in_group or part.get("role") in ("esp", "boot"):
             continue
         if role_fs(part) not in (None, "none"):
             refuse(f"partition '{handle}': archinstall formats only the boot "
