@@ -18,7 +18,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, enrollment_commands, luks_key_path, seed_mount_commands, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, registration_commands, enrollment_commands, luks_key_path, seed_mount_commands, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -399,6 +399,7 @@ def render_kickstart(doc: dict) -> str:
     late += sudoers_commands(doc)
     late += uid_commands(doc)
     late += enrollment_commands(doc)
+    late += registration_commands(doc, "fedora")
     late += system_commands(doc, "fedora")
     late += boot_timeout_commands(doc, "fedora", (doc.get("boot") or {}).get("loader", "grub"))
     for entry in doc.get("files", []) or []:
@@ -442,9 +443,6 @@ def render_kickstart(doc: dict) -> str:
 
     if scripts.get("on_error"):
         refuse("scripts.on_error has no kickstart equivalent")
-    if doc.get("registration"):
-        warn("registration handled by subscription-manager in %post — supply the token "
-             "from the seed, never inline")
     if proxy := (doc.get("proxy", {}) or {}).get("http"):
         lines.insert(1, f"# proxy: {proxy}")
         warn("proxy.http is applied to the installer environment only")

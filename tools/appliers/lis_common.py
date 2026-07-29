@@ -807,6 +807,40 @@ def enrollment_commands(doc: dict) -> list[str]:
     return out
 
 
+# How each distro family attaches a subscription, given a token.
+REGISTRATION = {
+    "fedora": "subscription-manager register --org={org} --activationkey=$TOKEN",
+    "suse": "SUSEConnect -r $TOKEN{email}",
+    "ubuntu": "pro attach $TOKEN",
+}
+
+
+def registration_commands(doc: dict, family: str) -> list[str]:
+    """Shell that attaches the subscription a document declares.
+
+    The token is a secret reference (SPEC §2.4) resolved from the seed at apply
+    time, never inlined. Distros with no subscription concept refuse instead —
+    that is a real absence, not a missing feature.
+    """
+    registration = doc.get("registration") or {}
+    if not registration:
+        return []
+    template = REGISTRATION.get(family)
+    if template is None:
+        refuse("registration has no meaning on this distro — it has no "
+               "subscription service to attach to")
+        return []
+    token_path = secret_ref(registration.get("token"))
+    if not token_path:
+        refuse("registration.token must be a secret reference such as "
+               "{from: 'seed:secrets/token'} (SPEC §2.4 forbids an inline token)")
+        return []
+    cmd = template.format(org=registration.get("server", ""),
+                          email=f" -e {registration['email']}"
+                          if registration.get("email") else "")
+    return [f'TOKEN=$(cat {token_path}); {cmd}']
+
+
 def seed_mount_commands() -> list[str]:
     """Shell that makes the LIS seed readable inside an installer environment."""
     return [f"mkdir -p {SEED_MOUNT}",

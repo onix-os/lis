@@ -20,7 +20,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, enrollment_commands, luks_key_path, seed_mount_commands, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, registration_commands, enrollment_commands, luks_key_path, seed_mount_commands, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -529,6 +529,8 @@ def render_preseed(doc: dict) -> str:
         late.append(f"in-target sh -c {shquote(cmd)}")
     for cmd in enrollment_commands(doc):
         late.append(f"in-target sh -c {shquote(cmd)}")
+    for cmd in registration_commands(doc, "debian"):
+        late.append(f"in-target sh -c {shquote(cmd)}")
     for cmd in system_commands(doc, "debian"):
         late.append(f"in-target sh -c {shquote(cmd)}")
     for cmd in boot_timeout_commands(doc, "debian", (doc.get("boot") or {}).get("loader", "grub")):
@@ -616,8 +618,6 @@ def render_preseed(doc: dict) -> str:
     if desktop.get("display_manager") not in (None, "auto"):
         refuse(f"desktop.display_manager {desktop['display_manager']!r} is not "
                "selectable from a preseed")
-    if doc.get("registration"):
-        refuse("registration does not apply to Debian")
     if country := (doc.get("mirror", {}) or {}).get("country"):
         lines.append(f"d-i mirror/country string {country}")
     if mirror := (doc.get("mirror", {}) or {}).get("url"):

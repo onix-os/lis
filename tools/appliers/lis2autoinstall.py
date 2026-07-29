@@ -23,7 +23,7 @@ import pathlib
 import re
 import sys
 
-from lis_common import (track, check_unread, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, uid_commands, password_field, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, registration_commands, enrollment_commands, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, uid_commands, password_field, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, secret_ref, warn)
@@ -675,6 +675,8 @@ def translate(doc: dict) -> dict:
         late.append(in_target(cmd))
     for cmd in uid_commands(doc):
         late.append(in_target(cmd))
+    for cmd in registration_commands(doc, "ubuntu") + enrollment_commands(doc):
+        late.append(in_target(cmd))
     for cmd in system_commands(doc, "ubuntu"):
         late.append(in_target(cmd))
     for cmd in boot_timeout_commands(doc, "ubuntu", (doc.get("boot") or {}).get("loader", "grub")):
@@ -783,9 +785,6 @@ def translate(doc: dict) -> dict:
     if packages:
         auto["packages"] = packages
 
-    if doc.get("registration"):
-        refuse("registration (Ubuntu Pro attach) is not expressible in autoinstall; "
-               "attach via a firstboot script with a seed: token reference")
 
     return cloud_config
 
