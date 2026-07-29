@@ -200,6 +200,12 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
                            + (" " + "#".join(s for s in spares if s) if spares else ""))
         lines.append("d-i partman-auto-raid/recipe string " + " . ".join(recipes) + " .")
         lines.append("d-i mdadm/boot_degraded boolean true")
+        # d-i stops for confirmation before it writes an array ("Before RAID
+        # can be configured, the changes have to be written to the storage
+        # devices"), which in an unattended install is a hang, not a prompt.
+        lines.append("d-i partman-md/confirm boolean true")
+        lines.append("d-i partman-md/confirm_nochanges boolean true")
+        lines.append("d-i partman-md/device_remove_md boolean true")
     if lvm_groups:
         lines.append("d-i partman-auto-lvm/new_vg_name string " + lvm_groups[0]["name"])
         lines.append("d-i partman-lvm/device_remove_lvm boolean true")

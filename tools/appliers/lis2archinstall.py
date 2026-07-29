@@ -193,7 +193,12 @@ def disk_config(doc: dict) -> dict | None:
 
 
 def lvm_config(storage: dict, pv_ids: dict[str, str]) -> dict | None:
-    """LIS storage.lvm[] → archinstall's manual_lvm volume groups."""
+    """LIS storage.lvm[] → archinstall's LVM volume groups.
+
+    `config_type` is 'default': archinstall's LvmLayoutType enum has only that
+    member — `Manual = 'manual_lvm'` is commented out in its source, and passing
+    it makes archinstall exit with "is not a valid LvmLayoutType".
+    """
     groups = storage.get("lvm", []) or []
     if not groups:
         return None
@@ -233,7 +238,7 @@ def lvm_config(storage: dict, pv_ids: dict[str, str]) -> dict | None:
         vol_groups.append({"name": group["name"], "pvs": pvs, "lvm_volumes": volumes})
     if not vol_groups:
         return None
-    return {"config_type": "manual_lvm", "vol_groups": vol_groups}
+    return {"config_type": "default", "vol_groups": vol_groups}
 
 
 def translate(doc: dict) -> tuple[dict, dict]:
