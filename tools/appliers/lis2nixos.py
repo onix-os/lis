@@ -20,7 +20,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, check_snapshots, match_selectors, consume, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, resolve_disk_paths, check_snapshots, match_selectors, consume, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, check_mirror, check_kernel_variant, check_user_sudo,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, warn)
@@ -917,7 +917,13 @@ def main() -> int:
                     help="partition with disko and run nixos-install on the live system")
     args = ap.parse_args()
 
-    doc = track(load_doc(args.file))
+    raw = load_doc(args.file)
+    if args.apply:
+        # Rules like {type: nvme, smallest: true} can only be evaluated with the
+        # machine in front of us. Resolved before tracking: the tracker hands out
+        # copies, so a mutation through it would never reach the document.
+        resolve_disk_paths(raw)
+    doc = track(raw)
     check_version(doc, args.file)
     check_firmware(doc)
     check_unhandled(doc, ALL_SECTIONS)

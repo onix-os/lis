@@ -20,7 +20,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -106,9 +106,9 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
                "applier — build the array first and adopt it")
     if storage.get("encryption"):
         ids = ", ".join(c["id"] for c in storage["encryption"])
-        refuse(f"storage.encryption ({ids}): partman-crypto needs "
-               "partman-crypto/passphrase in the preseed, which SPEC §2.4 forbids the "
-               "document from carrying")
+        refuse(f"storage.encryption ({ids}): not yet implemented for the preseed — "
+               "partman-crypto must be fed from seed key material at apply time "
+               "(delivery.md §6), or the container prepared in early_command")
 
     disks = {}
     for disk in target.get("disks", []):
@@ -589,7 +589,13 @@ def main() -> int:
                     help="load the answers into a running debian-installer's debconf")
     args = ap.parse_args()
 
-    doc = track(load_doc(args.file))
+    raw = load_doc(args.file)
+    if args.apply:
+        # Rules like {type: nvme, smallest: true} can only be evaluated with the
+        # machine in front of us. Resolved before tracking: the tracker hands out
+        # copies, so a mutation through it would never reach the document.
+        resolve_disk_paths(raw)
+    doc = track(raw)
     check_version(doc, args.file)
     check_firmware(doc)
     check_unhandled(doc, ALL_SECTIONS)

@@ -741,6 +741,90 @@ def shell_packages(doc: dict) -> list[str]:
     return out
 
 
+def resolve_disk_paths(doc: dict) -> None:
+    """Fill in `match.path` for disks selected by rule, using the real machine.
+
+    A document may select a disk declaratively — `{type: nvme, smallest: true}`
+    — which no answer file can express and no translation can evaluate: it is
+    only knowable with the hardware in front of us. Appliers that run on the
+    target resolve it here at apply time, the same way archinstall's `rest`
+    sizes are resolved, instead of refusing a perfectly installable document.
+    """
+    import subprocess
+
+    disks = (doc.get("target", {}) or {}).get("disks", []) or []
+    if not any(not (d.get("match", {}) or {}).get("path") for d in disks):
+        return
+    try:
+        out = subprocess.run(
+            ["lsblk", "-bdno", "NAME,SIZE,TYPE,ROTA,SERIAL,WWN,MODEL"],
+            capture_output=True, text=True, check=True).stdout
+    except Exception as err:  # noqa: BLE001 — no lsblk means no resolution
+        refuse(f"target.disks needs a rule evaluated against the machine, but "
+               f"lsblk is unavailable: {err}")
+        return
+
+    available = []
+    for line in out.splitlines():
+        parts = line.split(None, 6)
+        if len(parts) < 4 or parts[2] != "disk":
+            continue
+        name, size, _, rota = parts[:4]
+        available.append({
+            "path": f"/dev/{name}", "size": int(size),
+            "rotational": rota == "1",
+            "serial": parts[4] if len(parts) > 4 else "",
+            "wwn": parts[5] if len(parts) > 5 else "",
+            "model": parts[6].strip() if len(parts) > 6 else "",
+        })
+
+    taken: set[str] = {(d.get("match", {}) or {}).get("path")
+                       for d in disks if (d.get("match", {}) or {}).get("path")}
+    for disk in disks:
+        match = disk.get("match", {}) or {}
+        if match.get("path"):
+            continue
+        pool = [d for d in available if d["path"] not in taken]
+        if kind := match.get("type"):
+            want_rot = {"hdd": True, "ssd": False, "nvme": False}.get(kind)
+            pool = [d for d in pool
+                    if (kind == "nvme" and "nvme" in d["path"])
+                    or (kind != "nvme" and want_rot is not None
+                        and d["rotational"] == want_rot)]
+        for key in ("serial", "wwn", "model"):
+            if want := match.get(key):
+                pool = [d for d in pool if d[key] == want]
+        if lo := match.get("min_size"):
+            pool = [d for d in pool if d["size"] >= parse_size(lo)]
+        if hi := match.get("max_size"):
+            pool = [d for d in pool if d["size"] <= parse_size(hi)]
+        if match.get("smallest"):
+            pool.sort(key=lambda d: d["size"])
+        elif match.get("largest"):
+            pool.sort(key=lambda d: -d["size"])
+        if not pool:
+            refuse(f"disk '{disk.get('id')}': no device on this machine matches "
+                   f"{ {k: v for k, v in match.items()} }")
+            continue
+        chosen = pool[0]["path"]
+        taken.add(chosen)
+        disk.setdefault("match", {})["path"] = chosen
+        print(f"resolved disk '{disk.get('id')}' to {chosen}")
+
+
+def parse_size(value) -> int:
+    """A LIS size string in bytes; plain numbers are already bytes."""
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    units = {"KiB": 1024, "MiB": 1024**2, "GiB": 1024**3, "TiB": 1024**4,
+             "KB": 1000, "MB": 1000**2, "GB": 1000**3, "TB": 1000**4}
+    for suffix, factor in units.items():
+        if text.endswith(suffix):
+            return int(float(text[: -len(suffix)]) * factor)
+    return int(float(text))
+
+
 def check_arch(doc: dict, supported: set[str] | frozenset) -> None:
     """Refuse a target architecture this applier does not generate for.
 

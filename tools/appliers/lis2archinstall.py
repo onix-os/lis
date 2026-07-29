@@ -22,7 +22,7 @@ import pathlib
 import sys
 import uuid
 
-from lis_common import (track, check_unread, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -88,9 +88,9 @@ def disk_config(doc: dict) -> dict | None:
                "build the array first and adopt it, or use an applier that supports RAID")
     if storage.get("encryption"):
         ids = ", ".join(c["id"] for c in storage["encryption"])
-        refuse(f"storage.encryption ({ids}): archinstall's LUKS support needs the "
-               "passphrase in its credentials file, which SPEC §2.4 forbids the "
-               "document from carrying")
+        refuse(f"storage.encryption ({ids}): not yet implemented for archinstall — the "
+               "credentials file must be filled from seed key material at apply "
+               "time (delivery.md §6), or the container prepared before install")
 
     disks = {}
     for disk in target.get("disks", []):
@@ -510,7 +510,13 @@ def main() -> int:
                     help="run archinstall on the live system with the generated profile")
     args = ap.parse_args()
 
-    doc = track(load_doc(args.file))
+    raw = load_doc(args.file)
+    if args.apply:
+        # Rules like {type: nvme, smallest: true} can only be evaluated with the
+        # machine in front of us. Resolved before tracking: the tracker hands out
+        # copies, so a mutation through it would never reach the document.
+        resolve_disk_paths(raw)
+    doc = track(raw)
     check_version(doc, args.file)
     check_firmware(doc)
     check_unhandled(doc, ALL_SECTIONS)

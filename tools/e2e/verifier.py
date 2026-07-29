@@ -227,9 +227,14 @@ def run_stage4_live_guest_verification(args, target_disk: pathlib.Path,
         if (hwclock := (recipe.get("system") or {}).get("hwclock")):
             # /etc/adjtime's third line is what the system reads at boot.
             value = run(child, "tail -n1 /etc/adjtime 2>/dev/null || echo MISSING")
-            want = "LOCAL" if hwclock == "localtime" else "UTC"
-            check(f"Hardware clock ({hwclock})", value.strip() == want,
-                  f"/etc/adjtime says {value.strip()!r}")
+            found = value.strip()
+            # No /etc/adjtime means UTC: the file only exists to record a
+            # deviation from it, so NixOS writes none for the default.
+            ok = (found == "LOCAL" if hwclock == "localtime"
+                  else found in ("UTC", "MISSING"))
+            check(f"Hardware clock ({hwclock})", ok,
+                  "no /etc/adjtime, which means UTC" if found == "MISSING"
+                  else f"/etc/adjtime says {found!r}")
 
         for key, want in ((recipe.get("system") or {}).get("locale_overrides") or {}).items():
             # Distros keep this in different files; any of them satisfies it.
