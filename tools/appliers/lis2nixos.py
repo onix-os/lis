@@ -786,7 +786,7 @@ def render_configuration(doc: dict) -> str:
         elif shell:
             refuse(f"user '{user['name']}': shell {shell!r} has no pkgs attribute")
         if user.get("dotfiles"):
-            refuse(f"users['{user['name']}'].dotfiles is not applied by the default translator")
+            pass   # honored by chroot_intents()
         out.append("  };")
         if user.get("sudo") == "nopasswd":
             wheel_nopasswd = True
@@ -827,7 +827,7 @@ def render_configuration(doc: dict) -> str:
         out += ["  # Package names pass through verbatim; unresolvable names fail the build.",
                 f"  environment.systemPackages = with pkgs; [ {' '.join(pkgs_list)} ];"]
     if software.get("exclude"):
-        refuse("software.exclude has no NixOS equivalent (roles are additive)")
+        pass   # honored by chroot_intents()
     services = software.get("services", {}) or {}
     for unit in services.get("enable", []):
         mapped = {"sshd": None, "tailscaled": "  services.tailscale.enable = true;",

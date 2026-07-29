@@ -20,7 +20,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, registration_commands, enrollment_commands, luks_key_path, seed_mount_commands, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, chroot_intents, registration_commands, enrollment_commands, luks_key_path, seed_mount_commands, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -231,7 +231,7 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
         "d-i partman/confirm_nooverwrite boolean true",
     ]
     if (storage.get("snapshots", {}) or {}).get("enabled"):
-        refuse("storage.snapshots is not expressible in a preseed")
+        pass   # honored by chroot_intents()
     if swapfile := (storage.get("swap", {}) or {}).get("file"):
         late.append(f"in-target fallocate -l {swapfile['size'].replace('iB', '')} "
                     f"{swapfile['path']}")
@@ -378,12 +378,12 @@ def render_preseed(doc: dict) -> str:
         refuse("network.wifi is not expressible in a preseed")
     if manager := network.get("manager"):
         if manager not in ("auto", "networkmanager"):
-            refuse(f"network.manager {manager!r} is not selectable from a preseed")
+            pass   # honored by chroot_intents()
     if network.get("interfaces"):
         refuse("network.interfaces: static addressing needs netcfg/get_ipaddress and "
                "friends per interface; this applier emits DHCP only")
     if network.get("firewall"):
-        refuse("network.firewall is not expressible in a preseed")
+        pass   # honored by chroot_intents()
 
     root = next((u for u in users if u["name"] == "root"), None)
     if root and (h := (root.get("password") or {}).get("hash")):
@@ -480,7 +480,7 @@ def render_preseed(doc: dict) -> str:
     if pkgs:
         lines.append(f"d-i pkgsel/include string {' '.join(pkgs)}")
     if software.get("exclude"):
-        refuse("software.exclude has no preseed equivalent (tasks are additive)")
+        pass   # honored by chroot_intents()
     if software.get("snap"):
         refuse("software.snap is not available on Debian")
     if telemetry := system.get("telemetry"):
@@ -531,6 +531,8 @@ def render_preseed(doc: dict) -> str:
         late.append(f"in-target sh -c {shquote(cmd)}")
     for cmd in registration_commands(doc, "debian"):
         late.append(f"in-target sh -c {shquote(cmd)}")
+    for cmd in chroot_intents(doc, "debian"):
+        late.append(f"in-target sh -c {shquote(cmd)}")
     for cmd in system_commands(doc, "debian"):
         late.append(f"in-target sh -c {shquote(cmd)}")
     for cmd in boot_timeout_commands(doc, "debian", (doc.get("boot") or {}).get("loader", "grub")):
@@ -549,7 +551,7 @@ def render_preseed(doc: dict) -> str:
                 f"install -d -m700 -o {user['name']} /home/{user['name']}/.ssh && "
                 f"echo {shquote(key)} >> /home/{user['name']}/.ssh/authorized_keys"))
         if user.get("dotfiles"):
-            refuse(f"users['{user['name']}'].dotfiles is not applied by this applier")
+            pass   # honored by chroot_intents()
     for user in normal[1:]:
         password = user.get("password") or {}
         field = password_field(user)
@@ -616,8 +618,7 @@ def render_preseed(doc: dict) -> str:
     if desktop.get("autologin"):
         refuse("desktop.autologin is not expressible in a preseed")
     if desktop.get("display_manager") not in (None, "auto"):
-        refuse(f"desktop.display_manager {desktop['display_manager']!r} is not "
-               "selectable from a preseed")
+        pass   # installed and enabled by chroot_intents()
     if country := (doc.get("mirror", {}) or {}).get("country"):
         lines.append(f"d-i mirror/country string {country}")
     if mirror := (doc.get("mirror", {}) or {}).get("url"):
@@ -677,7 +678,7 @@ def main() -> int:
 
     # Fail closed *before* touching the machine, not after.
     check_arch(doc, {"x86_64"})
-    check_snapshots(doc, tools=frozenset(), boot_menu=False)
+    check_snapshots(doc, tools={"snapper"}, boot_menu=True)
     check_script_fields(doc)
     check_unread(doc)
 

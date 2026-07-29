@@ -20,7 +20,7 @@ import pathlib
 import sys
 import xml.etree.ElementTree as ET
 
-from lis_common import (track, check_unread, registration_commands, enrollment_commands, luks_key_path, seed_mount_commands, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, chroot_intents, registration_commands, enrollment_commands, luks_key_path, seed_mount_commands, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, kernel_params_commands, check_kernel_variant, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -72,17 +72,17 @@ def check_unsupported(doc: dict) -> None:
     if network.get("wifi"):
         refuse("network.wifi is not expressible in a generated openSUSE profile")
     if network.get("firewall"):
-        refuse("network.firewall is not expressible in a generated openSUSE profile")
+        pass   # honored by chroot_intents()
     if software.get("snap"):
         refuse("software.snap is not available on openSUSE")
     if software.get("exclude"):
-        refuse("software.exclude has no openSUSE profile equivalent (patterns are additive)")
+        pass   # honored by chroot_intents()
     for user in doc.get("users", []) or []:
         password = user.get("password") or {}
         if not password.get("hash") and not password.get("locked"):
             refuse(f"user '{user['name']}': no password hash and not marked locked")
         if user.get("dotfiles"):
-            refuse(f"users['{user['name']}'].dotfiles is not applied by this applier")
+            pass   # honored by chroot_intents()
     if (doc.get("scripts", {}) or {}).get("on_error"):
         refuse("scripts.on_error has no openSUSE profile equivalent")
 
@@ -115,6 +115,7 @@ def collect_scripts(doc: dict) -> tuple[list[str], list[str], list[str]]:
     post += uid_commands(doc)
     post += enrollment_commands(doc)
     post += registration_commands(doc, "suse")
+    post += chroot_intents(doc, "suse")
     post += system_commands(doc, "suse")
     post += boot_timeout_commands(doc, "suse", (doc.get("boot") or {}).get("loader", "grub"))
     post += kernel_params_commands(doc, "suse")

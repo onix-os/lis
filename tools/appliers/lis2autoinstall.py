@@ -23,7 +23,7 @@ import pathlib
 import re
 import sys
 
-from lis_common import (track, check_unread, registration_commands, enrollment_commands, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, uid_commands, password_field, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, chroot_intents, registration_commands, enrollment_commands, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, uid_commands, password_field, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, secret_ref, warn)
@@ -506,8 +506,7 @@ def storage_config(doc: dict) -> tuple[list | None, list[str]]:
             f"echo '{swapfile['path']} none swap sw 0 0' >> /etc/fstab"))
         warn("storage.swap.file created by a late-command (curtin has no swapfile action)")
     if (storage.get("snapshots", {}) or {}).get("enabled"):
-        refuse("storage.snapshots is not expressible in autoinstall "
-               "(no snapper/timeshift integration in subiquity)")
+        pass   # honored by chroot_intents()
     return (actions or None), builder.late, builder.late_last
 
 
@@ -610,7 +609,7 @@ def translate(doc: dict) -> dict:
     # Assigned once every contributor below (drivers, desktop) has run: keying
     # off an empty list here would drop everything they add.
     if software.get("exclude"):
-        refuse("software.exclude has no autoinstall equivalent (packages are additive)")
+        pass   # honored by chroot_intents()
     if snaps := software.get("snap"):
         auto["snaps"] = [{"name": s["name"],
                           **({"channel": s["channel"]} if s.get("channel") else {}),
@@ -677,6 +676,8 @@ def translate(doc: dict) -> dict:
         late.append(in_target(cmd))
     for cmd in registration_commands(doc, "ubuntu") + enrollment_commands(doc):
         late.append(in_target(cmd))
+    for cmd in chroot_intents(doc, "ubuntu"):
+        late.append(in_target(cmd))
     for cmd in system_commands(doc, "ubuntu"):
         late.append(in_target(cmd))
     for cmd in boot_timeout_commands(doc, "ubuntu", (doc.get("boot") or {}).get("loader", "grub")):
@@ -725,7 +726,7 @@ def translate(doc: dict) -> dict:
 
     for user in users:
         if user.get("dotfiles"):
-            refuse(f"users['{user['name']}'].dotfiles is not applied by this applier")
+            pass   # honored by chroot_intents()
         if user_scripts := user.get("scripts", {}):
             for s in user_scripts.get("post_install", []):
                 if c := s.get("content"):
@@ -815,8 +816,7 @@ def network_config(network: dict) -> dict | None:
         for entry in network.get("hosts", []) or []:
             warn(f"network.hosts entry {entry.get('ip')} not translated")
         if network.get("firewall"):
-            refuse("network.firewall is not expressible in autoinstall "
-                   "(ufw must be configured in a late-command)")
+            pass   # honored by chroot_intents()
         return None
     ethernets: dict = {}
     for iface in interfaces:
@@ -963,7 +963,7 @@ def main() -> int:
 
     # Fail closed *before* touching the machine, not after.
     check_arch(doc, {"x86_64"})
-    check_snapshots(doc, tools=frozenset(), boot_menu=False)
+    check_snapshots(doc, tools={"snapper"}, boot_menu=True)
     check_script_fields(doc, honors_chroot=True)
     check_unread(doc)
 

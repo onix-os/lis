@@ -18,7 +18,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, registration_commands, enrollment_commands, luks_key_path, seed_mount_commands, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, chroot_intents, registration_commands, enrollment_commands, luks_key_path, seed_mount_commands, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -210,7 +210,7 @@ def render_storage(doc: dict, lines: list[str]) -> None:
     if (storage.get("swap", {}) or {}).get("zram"):
         warn("storage.swap.zram honored by installing zram-generator-defaults")
     if (storage.get("snapshots", {}) or {}).get("enabled"):
-        refuse("storage.snapshots is not expressible in kickstart")
+        pass   # honored by chroot_intents()
 
 
 def render_kickstart(doc: dict) -> str:
@@ -297,7 +297,7 @@ def render_kickstart(doc: dict) -> str:
         for key in user.get("ssh_authorized_keys", []) or []:
             lines.append(f"sshkey --username={user['name']} {json.dumps(key)}")
         if user.get("dotfiles"):
-            refuse(f"users['{user['name']}'].dotfiles is not applied by this applier")
+            pass   # honored by chroot_intents()
 
     render_storage(doc, lines)
 
@@ -400,6 +400,7 @@ def render_kickstart(doc: dict) -> str:
     late += uid_commands(doc)
     late += enrollment_commands(doc)
     late += registration_commands(doc, "fedora")
+    late += chroot_intents(doc, "fedora")
     late += system_commands(doc, "fedora")
     late += boot_timeout_commands(doc, "fedora", (doc.get("boot") or {}).get("loader", "grub"))
     for entry in doc.get("files", []) or []:
@@ -499,7 +500,7 @@ def main() -> int:
 
     # Fail closed *before* touching the machine, not after.
     check_arch(doc, {"x86_64"})
-    check_snapshots(doc, tools=frozenset(), boot_menu=False)
+    check_snapshots(doc, tools={"snapper"}, boot_menu=False)
     check_script_fields(doc)
     check_unread(doc)
 

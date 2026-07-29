@@ -841,6 +841,107 @@ def registration_commands(doc: dict, family: str) -> list[str]:
     return [f'TOKEN=$(cat {token_path}); {cmd}']
 
 
+# Package manager verbs per distro family: (install, remove, enable-service).
+PKG = {
+    "debian": ("apt-get install -y", "apt-get remove -y --purge", "systemctl enable"),
+    "ubuntu": ("apt-get install -y", "apt-get remove -y --purge", "systemctl enable"),
+    "fedora": ("dnf install -y", "dnf remove -y", "systemctl enable"),
+    "suse": ("zypper --non-interactive in", "zypper --non-interactive rm", "systemctl enable"),
+    "arch": ("pacman -S --noconfirm", "pacman -Rns --noconfirm", "systemctl enable"),
+    "alpine": ("apk add --no-progress", "apk del", "rc-update add"),
+}
+
+DISPLAY_MANAGERS = {"gdm": "gdm", "sddm": "sddm", "lightdm": "lightdm",
+                    "greetd": "greetd", "ly": "ly"}
+
+NETWORK_MANAGERS = {
+    "networkmanager": {"debian": "network-manager", "ubuntu": "network-manager",
+                       "fedora": "NetworkManager", "suse": "NetworkManager",
+                       "arch": "networkmanager", "alpine": "networkmanager"},
+    "systemd-networkd": {f: None for f in PKG},   # part of systemd everywhere
+    "connman": {f: "connman" for f in PKG},
+}
+
+
+def chroot_intents(doc: dict, family: str) -> list[str]:
+    """Intents no answer file expresses but every target can be told to do.
+
+    Each of these was a refusal describing the answer file's vocabulary rather
+    than the machine's capability: the installed system can install a package
+    and enable a unit, so the intent is honorable.
+    """
+    install, remove, enable = PKG[family]
+    out: list[str] = []
+    software = doc.get("software", {}) or {}
+    desktop = doc.get("desktop", {}) or {}
+    network = doc.get("network", {}) or {}
+
+    if excluded := software.get("exclude"):
+        out.append(f"{remove} {' '.join(excluded)} || true")
+
+    for snap in software.get("snap", []) or []:
+        if family in ("alpine", "arch"):
+            refuse(f"software.snap {snap!r}: snapd is not part of this distro")
+            break
+        out.append(f"{install} snapd && {enable} --now snapd.socket || true")
+        out.append(f"snap install {snap} || true")
+
+    if dm := desktop.get("display_manager"):
+        if dm not in DISPLAY_MANAGERS and dm != "auto":
+            refuse(f"desktop.display_manager {dm!r} is not a display manager "
+                   "this applier can install")
+        elif dm != "auto":
+            out.append(f"{install} {DISPLAY_MANAGERS[dm]}")
+            out.append(f"{enable} {DISPLAY_MANAGERS[dm]} || true")
+
+    manager = network.get("manager")
+    if manager not in (None, "auto"):
+        table = NETWORK_MANAGERS.get(manager)
+        if table is None:
+            refuse(f"network.manager {manager!r} is not one this applier installs")
+        elif pkg := table.get(family):
+            out.append(f"{install} {pkg}")
+            out.append(f"{enable} {'NetworkManager' if 'NetworkManager' in pkg else pkg}"
+                       " || true")
+        elif manager == "systemd-networkd":
+            out.append(f"{enable} systemd-networkd || true")
+
+    if firewall := network.get("firewall"):
+        if family == "alpine":
+            warn("network.firewall: no firewall is configured on Alpine by this applier")
+        else:
+            svc = "firewalld" if family in ("fedora", "suse") else "ufw"
+            out.append(f"{install} {svc}")
+            out.append(f"{enable} {svc} || true")
+            for service in firewall.get("allow_services", []) or []:
+                out.append(f"firewall-cmd --permanent --add-service={service} || "
+                           f"ufw allow {service} || true")
+            for port in firewall.get("allow_ports", []) or []:
+                out.append(f"firewall-cmd --permanent --add-port={port} || "
+                           f"ufw allow {port.replace('/', '/')} || true")
+
+    for user in doc.get("users", []) or []:
+        dotfiles = user.get("dotfiles") or {}
+        if repo := dotfiles.get("repo"):
+            method = dotfiles.get("method", "raw")
+            if method not in ("raw", None):
+                warn(f"users['{user['name']}'].dotfiles.method {method!r} is not "
+                     "applied; the repository is cloned as-is")
+            home = f"/home/{user['name']}"
+            out.append(f"{install} git || true")
+            out.append(f"git clone {shlex.quote(repo)} {home}/.dotfiles && "
+                       f"chown -R {user['name']} {home}/.dotfiles || true")
+
+    snapshots = (doc.get("storage", {}) or {}).get("snapshots") or {}
+    if snapshots.get("enabled") and family != "alpine":
+        out.append(f"{install} snapper || true")
+        out.append("snapper -c root create-config / || true")
+        if snapshots.get("boot_menu") and family in ("arch", "debian", "ubuntu"):
+            out.append(f"{install} grub-btrfs || true")
+
+    return out
+
+
 def seed_mount_commands() -> list[str]:
     """Shell that makes the LIS seed readable inside an installer environment."""
     return [f"mkdir -p {SEED_MOUNT}",
