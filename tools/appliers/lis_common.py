@@ -643,6 +643,27 @@ def system_commands(doc: dict, family: str) -> list[str]:
     return out
 
 
+def check_raid_consumers(doc: dict) -> None:
+    """Refuse an array nothing consumes.
+
+    `storage.raid[]` is `additionalProperties: false` with no `fs` or
+    `mountpoint`, so an array is only usable when something references its
+    handle — a volume group (`storage.lvm[].devices`) or a LUKS container
+    (`storage.encryption[].over`). Without that an applier has to invent a
+    destination, which is how one of them came to hardcode `/`.
+    """
+    storage = doc.get("storage", {}) or {}
+    consumers = {d for g in (storage.get("lvm", []) or [])
+                 for d in g.get("devices", [])}
+    consumers |= {c.get("over") for c in (storage.get("encryption", []) or [])}
+    for array in storage.get("raid", []) or []:
+        if array["name"] not in consumers:
+            refuse(f"storage.raid ({array['name']}): nothing consumes the array — "
+                   "reference it from storage.lvm[].devices or "
+                   "storage.encryption[].over, since an array carries no "
+                   "filesystem of its own")
+
+
 def check_snapshots(doc: dict, *, tools: set[str] | frozenset = frozenset(),
                     boot_menu: bool = False) -> None:
     """Consult every storage.snapshots field, refusing what is not supported.

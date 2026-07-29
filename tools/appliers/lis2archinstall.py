@@ -22,7 +22,7 @@ import pathlib
 import sys
 import uuid
 
-from lis_common import (track, check_unread, chroot_intents, registration_commands, enrollment_commands, luks_key_path, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, check_raid_consumers, chroot_intents, registration_commands, enrollment_commands, luks_key_path, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -646,6 +646,7 @@ def main() -> int:
 
     # Fail closed *before* touching the machine, not after.
     check_arch(doc, {"x86_64"})
+    check_raid_consumers(doc)
     check_snapshots(doc, tools={"snapper"}, boot_menu=True)
     check_script_fields(doc)
     check_unread(doc)

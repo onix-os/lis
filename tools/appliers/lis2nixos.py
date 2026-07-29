@@ -20,7 +20,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, registration_commands, enrollment_commands, resolve_disk_paths, check_snapshots, match_selectors, consume, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, check_raid_consumers, registration_commands, enrollment_commands, resolve_disk_paths, check_snapshots, match_selectors, consume, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, check_mirror, check_kernel_variant, check_user_sudo,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, warn)
@@ -946,6 +946,7 @@ def main() -> int:
     report(disko_file, hw_file, config_file)
 
     # Fail closed *before* touching the machine, not after.
+    check_raid_consumers(doc)
     check_snapshots(doc, tools={"snapper"}, boot_menu=False)
     check_script_fields(doc)
     check_unread(doc, ignore=APPLY_TIME_PATHS)

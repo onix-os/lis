@@ -23,7 +23,7 @@ import pathlib
 import re
 import sys
 
-from lis_common import (track, check_unread, chroot_intents, registration_commands, enrollment_commands, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, uid_commands, password_field, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, check_raid_consumers, chroot_intents, registration_commands, enrollment_commands, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, uid_commands, password_field, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, secret_ref, warn)
@@ -963,6 +963,7 @@ def main() -> int:
 
     # Fail closed *before* touching the machine, not after.
     check_arch(doc, {"x86_64"})
+    check_raid_consumers(doc)
     check_snapshots(doc, tools={"snapper"}, boot_menu=True)
     check_script_fields(doc, honors_chroot=True)
     check_unread(doc)

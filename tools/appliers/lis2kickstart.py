@@ -18,7 +18,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, chroot_intents, registration_commands, enrollment_commands, luks_key_path, seed_mount_commands, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, check_raid_consumers, chroot_intents, registration_commands, enrollment_commands, luks_key_path, seed_mount_commands, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -183,12 +183,15 @@ def render_storage(doc: dict, lines: list[str]) -> None:
 
     for array in storage.get("raid", []) or []:
         members = " ".join(f"raid.{d}" for d in array.get("devices", []))
-        mountpoint = "/"  # Anaconda needs a target for the array
         spares = f" --spares={len(array['spares'])}" if array.get("spares") else ""
-        lines.append(f"raid {mountpoint} --level=RAID{array['level']} "
+        # check_raid_consumers() has already established that something uses the
+        # array; a volume group makes it a PV, encryption makes it the backing
+        # device. Anaconda spells the PV case `raid pv.<name>`.
+        in_lvm = any(array["name"] in g.get("devices", [])
+                     for g in storage.get("lvm", []) or [])
+        target = f"pv.{array['name']}" if in_lvm else "/"
+        lines.append(f"raid {target} --level=RAID{array['level']} "
                      f"--device={array['name']}{spares} {members}")
-        warn(f"raid '{array['name']}': mounted at / — kickstart's `raid` directive "
-             "always names a mountpoint")
 
     for group in storage.get("lvm", []) or []:
         pvs = " ".join(f"pv.{d}" for d in group.get("devices", []))
@@ -500,6 +503,7 @@ def main() -> int:
 
     # Fail closed *before* touching the machine, not after.
     check_arch(doc, {"x86_64"})
+    check_raid_consumers(doc)
     check_snapshots(doc, tools={"snapper"}, boot_menu=False)
     check_script_fields(doc)
     check_unread(doc)
