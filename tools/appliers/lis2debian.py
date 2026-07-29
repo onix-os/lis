@@ -20,7 +20,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, luks_key_path, seed_mount_commands, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -57,7 +57,8 @@ def size_mb(size: str, what: str) -> int:
 
 
 def recipe_entry(name: str, size: str, fs: str | None, mountpoint: str | None,
-                 what: str, *, bootable=False, lvmok=False, vg=None, lv=None) -> str:
+                 what: str, *, bootable=False, lvmok=False, vg=None, lv=None,
+                 crypto=False) -> str:
     """One `partman-auto/expert_recipe` stanza."""
     mb = size_mb(size, what)
     minimum = 128 if mb < 0 else mb
@@ -65,7 +66,11 @@ def recipe_entry(name: str, size: str, fs: str | None, mountpoint: str | None,
     priority = 1000 if mb < 0 else max(mb, 128)
     parts = [f"{minimum} {priority} {maximum} {FS_MAP.get(fs, fs) or 'ext4'}"]
     if vg:
-        parts.append(f"$defaultignore{{ }} $primary{{ }} method{{ lvm }} vg_name{{ {vg} }}")
+        # A crypto partition is the PV: partman opens it and adds
+        # /dev/mapper/<part>_crypt to the pool itself.
+        method = "crypto" if crypto else "lvm"
+        parts.append(f"$defaultignore{{ }} $primary{{ }} method{{ {method} }} "
+                     f"vg_name{{ {vg} }}")
         return " ".join(parts) + " ."
     if lvmok:
         parts.append("$lvmok{ }")
@@ -87,6 +92,23 @@ def recipe_entry(name: str, size: str, fs: str | None, mountpoint: str | None,
     return " ".join(parts) + " ."
 
 
+def consumed_by(handle, lvm_groups, crypt_over):
+    """The LVM group this partition feeds, and whether through a LUKS container.
+
+    A document may put the partition into the pool directly, or wrap it in an
+    encryption container that the pool then consumes; partman expresses both as
+    one recipe entry, differing only in `method{ lvm }` vs `method{ crypto }`.
+    """
+    for group in lvm_groups:
+        devices = group.get("devices", [])
+        if handle in devices:
+            return group, False
+        container = crypt_over.get(handle)
+        if container and container["id"] in devices:
+            return group, True
+    return None
+
+
 def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
     """LIS storage → partman-auto directives.
 
@@ -106,9 +128,27 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
                "applier — build the array first and adopt it")
     if storage.get("encryption"):
         ids = ", ".join(c["id"] for c in storage["encryption"])
-        refuse(f"storage.encryption ({ids}): not yet implemented for the preseed — "
-               "partman-crypto must be fed from seed key material at apply time "
-               "(delivery.md §6), or the container prepared in early_command")
+        # partman-auto's own recipe parser (lib/partman/lib/auto-shared.sh):
+        #     elif echo "$*" | grep -q "method{ crypto }"; then
+        #         pv_devices="$pv_devices /dev/mapper/${path##*/}_crypt"
+        # so a crypto partition becomes an LVM physical volume — Debian's
+        # supported shape is LUKS with LVM on top, not a bare filesystem.
+        lvm_devices = {d for g in (storage.get("lvm", []) or [])
+                       for d in g.get("devices", [])}
+        for container in storage.get("encryption", []) or []:
+            if not luks_key_path(doc, container["id"]):
+                refuse(f"storage.encryption ({container['id']}): no key material — "
+                       "declare a keys[] entry with a seed: source, or place the "
+                       f"passphrase at {SEED_MOUNT}/secrets/luks-{container['id']}.key")
+            elif container["id"] not in lvm_devices:
+                refuse(f"storage.encryption ({container['id']}): partman puts a "
+                       "crypto partition into the LVM pool, so the container must "
+                       "be consumed by a storage.lvm group — a filesystem directly "
+                       "on LUKS is not expressible in an expert recipe")
+            for method in container.get("unlock", []) or []:
+                if method not in ("passphrase", "keyfile"):
+                    warn(f"storage.encryption ({container['id']}): unlock method "
+                         f"{method!r} must be enrolled after installation")
 
     disks = {}
     for disk in target.get("disks", []):
@@ -126,6 +166,7 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
         return late, late_last
 
     lvm_groups = storage.get("lvm", []) or []
+    crypt_over = {c["over"]: c for c in (storage.get("encryption", []) or [])}
     consumed = {d for g in lvm_groups for d in g.get("devices", [])}
     lines.append(f"d-i partman-auto/disk string {next(iter(disks.values()))}")
     lines.append("d-i partman-auto/method string " + ("lvm" if lvm_groups else "regular"))
@@ -150,10 +191,12 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
         role = part.get("role")
         fs = role_fs(part)
         mountpoint = role_mountpoint(part)
-        if handle in consumed:
-            group = next(g for g in lvm_groups if handle in g.get("devices", []))
+        owner = consumed_by(handle, lvm_groups, crypt_over)
+        if owner:
+            group, is_crypto = owner
             entries.append(recipe_entry(handle, part.get("size", "rest"), None, None,
-                                        f"partition '{handle}'", vg=group["name"]))
+                                        f"partition '{handle}'", vg=group["name"],
+                                        crypto=is_crypto))
             continue
         entries.append(recipe_entry(handle, part.get("size", "rest"), fs, mountpoint,
                                     f"partition '{handle}'",
@@ -462,6 +505,21 @@ def render_preseed(doc: dict) -> str:
 
     early = [s["content"] for stage in ("pre_install", "pre")
              for s in scripts.get(stage, []) if s.get("content")]
+    # partman-crypto asks for the passphrase interactively; early_command runs
+    # before partitioning, so the answer is pre-seeded into debconf from the
+    # seed volume and never appears in this file (delivery.md §6).
+    crypt_keys = [luks_key_path(doc, c["id"])
+                  for c in (storage.get("encryption", []) or [])]
+    crypt_keys = [k for k in crypt_keys if k]
+    if crypt_keys:
+        inject = seed_mount_commands() + [
+            f'pass=$(cat {crypt_keys[0]})',
+            'echo "partman-crypto partman-crypto/passphrase password $pass" '
+            '| debconf-set-selections',
+            'echo "partman-crypto partman-crypto/passphrase-again password $pass" '
+            '| debconf-set-selections',
+        ]
+        early.insert(0, "; ".join(inject))
     if early:
         lines.append(f"d-i preseed/early_command string {'; '.join(early)}")
 
