@@ -701,7 +701,7 @@ def security_packages(doc: dict, family: str) -> list[str]:
     return [pkg]
 
 
-def uid_commands(doc: dict) -> list[str]:
+def uid_commands(doc: dict, *, busybox: bool = False) -> list[str]:
     """Shell that gives each account the uid the document declares.
 
     The primary account is created by the installer's own machinery — d-i's
@@ -715,7 +715,12 @@ def uid_commands(doc: dict) -> list[str]:
         if uid is None:
             continue
         name = user["name"]
-        out.append(f"usermod -u {uid} {name} 2>/dev/null || true")
+        if busybox:
+            # Alpine's install repo has no shadow package, so there is no
+            # usermod applet; the third passwd field is the uid.
+            out.append("sed -i 's|^\\(" + name + ":[^:]*:\\)[0-9]*:|\\1" + str(uid) + ":|' /etc/passwd")
+        else:
+            out.append(f"usermod -u {uid} {name} 2>/dev/null || true")
         out.append(f"chown -R {uid} /home/{name} 2>/dev/null || true")
     return out
 
