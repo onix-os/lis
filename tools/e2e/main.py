@@ -57,6 +57,20 @@ def print_intent(recipe: dict) -> None:
     print(f"  {BOLD}• Script hooks{RESET}: {summary or '-'}")
 
 
+# Plaintext behind the LUKS containers in the bundled encrypted recipe. The
+# document carries only `passphrase: true`; the secret lives on the seed.
+LUKS_PASSPHRASE = "lis-e2e-luks"
+
+
+def luks_secrets(recipe: dict) -> dict[str, str]:
+    """Key files the seed must carry for the containers this document declares."""
+    out = {}
+    for container in (recipe.get("storage", {}) or {}).get("encryption", []) or []:
+        if (container.get("key") or {}).get("passphrase"):
+            out[f"luks-{container['id']}.key"] = LUKS_PASSPHRASE
+    return out
+
+
 def run_single_distro_test(args) -> int:
     recipe_path = args.recipe.resolve()
     if not recipe_path.exists():
@@ -90,8 +104,20 @@ def run_single_distro_test(args) -> int:
               f"{BOLD}{target_disk}{RESET}")
 
         make_seed = pathlib.Path(__file__).resolve().parent.parent / "lis-make-seed"
-        subprocess.run([sys.executable, str(make_seed), str(recipe_path),
-                        "--out", str(seed_disk)], check=True)
+        seed_cmd = [sys.executable, str(make_seed), str(recipe_path),
+                    "--out", str(seed_disk)]
+        # A document declaring `key: {passphrase: true}` names no secret — it
+        # says one is expected on the seed. Put it there, exactly as an operator
+        # would, so the applier has something to resolve (delivery.md §6).
+        if secrets := luks_secrets(recipe):
+            secrets_dir = BUILD_DIR / f"secrets-{args.distro}"
+            secrets_dir.mkdir(parents=True, exist_ok=True)
+            for name, value in secrets.items():
+                (secrets_dir / name).write_text(value)
+            seed_cmd += ["--secrets", str(secrets_dir)]
+            print(f"  [{TICK}] Seed carries key material: "
+                  f"{BOLD}{', '.join(sorted(secrets))}{RESET}")
+        subprocess.run(seed_cmd, check=True)
 
         try:
             run_stage2_qemu_installer(args.distro, target_disk, seed_disk, iso_path,

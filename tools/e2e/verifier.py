@@ -336,6 +336,7 @@ def reach_shell(child: pexpect.spawn, recipe: dict, attempts: int = 4) -> bool:
     """
     for attempt in range(attempts):
         try:
+            unlock_if_asked(child, recipe)
             if login(child, recipe) and run(child, "echo LIS_SHELL_OK") == "LIS_SHELL_OK":
                 return True
         except (pexpect.TIMEOUT, pexpect.EOF):
@@ -365,6 +366,26 @@ def packages_of(recipe: dict) -> list[str]:
             names.append(name)
     # Only check names that are also the command they install.
     return [n for n in names if n in {"git", "curl", "htop", "neovim", "firefox", "vim"}]
+
+
+LUKS_PASSPHRASE = "lis-e2e-luks"
+
+
+def unlock_if_asked(child: pexpect.spawn, recipe: dict) -> None:
+    """Answer the LUKS prompt an encrypted root shows before it can boot.
+
+    The passphrase is operator knowledge held on the seed, not in the document
+    — the same split as the account password.
+    """
+    if not (recipe.get("storage", {}) or {}).get("encryption"):
+        return
+    patterns = [r"[Ee]nter passphrase", r"[Pp]assphrase for", r"Please enter passphrase"]
+    for _ in range(3):     # initrd may ask again per container, or after a typo
+        try:
+            child.expect(patterns, timeout=180)
+        except (pexpect.TIMEOUT, pexpect.EOF):
+            return
+        child.sendline(LUKS_PASSPHRASE)
 
 
 def login(child: pexpect.spawn, recipe: dict, password: str = OPERATOR_PASSWORD) -> bool:
