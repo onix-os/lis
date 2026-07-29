@@ -581,15 +581,36 @@ def resolve_rest_sizes(config: dict) -> None:
                 sys.exit(f"error: no space left on {device} for the 'rest' partition")
             part["size"] = {"unit": "B", "value": length, "sector_size": SECTOR}
 
+    # A 'rest' volume needs a real byte count: archinstall runs `lvcreate -L`
+    # with whatever length it is given, and a zero length creates nothing — it
+    # then polls for the missing volume ("LVM info query failed") until it gives
+    # up. The group's capacity is the sum of its physical volumes.
+    sizes = {}
+    for mod in disk_config.get("device_modifications", []):
+        for part in mod.get("partitions", []):
+            size = part.get("size", {})
+            sizes[part.get("obj_id")] = (size.get("value", 0)
+                                         * UNIT_BYTES.get(size.get("unit"), 1))
     lvm = disk_config.get("lvm_config") or {}
     for group in lvm.get("vol_groups", []):
+        capacity = sum(sizes.get(pv, 0) for pv in group.get("lvm_pvs", []))
+        fixed = 0
+        rest = []
         for vol in group.get("volumes", []):
+            length = vol.get("length", {})
             if vol.get("obj_id") in REST_SIZED:
-                # The volume group's free extents are not visible until the PVs
-                # exist, so archinstall is asked for a whole-VG volume instead.
-                vol["length"] = {"unit": "B", "value": 0, "sector_size": SECTOR}
-                warn(f"lvm volume '{vol['name']}': 'rest' is applied as the "
-                     "remaining volume group space")
+                rest.append(vol)
+            else:
+                fixed += length.get("value", 0) * UNIT_BYTES.get(length.get("unit"), 1)
+        # LVM metadata and physical-extent rounding: leave a margin so lvcreate
+        # cannot fail for being a few extents short.
+        remainder = capacity - fixed - (16 << 20)
+        for vol in rest:
+            if remainder <= 0:
+                sys.exit(f"error: no space left in volume group '{group['name']}' "
+                         f"for '{vol['name']}'")
+            vol["length"] = {"unit": "B", "value": remainder // len(rest),
+                             "sector_size": SECTOR}
 
 def gfx_driver(doc: dict) -> str | None:
     gpu = (doc.get("drivers", {}) or {}).get("gpu")
