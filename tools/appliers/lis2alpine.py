@@ -450,7 +450,10 @@ def prepare_script(disk, partitions, root, boot_part, env, timeout=None,
             steps += [f'cryptsetup luksFormat --batch-mode --type luks2 '
                       f'--key-file {key} {dev}',
                       f'cryptsetup open --key-file {key} {dev} {name}',
-                      f'cryptuuid=$(blkid -s UUID -o value {dev})']
+                      # busybox blkid ignores -s/-o and prints the whole line,
+                      # so the UUID is pulled out of the output instead.
+                      f'cryptuuid=$(blkid {dev} | sed -n '
+                      f"'s/.*[^_]UUID=\"\\([^\"]*\\)\".*/\\1/p')"]
             dev = f'"/dev/mapper/{name}"'
             steps.append(f'cryptdm={name}')
         fs = role_fs(part)
