@@ -243,6 +243,17 @@ def lvm_config(storage: dict, pv_ids: dict[str, str]) -> dict | None:
         # LvmVolumeGroup.json() names these 'lvm_pvs' and 'volumes';
         # anything else raises KeyError deep inside archinstall's parser.
         vol_groups.append({"name": group["name"], "lvm_pvs": pvs, "volumes": volumes})
+    # archinstall's LVM path formats the boot partition and nothing else
+    # (filesystem.py: perform_filesystem_operations), so any other plain
+    # partition is created but never made — swapon then fails on it.
+    for part in storage.get("partitions", []) or []:
+        handle = part.get("id")
+        if handle in consumed or part.get("role") in ("esp", "boot"):
+            continue
+        if role_fs(part) not in (None, "none"):
+            refuse(f"partition '{handle}': archinstall formats only the boot "
+                   "partition when a volume group is present — put it in the "
+                   "group as a volume, or drop storage.lvm")
     if not vol_groups:
         return None
     return {"config_type": "default", "vol_groups": vol_groups}

@@ -1,1 +1,149 @@
-{"lis": "0.1.0", "meta": {"name": "full-test-system", "description": "End-to-end test recipe: every fact it declares is checked in the installed system by tools/e2e.", "generator": "lis-test-suite 0.1.0"}, "target": {"arch": "x86_64", "firmware": "bios", "disks": [{"id": "main", "match": {"path": "/dev/vda"}}]}, "storage": {"wipe": true, "partitions": [{"disk": "main", "id": "boot", "role": "boot", "size": "1GiB", "fs": "ext4", "mountpoint": "/boot"}, {"disk": "main", "id": "swap", "role": "swap", "size": "2GiB", "fs": "swap"}, {"disk": "main", "id": "pv0", "size": "rest"}], "lvm": [{"name": "vg0", "devices": ["pv0"], "volumes": [{"name": "root", "size": "rest", "fs": "btrfs", "mountpoint": "/"}]}]}, "boot": {"loader": "grub", "timeout": 5, "kernel": {"params": ["console=tty0", "console=ttyS0,115200n8"]}}, "system": {"hostname": "lis-test-host", "timezone": "UTC", "locale": "en_US.UTF-8", "keymap": {"console": "us", "layout": "us"}, "hwclock": "utc", "locale_overrides": {"LC_TIME": "en_US.UTF-8"}}, "users": [{"name": "fakeuser", "comment": "Test Fake User", "admin": true, "shell": "/bin/bash", "groups": ["video"], "password": {"hash": "$6$lise2esalt$FZ.sWLZOpKWcO0Ov5XiGDzqVm0dxHB3.H1mFLg.aoFV/ZgVrxSq/bc1xkKj4PiTHxfgi9MxhH/kL.32Lu94CT1"}, "scripts": {"post_install": [{"content": "echo USER_POST_INSTALL_HOOK_PASSED > /home/fakeuser/user_hook.txt", "chroot": true}], "firstboot": [{"content": "echo USER_FIRSTBOOT_HOOK_PASSED > /home/fakeuser/user_firstboot.txt"}]}, "sudo": "nopasswd", "uid": 1234}], "software": {"role": "minimal", "packages": ["curl", "git"]}, "scripts": {"pre_install": [{"content": "echo PRE_INSTALL_HOOK_PASSED > /tmp/lis-pre-install.marker"}], "post_install": [{"content": "install -d -m755 /var/lib/lis && echo POST_INSTALL_HOOK_PASSED > /var/lib/lis/post_install.txt", "chroot": true}, {"content": "if [ -e /etc/NIXOS ]; then :; elif command -v systemctl >/dev/null 2>&1; then install -d /etc/systemd/system/serial-getty@ttyS0.service.d; printf '[Service]\\nExecStart=\\nExecStart=-/sbin/agetty --autologin root --noclear %%I 115200 linux\\n' > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf; systemctl enable serial-getty@ttyS0.service; elif [ -f /etc/inittab ]; then sed -i '/ttyS0/d' /etc/inittab; echo 'ttyS0::respawn:/sbin/getty -n -l /bin/ash -L ttyS0 115200 vt100' >> /etc/inittab; fi", "chroot": true}], "firstboot": [{"content": "install -d -m755 /var/lib/lis && echo FIRSTBOOT_HOOK_PASSED > /var/lib/lis/firstboot.txt"}]}, "files": [{"path": "/etc/lis-test-file", "content": "RklMRVNfU0VDVElPTl9QQVNTRUQK", "encoding": "base64", "mode": "0644", "owner": "root:root"}]}
+{
+  "lis": "0.1.0",
+  "meta": {
+    "name": "full-test-system",
+    "description": "End-to-end test recipe: every fact it declares is checked in the installed system by tools/e2e.",
+    "generator": "lis-test-suite 0.1.0"
+  },
+  "target": {
+    "arch": "x86_64",
+    "firmware": "bios",
+    "disks": [
+      {
+        "id": "main",
+        "match": {
+          "path": "/dev/vda"
+        }
+      }
+    ]
+  },
+  "storage": {
+    "wipe": true,
+    "partitions": [
+      {
+        "disk": "main",
+        "id": "boot",
+        "role": "boot",
+        "size": "1GiB",
+        "fs": "ext4",
+        "mountpoint": "/boot"
+      },
+      {
+        "disk": "main",
+        "id": "pv0",
+        "size": "rest"
+      }
+    ],
+    "lvm": [
+      {
+        "name": "vg0",
+        "devices": [
+          "pv0"
+        ],
+        "volumes": [
+          {
+            "name": "swap",
+            "size": "2GiB",
+            "fs": "swap"
+          },
+          {
+            "name": "root",
+            "size": "rest",
+            "fs": "btrfs",
+            "mountpoint": "/"
+          }
+        ]
+      }
+    ]
+  },
+  "boot": {
+    "loader": "grub",
+    "timeout": 5,
+    "kernel": {
+      "params": [
+        "console=tty0",
+        "console=ttyS0,115200n8"
+      ]
+    }
+  },
+  "system": {
+    "hostname": "lis-test-host",
+    "timezone": "UTC",
+    "locale": "en_US.UTF-8",
+    "keymap": {
+      "console": "us",
+      "layout": "us"
+    },
+    "hwclock": "utc",
+    "locale_overrides": {
+      "LC_TIME": "en_US.UTF-8"
+    }
+  },
+  "users": [
+    {
+      "name": "fakeuser",
+      "comment": "Test Fake User",
+      "admin": true,
+      "shell": "/bin/bash",
+      "groups": [
+        "video"
+      ],
+      "password": {
+        "hash": "$6$lise2esalt$FZ.sWLZOpKWcO0Ov5XiGDzqVm0dxHB3.H1mFLg.aoFV/ZgVrxSq/bc1xkKj4PiTHxfgi9MxhH/kL.32Lu94CT1"
+      },
+      "scripts": {
+        "post_install": [
+          {
+            "content": "echo USER_POST_INSTALL_HOOK_PASSED > /home/fakeuser/user_hook.txt",
+            "chroot": true
+          }
+        ],
+        "firstboot": [
+          {
+            "content": "echo USER_FIRSTBOOT_HOOK_PASSED > /home/fakeuser/user_firstboot.txt"
+          }
+        ]
+      },
+      "sudo": "nopasswd",
+      "uid": 1234
+    }
+  ],
+  "software": {
+    "role": "minimal",
+    "packages": [
+      "curl",
+      "git"
+    ]
+  },
+  "scripts": {
+    "pre_install": [
+      {
+        "content": "echo PRE_INSTALL_HOOK_PASSED > /tmp/lis-pre-install.marker"
+      }
+    ],
+    "post_install": [
+      {
+        "content": "install -d -m755 /var/lib/lis && echo POST_INSTALL_HOOK_PASSED > /var/lib/lis/post_install.txt",
+        "chroot": true
+      },
+      {
+        "content": "if [ -e /etc/NIXOS ]; then :; elif command -v systemctl >/dev/null 2>&1; then install -d /etc/systemd/system/serial-getty@ttyS0.service.d; printf '[Service]\\nExecStart=\\nExecStart=-/sbin/agetty --autologin root --noclear %%I 115200 linux\\n' > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf; systemctl enable serial-getty@ttyS0.service; elif [ -f /etc/inittab ]; then sed -i '/ttyS0/d' /etc/inittab; echo 'ttyS0::respawn:/sbin/getty -n -l /bin/ash -L ttyS0 115200 vt100' >> /etc/inittab; fi",
+        "chroot": true
+      }
+    ],
+    "firstboot": [
+      {
+        "content": "install -d -m755 /var/lib/lis && echo FIRSTBOOT_HOOK_PASSED > /var/lib/lis/firstboot.txt"
+      }
+    ]
+  },
+  "files": [
+    {
+      "path": "/etc/lis-test-file",
+      "content": "RklMRVNfU0VDVElPTl9QQVNTRUQK",
+      "encoding": "base64",
+      "mode": "0644",
+      "owner": "root:root"
+    }
+  ]
+}
