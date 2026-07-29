@@ -235,7 +235,9 @@ def lvm_config(storage: dict, pv_ids: dict[str, str]) -> dict | None:
                 entry["btrfs"] = [{"name": s["name"], "mountpoint": s["mountpoint"]}
                                   for s in subs]
             volumes.append(entry)
-        vol_groups.append({"name": group["name"], "pvs": pvs, "lvm_volumes": volumes})
+        # LvmVolumeGroup.json() names these 'lvm_pvs' and 'volumes';
+        # anything else raises KeyError deep inside archinstall's parser.
+        vol_groups.append({"name": group["name"], "lvm_pvs": pvs, "volumes": volumes})
     if not vol_groups:
         return None
     return {"config_type": "default", "vol_groups": vol_groups}
@@ -563,7 +565,7 @@ def resolve_rest_sizes(config: dict) -> None:
 
     lvm = disk_config.get("lvm_config") or {}
     for group in lvm.get("vol_groups", []):
-        for vol in group.get("lvm_volumes", []):
+        for vol in group.get("volumes", []):
             if vol.get("obj_id") in REST_SIZED:
                 # The volume group's free extents are not visible until the PVs
                 # exist, so archinstall is asked for a whole-VG volume instead.
