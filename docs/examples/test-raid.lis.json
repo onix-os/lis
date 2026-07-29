@@ -70,7 +70,7 @@
           {
             "name": "root",
             "size": "rest",
-            "fs": "btrfs",
+            "fs": "ext4",
             "mountpoint": "/"
           }
         ]

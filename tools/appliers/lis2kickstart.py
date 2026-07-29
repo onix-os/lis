@@ -209,6 +209,13 @@ def render_storage(doc: dict, lines: list[str]) -> None:
             if not mountpoint:
                 refuse(f"lvm volume '{vol['name']}': no mountpoint")
                 continue
+            if fs == "btrfs":
+                # Anaconda creates the filesystem and then fails to mount it:
+                # "bad superblock on /dev/mapper/<vg>-<lv>". Creation succeeding
+                # makes this easy to mistake for a working layout.
+                refuse(f"lvm volume '{vol['name']}': Anaconda cannot mount btrfs "
+                       "on a logical volume — use ext4/xfs there, or put btrfs on "
+                       "a plain partition")
             lines.append(f"logvol {mountpoint} --vgname={group['name']} "
                          f"--name={vol['name']} --fstype={FS_MAP.get(fs, fs)} {size}")
             if vol.get("subvolumes"):
