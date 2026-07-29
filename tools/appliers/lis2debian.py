@@ -606,6 +606,13 @@ def main() -> int:
     check_keymap(doc, {"console", "layout", "variant"})
 
     cfg = render_preseed(doc)
+    # d-i rejects the whole file if any value spans a line ("failed to process
+    # the preconfiguration file"), which costs a 40-minute install to discover.
+    for number, line in enumerate(cfg.splitlines(), 1):
+        if line and not line.startswith(("d-i ", "#", "popularity-contest", "tasksel")):
+            refuse(f"generated preseed line {number} is not a preseed directive — "
+                   "a value with an embedded newline would be rejected by d-i: "
+                   f"{line[:60]!r}")
     args.out.mkdir(parents=True, exist_ok=True)
     cfg_file = args.out / "preseed.cfg"
     cfg_file.write_text(cfg)

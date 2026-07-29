@@ -620,8 +620,6 @@ def system_commands(doc: dict, family: str) -> list[str]:
         # command, and a preseed value cannot span lines.
         mode = "LOCAL" if hwclock == "localtime" else "UTC"
         out.append("{ echo '0.0 0 0.0'; echo 0; echo " + mode + "; } > /etc/adjtime")
-        mode = "LOCAL" if hwclock == "localtime" else "UTC"
-        out.append(f"printf '0.0 0 0.0\n0\n{mode}\n' > /etc/adjtime")
 
     if extra := system.get("extra_locales"):
         gen = LOCALE_GEN.get(family)
