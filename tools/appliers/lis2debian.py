@@ -203,7 +203,12 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
         # d-i stops for confirmation before it writes an array ("Before RAID
         # can be configured, the changes have to be written to the storage
         # devices"), which in an unattended install is a hang, not a prompt.
+        # partman-md/init.d/25md-devices does:
+        #     db_register partman-md/confirm partman-md/confirm_nooverwrite
+        # so the question actually asked is the registered copy; preseeding
+        # only partman-md/confirm leaves the install waiting at the dialog.
         lines.append("d-i partman-md/confirm boolean true")
+        lines.append("d-i partman-md/confirm_nooverwrite boolean true")
         lines.append("d-i partman-md/confirm_nochanges boolean true")
         lines.append("d-i partman-md/device_remove_md boolean true")
     if lvm_groups:
