@@ -23,6 +23,9 @@ APPLIERS = pathlib.Path(__file__).resolve().parent.parent / "appliers"
 # server on its own port, so a single shared port would make two concurrent
 # runs silently steal each other's server (the second never binds, and the
 # guest then reports "Failed to download" as if the network were broken).
+# Extra target images for documents that declare more than one disk.
+EXTRA_TARGETS: list = []
+
 HTTP_PORT_BASE = 8088
 HTTP_PORT = HTTP_PORT_BASE
 
@@ -117,6 +120,9 @@ def qemu(target_disk, ram, *, iso=None, extra_drives=(), kernel=None, initrd=Non
     cmd = ["qemu-system-x86_64", "-enable-kvm", "-m", ram, "-smp", "4", "-cpu", "host",
            "-net", "nic", "-net", "user",
            "-drive", f"file={target_disk},if=virtio,format=qcow2"]
+    # Disks the document declares beyond the first, so an array has members.
+    for disk in EXTRA_TARGETS:
+        cmd += ["-drive", f"file={disk},if=virtio,format=qcow2"]
     for drive in extra_drives:
         cmd += ["-drive", f"file={drive},if=virtio,format=raw"]
     if iso:

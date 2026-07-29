@@ -13,6 +13,7 @@ from tools.e2e.colors import (
     print_stage_header, TICK, CROSS, WARN_ICON, RESET
 )
 from tools.e2e.iso import download_iso_if_missing
+from tools.e2e import installer as installer_module
 from tools.e2e.installer import (DocumentRefused, InstallFailed,
                                  run_stage2_qemu_installer, set_http_port)
 from tools.e2e.verifier import verify_installed_disk, run_stage4_live_guest_verification
@@ -71,6 +72,13 @@ def luks_secrets(recipe: dict) -> dict[str, str]:
     return out
 
 
+def extra_target_disks(recipe: dict, distro: str) -> list[pathlib.Path]:
+    """One image per declared disk beyond the first."""
+    declared = (recipe.get("target", {}) or {}).get("disks", []) or []
+    return [BUILD_DIR / f"e2e-{distro}-target{i}.qcow2"
+            for i in range(2, len(declared) + 1)]
+
+
 def run_single_distro_test(args) -> int:
     recipe_path = args.recipe.resolve()
     if not recipe_path.exists():
@@ -100,6 +108,16 @@ def run_single_distro_test(args) -> int:
             target_disk.unlink()
         subprocess.run(["qemu-img", "create", "-f", "qcow2", str(target_disk),
                         args.disk_size], check=True, capture_output=True)
+        # A document may declare several disks (an array spans them); give the
+        # guest one qcow2 per declared disk, or the recipe cannot be honored.
+        installer_module.EXTRA_TARGETS = extra_target_disks(recipe, args.distro)
+        for extra in extra_target_disks(recipe, args.distro):
+            if extra.exists():
+                extra.unlink()
+            subprocess.run(["qemu-img", "create", "-f", "qcow2", str(extra),
+                            args.disk_size], check=True, capture_output=True)
+            print(f"  [{TICK}] Extra target disk for the declared layout: "
+                  f"{BOLD}{extra}{RESET}")
         print(f"  [{TICK}] Created {args.disk_size} blank target disk: "
               f"{BOLD}{target_disk}{RESET}")
 

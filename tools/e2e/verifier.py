@@ -141,8 +141,14 @@ def run_stage4_live_guest_verification(args, target_disk: pathlib.Path,
     print_stage_header(4, "Reboot test — booting the installed OS and verifying live")
     expected = Expectations(recipe)
 
+    # The reboot test must present the same disks the installer saw, or an
+    # array comes up degraded and the root is not found.
+    extra = "".join(f" -drive file={d},if=virtio,format=qcow2"
+                    for d in sorted(target_disk.parent.glob(
+                        target_disk.stem + "[0-9].qcow2")))
     cmd = (f"qemu-system-x86_64 -enable-kvm -m {args.ram} -smp 4 -cpu host "
-           f"-drive file={target_disk},if=virtio,format=qcow2 -boot order=c -nographic")
+           f"-drive file={target_disk},if=virtio,format=qcow2{extra}"
+           " -boot order=c -nographic")
     print(f"  [{TICK}] Booting from {target_disk} with no install media attached...")
 
     # The install stage keeps a serial log; without the same for the reboot
