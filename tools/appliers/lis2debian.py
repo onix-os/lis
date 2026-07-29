@@ -73,6 +73,9 @@ def recipe_entry(name: str, size: str, fs: str | None, mountpoint: str | None,
                      f"vg_name{{ {vg} }}")
         return " ".join(parts) + " ."
     if raid:
+        # The documented RAID recipe names `raid` as the filesystem field:
+        #   1000 5000 4000 raid $primary{ } method{ raid } .
+        parts[0] = f"{minimum} {priority} {maximum} raid"
         parts.append("$primary{ } method{ raid }")
         return " ".join(parts) + " ."
     if lvmok:
@@ -189,6 +192,19 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
     method = "raid" if raid_arrays else ("lvm" if lvm_groups else "regular")
     lines.append(f"d-i partman-auto/method string {method}")
     if raid_arrays:
+        # partman-auto applies a single expert_recipe to every disk in
+        # partman-auto/disk, so a layout that differs per disk cannot be
+        # expressed — it tries to create every partition on each disk and stops
+        # with "Failed to partition the selected disk".
+        per_disk = {}
+        for part in storage.get("partitions", []) or []:
+            per_disk.setdefault(part.get("disk"), []).append(
+                (part.get("size"), part.get("id") in raid_members))
+        shapes = {tuple(v) for v in per_disk.values()}
+        if len(shapes) > 1:
+            refuse("storage.raid: partman applies one recipe to every disk, so "
+                   "each disk must declare the same partitions — put /boot on a "
+                   "mirror too, or install without RAID")
         # Format read from partman-auto-raid's own bin/auto-raidcfg:
         #   read raidtype devcount sparecount fstype mountpoint devs sparedevs args
         # recipes separated by '.', device lists by '#'.
