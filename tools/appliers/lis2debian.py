@@ -58,7 +58,7 @@ def size_mb(size: str, what: str) -> int:
 
 def recipe_entry(name: str, size: str, fs: str | None, mountpoint: str | None,
                  what: str, *, bootable=False, lvmok=False, vg=None, lv=None,
-                 crypto=False) -> str:
+                 crypto=False, raid=False) -> str:
     """One `partman-auto/expert_recipe` stanza."""
     mb = size_mb(size, what)
     minimum = 128 if mb < 0 else mb
@@ -71,6 +71,9 @@ def recipe_entry(name: str, size: str, fs: str | None, mountpoint: str | None,
         method = "crypto" if crypto else "lvm"
         parts.append(f"$defaultignore{{ }} $primary{{ }} method{{ {method} }} "
                      f"vg_name{{ {vg} }}")
+        return " ".join(parts) + " ."
+    if raid:
+        parts.append("$primary{ } method{ raid }")
         return " ".join(parts) + " ."
     if lvmok:
         parts.append("$lvmok{ }")
@@ -177,6 +180,8 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
 
     lvm_groups = storage.get("lvm", []) or []
     crypt_over = {c["over"]: c for c in (storage.get("encryption", []) or [])}
+    raid_members = {d for a in (storage.get("raid", []) or [])
+                    for d in a.get("devices", [])}
     consumed = {d for g in lvm_groups for d in g.get("devices", [])}
     # partman-auto/disk takes a space-separated list; an array needs every
     # member disk named, not just the first.
@@ -232,6 +237,10 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
         role = part.get("role")
         fs = role_fs(part)
         mountpoint = role_mountpoint(part)
+        if handle in raid_members:
+            entries.append(recipe_entry(handle, part.get("size", "rest"), None, None,
+                                        f"partition '{handle}'", raid=True))
+            continue
         owner = consumed_by(handle, lvm_groups, crypt_over)
         if owner:
             group, is_crypto = owner

@@ -31,13 +31,18 @@ def b64(text: str) -> str:
     return base64.b64encode(text.encode()).decode()
 
 
+# Anaconda makes the filesystem before --grow expands the volume, so a 1 MiB
+# floor leaves mkfs.btrfs failing with "bad superblock on /dev/mapper/...".
+GROW_FLOOR_MIB = 1024
+
+
 def size_mib(size: str, what: str) -> str:
     """LIS size → the `--size`/`--grow` flags Anaconda expects."""
     if size == "rest":
-        return "--size=1 --grow"
+        return f"--size={GROW_FLOOR_MIB} --grow"
     if size.endswith("%"):
         refuse(f"{what}: percent size {size!r} is not expressible in kickstart")
-        return "--size=1 --grow"
+        return f"--size={GROW_FLOOR_MIB} --grow"
     for unit, factor in (("TiB", 1024 * 1024), ("GiB", 1024), ("MiB", 1)):
         if size.endswith(unit):
             return f"--size={int(size[: -len(unit)]) * factor}"
