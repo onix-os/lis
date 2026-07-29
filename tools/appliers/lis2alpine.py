@@ -371,6 +371,8 @@ def render_alpine(doc: dict) -> tuple[str, str, str]:
     return "\n".join(lines) + "\n", "\n".join(post) + "\n", prepare
 
 
+SED_UUID = """sed -n 's/^UUID="\\([^"]*\\)"$/\\1/p'"""
+
 MOUNT = "/mnt/lis"
 
 
@@ -450,10 +452,11 @@ def prepare_script(disk, partitions, root, boot_part, env, timeout=None,
             steps += [f'cryptsetup luksFormat --batch-mode --type luks2 '
                       f'--key-file {key} {dev}',
                       f'cryptsetup open --key-file {key} {dev} {name}',
-                      # busybox blkid ignores -s/-o and prints the whole line,
-                      # so the UUID is pulled out of the output instead.
-                      f'cryptuuid=$(blkid {dev} | sed -n '
-                      f"'s/.*[^_]UUID=\"\\([^\"]*\\)\".*/\\1/p')"]
+                      # busybox blkid ignores -s/-o and prints the whole
+                      # line; split it into tokens so PARTUUID="..." is
+                      # never mistaken for UUID="...".
+                      f'cryptuuid=$(blkid {dev} | tr " " "\\n" | '
+                      + SED_UUID + ' | head -n1)']
             dev = f'"/dev/mapper/{name}"'
             steps.append(f'cryptdm={name}')
         fs = role_fs(part)
