@@ -28,6 +28,21 @@
     "partitions": [
       {
         "disk": "main",
+        "id": "boot",
+        "role": "boot",
+        "size": "1GiB",
+        "fs": "ext4",
+        "mountpoint": "/boot"
+      },
+      {
+        "disk": "second",
+        "id": "boot2",
+        "role": "boot",
+        "size": "1GiB",
+        "fs": "ext4"
+      },
+      {
+        "disk": "main",
         "id": "praid1",
         "size": "rest"
       },
