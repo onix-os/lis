@@ -280,7 +280,14 @@ class StorageBuilder:
             self.defer_fs(crypt_id, spec, f"encryption '{cid}'")
 
     def luks_keyfile(self, container: dict) -> str | None:
-        """Resolve LUKS key material to a path on the live system, never a literal."""
+        """The staged path curtin reads; see stage_key_commands for why /run."""
+        cid = container["id"]
+        if self.seed_key_source(container):
+            return f"/run/lis-luks-{cid}.key"
+        return None
+
+    def seed_key_source(self, container: dict) -> str | None:
+        """Where the key lives on the seed, before it is staged into /run."""
         cid = container["id"]
         key = container.get("key", {}) or {}
         if kf := key.get("keyfile"):
@@ -651,6 +658,16 @@ def translate(doc: dict) -> dict:
     # it as `key:` also keeps the passphrase out of user-data, which is logged.
     if doc.get("storage", {}).get("encryption"):
         early += seed_mount_commands()
+        # Stage each key into /run: curtin runs inside the subiquity snap's mount
+        # namespace and cannot see the seed mount, but /run is shared. The key
+        # never enters user-data, which is logged (SPEC §2.4).
+        builder = StorageBuilder(doc)
+        for container in doc["storage"]["encryption"]:
+            source = builder.seed_key_source(container)
+            if not source:
+                continue
+            dest = f"/run/lis-luks-{container['id']}.key"
+            early.append(f"cp {source} {dest} && chmod 600 {dest}")
     for stage in ("pre_install", "pre"):
         for s in scripts.get(stage, []):
             if c := s.get("content"):
