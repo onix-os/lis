@@ -602,6 +602,17 @@ def build_pre_mounted(doc: dict) -> int:
                     root_lv = lv
             if root_lv:
                 steps += [f"mkdir -p {PRE_MOUNT}", f"mount {root_lv} {PRE_MOUNT}"]
+                # archinstall detects the bootloader target by looking under the
+                # pre-mount root, so /boot has to be a real mount there, not just
+                # a declared partition (archlinux/archinstall#3111).
+                for part in storage.get("partitions", []) or []:
+                    if part.get("mountpoint") == "/boot":
+                        node = node_of.get(part.get("id"))
+                        fs = role_fs(part) or "ext4"
+                        steps += [f"mkfs.{fs} -F {node}",
+                                  f"mkdir -p {PRE_MOUNT}/boot",
+                                  f"mount {node} {PRE_MOUNT}/boot"]
+                        break
             continue
         target = next((p for p in storage.get("partitions", [])
                        if p.get("id") == array["name"]), {})
