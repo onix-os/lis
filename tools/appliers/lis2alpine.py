@@ -401,6 +401,15 @@ def prepare_script(disk, partitions, root, boot_part, env, timeout=None,
                 + ("gpt" if "USE_EFI=1" in env else "msdos")] if wipe else
                ["# storage.wipe: false — the existing table is left in place"])]
 
+    # Everything below lays partitions end-to-end on a single $disk, so a document
+    # that spreads them over several disks (a raid array with one member each)
+    # would put two "rest" partitions at 100% and parted would reject the second
+    # as overlapping. Refuse rather than emit a table that destroys the layout.
+    if len({p.get("disk") for p in partitions if p.get("disk")}) > 1:
+        refuse("storage.partitions span more than one disk — this applier "
+               "partitions a single device, so a multi-disk layout (a raid array "
+               "with a member per disk) cannot be expressed yet")
+
     lvm_root = None
     start = "1MiB"
     numbered = []
