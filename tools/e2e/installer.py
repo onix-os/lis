@@ -294,8 +294,17 @@ def install_from_live_shell(distro, target_disk, seed_disk, iso, ram, work,
         # seed then fails with EACCES before anything else can go wrong.
         child.sendline("sudo -i")
         child.expect(prompts, timeout=120)
-    child.sendline("mkdir -p /run/lis/seed && mount /dev/vdb /run/lis/seed")
+    # Find the seed by its label rather than by device name: a multi-disk recipe
+    # (raid) attaches extra target disks, so the seed is not always /dev/vdb.
+    # busybox blkid ignores -L, hence the scan.
+    child.sendline(
+        "mkdir -p /run/lis/seed; for d in /dev/vd? /dev/sd?; do [ -b \"$d\" ] || "
+        "continue; blkid \"$d\" 2>/dev/null | grep -q 'LABEL=\"LIS\"' && "
+        "mount -o ro \"$d\" /run/lis/seed && break; done; "
+        "grep -q /run/lis/seed /proc/mounts && echo LIS_SEED_OK || echo LIS_SEED_FAIL")
     child.expect(prompts, timeout=120)
+    if "LIS_SEED_FAIL" in child.before:
+        raise InstallFailed("could not mount the LIS seed volume in the live environment")
     if bootstrap:
         # Some live images ship no python at all, so the applier cannot run
         # until its interpreter is there.
