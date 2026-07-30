@@ -323,6 +323,16 @@ def translate(doc: dict) -> tuple[dict, dict]:
     # bootloader instead. Setting an invented key would drop them silently.
     kernel_params = " ".join((boot.get("kernel", {}) or {}).get("params", []))
     if storage.get("raid"):
+        # The Pre_mount bootloader step needs a boot partition it can detect under
+        # the pre-mount root; with /boot on the root volume archinstall dies with
+        # "Could not detect boot at mountpoint" after pacstrap has already run
+        # (archlinux/archinstall#3111, open upstream). This branch skips
+        # disk_config() entirely, so the check has to live here.
+        if not any(p.get("mountpoint") == "/boot"
+                   for p in storage.get("partitions", []) or []):
+            refuse("storage.raid: archinstall needs a separate /boot partition it "
+                   "can detect under the pre-mounted root — declare one outside "
+                   "the array (archlinux/archinstall#3111)")
         config["disk_config"] = {"config_type": "pre_mounted_config",
                                  "mountpoint": PRE_MOUNT}
     elif dc := disk_config(doc):
