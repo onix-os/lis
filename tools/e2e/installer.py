@@ -306,9 +306,11 @@ def install_from_live_shell(distro, target_disk, seed_disk, iso, ram, work,
         "blkid \"/dev/$name\" 2>/dev/null | grep -q 'LABEL=\"LIS\"' && "
         "mount -o ro \"/dev/$name\" /run/lis/seed && break; "
         "done < /proc/partitions; "
-        "grep -q /run/lis/seed /proc/mounts && echo LIS_SEED_OK || echo LIS_SEED_FAIL")
+        # The console echoes the command back, so the marker must not be a literal
+        # in the command itself — print the exit status instead of the verdict.
+        "grep -q /run/lis/seed /proc/mounts; echo \"lis_seed=$?\"")
     child.expect(prompts, timeout=120)
-    if "LIS_SEED_FAIL" in child.before:
+    if "lis_seed=0" not in child.before:
         raise InstallFailed("could not mount the LIS seed volume in the live environment")
     if bootstrap:
         # Some live images ship no python at all, so the applier cannot run
