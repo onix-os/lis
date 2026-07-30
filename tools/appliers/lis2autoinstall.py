@@ -23,7 +23,7 @@ import pathlib
 import re
 import sys
 
-from lis_common import (track, check_unread, check_raid_consumers, chroot_intents, registration_commands, enrollment_commands, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, uid_commands, password_field, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (seed_mount_commands, track, check_unread, check_raid_consumers, chroot_intents, registration_commands, enrollment_commands, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, uid_commands, password_field, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, secret_ref, warn)
@@ -645,6 +645,12 @@ def translate(doc: dict) -> dict:
 
     # 1. Early / pre-storage commands
     early = []
+    # A dm_crypt keyfile path is resolved inside the *installer*, not the target,
+    # so the seed has to be mounted before storage runs or curtin fails with a
+    # bare "An error occurred". Keeping the key on the seed rather than inlining
+    # it as `key:` also keeps the passphrase out of user-data, which is logged.
+    if doc.get("storage", {}).get("encryption"):
+        early += seed_mount_commands()
     for stage in ("pre_install", "pre"):
         for s in scripts.get(stage, []):
             if c := s.get("content"):
