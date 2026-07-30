@@ -297,10 +297,15 @@ def install_from_live_shell(distro, target_disk, seed_disk, iso, ram, work,
     # Find the seed by its label rather than by device name: a multi-disk recipe
     # (raid) attaches extra target disks, so the seed is not always /dev/vdb.
     # busybox blkid ignores -L, hence the scan.
+    # No shell globs here: Arch's live console is zsh, which aborts the whole
+    # loop on a pattern that matches nothing (/dev/sd? on a virtio-only guest)
+    # rather than passing it through the way sh does. /proc/partitions needs none.
     child.sendline(
-        "mkdir -p /run/lis/seed; for d in /dev/vd? /dev/sd?; do [ -b \"$d\" ] || "
-        "continue; blkid \"$d\" 2>/dev/null | grep -q 'LABEL=\"LIS\"' && "
-        "mount -o ro \"$d\" /run/lis/seed && break; done; "
+        "mkdir -p /run/lis/seed; while read -r _maj _min _blk name; do "
+        "[ -b \"/dev/$name\" ] || continue; "
+        "blkid \"/dev/$name\" 2>/dev/null | grep -q 'LABEL=\"LIS\"' && "
+        "mount -o ro \"/dev/$name\" /run/lis/seed && break; "
+        "done < /proc/partitions; "
         "grep -q /run/lis/seed /proc/mounts && echo LIS_SEED_OK || echo LIS_SEED_FAIL")
     child.expect(prompts, timeout=120)
     if "LIS_SEED_FAIL" in child.before:
