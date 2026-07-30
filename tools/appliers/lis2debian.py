@@ -58,7 +58,7 @@ def size_mb(size: str, what: str) -> int:
 
 def recipe_entry(name: str, size: str, fs: str | None, mountpoint: str | None,
                  what: str, *, bootable=False, lvmok=False, vg=None, lv=None,
-                 crypto=False, raid=False) -> str:
+                 crypto=False, raid=False, vg_of_lv=None) -> str:
     """One `partman-auto/expert_recipe` stanza."""
     mb = size_mb(size, what)
     minimum = 128 if mb < 0 else mb
@@ -69,14 +69,13 @@ def recipe_entry(name: str, size: str, fs: str | None, mountpoint: str | None,
         # A crypto partition is the PV: partman opens it and adds
         # /dev/mapper/<part>_crypt to the pool itself.
         method = "crypto" if crypto else "lvm"
-        # A crypto physical volume takes no vg_name: partman opens the container
-        # and partman-auto-lvm builds the group named by
-        # partman-auto-lvm/new_vg_name. Naming it here points the group at a
-        # physical volume that does not exist yet, which is exactly what d-i
-        # reports ("volume group definition contains a reference to a
-        # non-existent physical volume").
-        parts.append(f"$defaultignore{{ }} $primary{{ }} method{{ {method} }}"
-                     + ("" if crypto else f" vg_name{{ {vg} }}"))
+        # vg_name{ } belongs here: partman-auto-lvm lib/auto-lvm.sh:87 reads it
+        # from the *pvscheme* lines. The logical volumes name the same group with
+        # in_vg{ } (auto-lvm.sh:79); without that they land in the default group
+        # while the PV joins ours, leaving a VG with no PV — the no_such_pv
+        # bail_out reported as "non-existing physical volume".
+        parts.append(f"$defaultignore{{ }} $primary{{ }} method{{ {method} }} "
+                     f"vg_name{{ {vg} }}")
         return " ".join(parts) + " ."
     if raid:
         # The documented RAID recipe names `raid` as the filesystem field:
@@ -86,6 +85,8 @@ def recipe_entry(name: str, size: str, fs: str | None, mountpoint: str | None,
         return " ".join(parts) + " ."
     if lvmok:
         parts.append("$defaultignore{ } $lvmok{ }")
+        if vg_of_lv:
+            parts.append(f"in_vg{{ {vg_of_lv} }}")
         if lv:
             parts.append(f"lv_name{{ {lv} }}")
     else:
@@ -319,7 +320,8 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
             entries.append(recipe_entry(vol["name"], vol.get("size", "rest"), vol.get("fs"),
                                         vol.get("mountpoint"),
                                         f"lvm '{group['name']}' volume '{vol['name']}'",
-                                        lvmok=True, lv=vol["name"]))
+                                        lvmok=True, lv=vol["name"],
+                                        vg_of_lv=group["name"]))
             if subs := vol.get("subvolumes"):
                 early, final = btrfs_subvolume_commands(
                     vol.get("mountpoint"), vol.get("fs"), subs,
