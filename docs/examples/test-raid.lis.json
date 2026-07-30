@@ -2,7 +2,7 @@
   "lis": "0.1.0",
   "meta": {
     "name": "raid-test-system",
-    "description": "RAID1 across two disks feeding a volume group; every fact is checked on the booted system.",
+    "description": "RAID1 across two disks feeding a volume group; /boot lives on the root volume because partman applies one recipe to every disk.",
     "generator": "lis-test-suite 0.1.0"
   },
   "target": {
@@ -26,14 +26,6 @@
   "storage": {
     "wipe": true,
     "partitions": [
-      {
-        "disk": "main",
-        "id": "boot",
-        "role": "boot",
-        "size": "1GiB",
-        "fs": "ext4",
-        "mountpoint": "/boot"
-      },
       {
         "disk": "main",
         "id": "praid1",
