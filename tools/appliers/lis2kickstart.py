@@ -216,8 +216,10 @@ def render_storage(doc: dict, lines: list[str]) -> None:
             lines.append(f"logvol {mountpoint} --vgname={group['name']} "
                          f"--name={vol['name']} --fstype={FS_MAP.get(fs, fs)} {size}")
             if vol.get("subvolumes"):
-                refuse(f"lvm volume '{vol['name']}': btrfs subvolumes are not "
-                       "expressible on a logvol")
+                refuse(f"lvm volume '{vol['name']}': Anaconda fails to create "
+                       "btrfs subvolumes on a logical volume (Red Hat bug "
+                       "1470524) — put the subvolumes on a plain btrfs "
+                       "partition, or use ext4/xfs on the logical volume")
 
     if (storage.get("swap", {}) or {}).get("zram"):
         warn("storage.swap.zram honored by installing zram-generator-defaults")
