@@ -425,8 +425,15 @@ def prepare_script(disk, partitions, root, boot_part, env, timeout=None,
             steps.append(f'lvcreate -y {extent} -n {volume["name"]} {group["name"]}')
             node = f'/dev/{group["name"]}/{volume["name"]}'
             if fs := volume.get("fs"):
-                steps.append(f"mkfs.{fs} -f {node}" if fs in ("btrfs", "xfs")
-                             else f"mkfs.{fs} -F {node}")
+                # A logical volume needs the same per-filesystem spelling as a
+                # plain partition: there is no mkfs.swap, and vfat wants -F32.
+                if fs == "swap":
+                    steps.append(f"mkswap {node}")
+                elif fs == "vfat":
+                    steps.append(f"mkfs.vfat -F32 {node}")
+                else:
+                    steps.append(f"mkfs.{fs} -f {node}" if fs in ("btrfs", "xfs")
+                                 else f"mkfs.{fs} -F {node}")
             if volume.get("mountpoint") == "/":
                 # The root filesystem is a logical volume, so there is no root
                 # partition for the loop below to pick up.
