@@ -397,8 +397,13 @@ def prepare_script(disk, partitions, root, boot_part, env, timeout=None,
              # apk brings the userspace tools; the kernel modules for the
              # filesystems the document asks for still have to be loaded, or
              # mount fails with EINVAL on a filesystem it cannot recognise.
-             "for m in " + " ".join(sorted({role_fs(p) for p in partitions
-                                            if role_fs(p) not in (None, "none", "swap")}))
+             # Filesystems can live on logical volumes rather than partitions (a
+             # raid member carries none), and mount fails with EINVAL if the module
+             # for the fs actually being mounted was never loaded.
+             "for m in " + " ".join(sorted(
+                 ({role_fs(p) for p in partitions} |
+                  {v.get("fs") for g in (lvm or []) for v in (g.get("volumes") or [])})
+                 - {None, "none", "swap"}))
              + "; do modprobe \"$m\" 2>/dev/null || true; done",
              *([] if wipe else
                ["# storage.wipe: false — the existing table is left in place"])]
