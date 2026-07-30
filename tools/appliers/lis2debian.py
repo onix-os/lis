@@ -142,23 +142,37 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
     raid_arrays = storage.get("raid", []) or []
     if storage.get("encryption"):
         ids = ", ".join(c["id"] for c in storage["encryption"])
-        # partman-auto's own recipe parser (lib/partman/lib/auto-shared.sh):
-        #     elif echo "$*" | grep -q "method{ crypto }"; then
-        #         pv_devices="$pv_devices /dev/mapper/${path##*/}_crypt"
-        # so a crypto partition becomes an LVM physical volume — Debian's
-        # supported shape is LUKS with LVM on top, not a bare filesystem.
-        lvm_devices = {d for g in (storage.get("lvm", []) or [])
-                       for d in g.get("devices", [])}
+        # partman-crypto supports a filesystem directly on the container:
+        # finish.d/crypto_config takes any partition that is swap, lvm, *or has a
+        # mountpoint*, and check.d/crypto_check_mountpoints has an explicit
+        # cryptoroot branch. What it does refuse (both hard exits there) is an
+        # encrypted /boot, and an encrypted root with no separate /boot.
+        parts = storage.get("partitions", []) or []
+        by_id = {p.get("id"): p for p in parts}
+        encrypted_mounts = set()
         for container in storage.get("encryption", []) or []:
             if not luks_key_path(doc, container["id"]):
                 refuse(f"storage.encryption ({container['id']}): no key material — "
                        "declare a keys[] entry with a seed: source, or place the "
                        f"passphrase at {SEED_MOUNT}/secrets/luks-{container['id']}.key")
-            elif container["id"] not in lvm_devices:
-                refuse(f"storage.encryption ({container['id']}): partman puts a "
-                       "crypto partition into the LVM pool, so the container must "
-                       "be consumed by a storage.lvm group — a filesystem directly "
-                       "on LUKS is not expressible in an expert recipe")
+            over = by_id.get(container.get("over"))
+            if over and over.get("mountpoint"):
+                encrypted_mounts.add(over["mountpoint"])
+            for method in container.get("unlock", []) or []:
+                if method not in ("passphrase", "keyfile"):
+                    warn(f"storage.encryption ({container['id']}): unlock method "
+                         f"{method!r} must be enrolled after installation")
+        if "/boot" in encrypted_mounts:
+            refuse("storage.encryption: partman refuses an encrypted /boot "
+                   "(partman-crypto check.d/crypto_check_mountpoints) — leave "
+                   "/boot on a plain partition")
+        if "/" in encrypted_mounts:
+            plain_boot = any(p.get("mountpoint") == "/boot"
+                             for p in parts if p.get("mountpoint") == "/boot")
+            if not plain_boot:
+                refuse("storage.encryption: an encrypted root needs a separate "
+                       "unencrypted /boot partition (partman-crypto "
+                       "check.d/crypto_check_mountpoints)")
             for method in container.get("unlock", []) or []:
                 if method not in ("passphrase", "keyfile"):
                     warn(f"storage.encryption ({container['id']}): unlock method "
