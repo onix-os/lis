@@ -760,9 +760,17 @@ def main() -> int:
     # unencrypted root and report success — the one failure mode the spec's
     # no-silent-drift rule exists to prevent, so verify the output, not the intent.
     if doc.get("storage", {}).get("encryption") and "method{ crypto }" not in cfg:
-        refuse("storage.encryption is declared but the generated recipe contains no "
-               "method{ crypto } — this applier does not yet express this layout, "
-               "and applying it would silently install an unencrypted system")
+        # partman-crypto init.d/crypto:126 auto-creates a formatted filesystem
+        # inside the container but never a mountpoint — that is picked
+        # interactively, and partman-auto has no preseed vocabulary for it. So a
+        # filesystem mounted directly on LUKS is not automatable, even though
+        # partman itself supports the shape (finish.d/crypto_config:111). Feeding
+        # the container to an LVM group is, and this applier emits that.
+        refuse("storage.encryption: a filesystem mounted directly on the container "
+               "cannot be preseeded — partman-crypto formats the inside of the "
+               "container but only takes its mountpoint interactively. Have a "
+               "storage.lvm group consume the container and put the filesystem on a "
+               "logical volume; applying as-is would install an unencrypted system")
     args.out.mkdir(parents=True, exist_ok=True)
     cfg_file = args.out / "preseed.cfg"
     cfg_file.write_text(cfg)
