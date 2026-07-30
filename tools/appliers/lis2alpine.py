@@ -366,7 +366,9 @@ def render_alpine(doc: dict) -> tuple[str, str, str]:
                               (doc.get("boot") or {}).get("timeout"),
                               crypt_over=crypt_over,
                               wipe=bool(storage.get("wipe", False)),
-                              raid=storage.get("raid"), lvm=storage.get("lvm"))
+                              raid=storage.get("raid"), lvm=storage.get("lvm"),
+                              disk_paths={d["id"]: (d.get("match", {}) or {}).get("path")
+                                          for d in (doc.get("target", {}) or {}).get("disks", [])})
                if manual else "")
     return "\n".join(lines) + "\n", "\n".join(post) + "\n", prepare
 
@@ -377,7 +379,8 @@ MOUNT = "/mnt/lis"
 
 
 def prepare_script(disk, partitions, root, boot_part, env, timeout=None,
-                   crypt_over=None, wipe=True, raid=None, lvm=None) -> str:
+                   crypt_over=None, wipe=True, raid=None, lvm=None,
+                   disk_paths=None) -> str:
     """Lay out the disk, then hand the mounted root to setup-disk.
 
     Alpine's answerfile has no vocabulary for a partition table — `DISKOPTS`
@@ -397,34 +400,47 @@ def prepare_script(disk, partitions, root, boot_part, env, timeout=None,
              "for m in " + " ".join(sorted({role_fs(p) for p in partitions
                                             if role_fs(p) not in (None, "none", "swap")}))
              + "; do modprobe \"$m\" 2>/dev/null || true; done",
-             *(["parted -s \"$disk\" mklabel "
-                + ("gpt" if "USE_EFI=1" in env else "msdos")] if wipe else
+             *([] if wipe else
                ["# storage.wipe: false — the existing table is left in place"])]
 
-    # Everything below lays partitions end-to-end on a single $disk, so a document
-    # that spreads them over several disks (a raid array with one member each)
-    # would put two "rest" partitions at 100% and parted would reject the second
-    # as overlapping. Refuse rather than emit a table that destroys the layout.
-    if len({p.get("disk") for p in partitions if p.get("disk")}) > 1:
-        refuse("storage.partitions span more than one disk — this applier "
-               "partitions a single device, so a multi-disk layout (a raid array "
-               "with a member per disk) cannot be expressed yet")
+    # Partitions are laid per disk: a raid array declares one member on each
+    # device, and numbering/offsets restart per disk. `numbered` therefore carries
+    # the resolved device node rather than an index into a single $disk.
+    label = "gpt" if "USE_EFI=1" in env else "msdos"
+    by_disk: dict = {}
+    for part in partitions:
+        by_disk.setdefault(part.get("disk"), []).append(part)
 
     lvm_root = None
-    start = "1MiB"
     numbered = []
-    for index, part in enumerate(partitions, start=1):
-        size = part.get("size", "rest")
-        end = "100%" if size == "rest" else f"{cumulative(partitions[:index])}"
-        steps.append(f'parted -s "$disk" -- mkpart primary {start} {end}')
-        if part.get("role") in ("esp", "boot"):
-            steps.append(f'parted -s "$disk" set {index} boot on')
-        start = end
-        numbered.append((index, part))
-    steps.append('partprobe "$disk" || true')
+    for handle, disk_parts in by_disk.items():
+        device = (disk_paths or {}).get(handle) or disk
+        if wipe:
+            steps.append(f'parted -s {shquote(device)} mklabel {label}')
+        start = "1MiB"
+        for index, part in enumerate(disk_parts, start=1):
+            size = part.get("size", "rest")
+            end = "100%" if size == "rest" else f"{cumulative(disk_parts[:index])}"
+            steps.append(f'parted -s {shquote(device)} -- mkpart primary {start} {end}')
+            if part.get("role") in ("esp", "boot"):
+                steps.append(f'parted -s {shquote(device)} set {index} boot on')
+            start = end
+            numbered.append((shquote(f"{device}{index}"), part))
+        steps.append(f'partprobe {shquote(device)} || true')
+    for array in raid or []:
+        # setup-disk has no array vocabulary, so the array is built here and the
+        # filesystem then lands on /dev/md/<name> like any other device.
+        members = " ".join(dev for dev, part in numbered
+                           if part.get("id") in array.get("devices", []))
+        steps += ["apk add --no-progress mdadm",
+                  f'mdadm --create /dev/md/{array["name"]} --run --level={array["level"]} '
+                  f'--raid-devices={len(array.get("devices", []))} {members}']
     for group in lvm or []:
-        members = " ".join(f'"${{disk}}{i}"' for i, part in numbered
-                           if part.get("id") in group.get("devices", []))
+        members = " ".join(
+            [dev for dev, part in numbered
+             if part.get("id") in group.get("devices", [])]
+            + [f'/dev/md/{a["name"]}' for a in (raid or [])
+               if a["name"] in group.get("devices", [])])
         steps += ["apk add --no-progress lvm2",
                   f"pvcreate -ff -y {members}",
                   f'vgcreate {group["name"]} {members}']
@@ -448,18 +464,9 @@ def prepare_script(disk, partitions, root, boot_part, env, timeout=None,
                 # partition for the loop below to pick up.
                 steps.append(f'rootdev={node}')
                 lvm_root = volume
-    for array in raid or []:
-        # setup-disk has no array vocabulary, so the array is built here and the
-        # filesystem then lands on /dev/md/<name> like any other device.
-        members = " ".join(f'"${{disk}}{i}"' for i, part in numbered
-                           if part.get("id") in array.get("devices", []))
-        steps += ["apk add --no-progress mdadm",
-                  f'mdadm --create /dev/md/{array["name"]} --run --level={array["level"]} '
-                  f'--raid-devices={len(array.get("devices", []))} {members}']
     steps.append("sleep 2")
 
-    for index, part in numbered:
-        dev = f'"${{disk}}{index}"'
+    for dev, part in numbered:
         if container := (crypt_over or {}).get(part.get("id")):
             # luksFormat then open: everything below writes to the mapper node,
             # so the filesystem lands inside the container rather than beside it.
