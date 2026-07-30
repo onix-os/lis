@@ -248,8 +248,10 @@ def install_debian(target_disk, seed_disk, iso, ram, recipe, work):
     # only: appended here rather than emitted by the applier.
     cfg = out / "preseed.cfg"
     text = cfg.read_text()
-    tap = ("(while :; do [ -f /var/log/partman ] && "
-           "tail -F /var/log/partman > /dev/ttyS0 2>&1; sleep 2; done &); ")
+    # /var/log/partman only exists when partman debug is on; d-i's actual log is
+    # /var/log/syslog, which carries partman's messages either way.
+    tap = ("(tail -F /var/log/syslog /var/log/partman 2>/dev/null "
+           "> /dev/ttyS0 2>&1 &); ")
     if "preseed/early_command string " in text:
         # Only one early_command may exist — a second silently replaces the
         # first, dropping the seed mount the LUKS key depends on.
