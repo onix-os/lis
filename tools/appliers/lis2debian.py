@@ -79,7 +79,7 @@ def recipe_entry(name: str, size: str, fs: str | None, mountpoint: str | None,
         parts.append("$primary{ } method{ raid }")
         return " ".join(parts) + " ."
     if lvmok:
-        parts.append("$lvmok{ }")
+        parts.append("$defaultignore{ } $lvmok{ }")
         if lv:
             parts.append(f"lv_name{{ {lv} }}")
     else:
@@ -185,6 +185,7 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
     crypt_over = {c["over"]: c for c in (storage.get("encryption", []) or [])}
     raid_members = {d for a in (storage.get("raid", []) or [])
                     for d in a.get("devices", [])}
+    raid_slots: set = set()
     consumed = {d for g in lvm_groups for d in g.get("devices", [])}
     # partman-auto/disk takes a space-separated list; an array needs every
     # member disk named, not just the first.
@@ -254,6 +255,10 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
         fs = role_fs(part)
         mountpoint = role_mountpoint(part)
         if handle in raid_members:
+            slot = (part.get("size"), )
+            if slot in raid_slots:
+                continue      # same slot on another disk; the recipe covers both
+            raid_slots.add(slot)
             entries.append(recipe_entry(handle, part.get("size", "rest"), None, None,
                                         f"partition '{handle}'", raid=True))
             continue
