@@ -22,7 +22,7 @@ import pathlib
 import sys
 import uuid
 
-from lis_common import (track, check_unread, check_raid_consumers, chroot_intents, registration_commands, enrollment_commands, luks_key_path, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (parse_size, track, check_unread, check_raid_consumers, chroot_intents, registration_commands, enrollment_commands, luks_key_path, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -533,11 +533,66 @@ def build_pre_mounted(doc: dict) -> int:
         node_of[part.get("id")] = f"{disks.get(disk, '')}{index[disk]}"
 
     steps: list[str] = []
+    # Pre_mount hands archinstall a finished layout, so nothing else partitions
+    # these disks — mdadm would otherwise be given member nodes that do not exist.
+    # Lay them out here, per disk, before assembling anything.
+    if storage.get("raid"):
+        by_disk: dict[str, list] = {}
+        for part in storage.get("partitions", []) or []:
+            by_disk.setdefault(part.get("disk"), []).append(part)
+        for handle, parts in by_disk.items():
+            device = disks.get(handle)
+            if not device:
+                continue
+            steps.append(f"parted -s {device} mklabel gpt")
+            start_mib = 1
+            for number, part in enumerate(parts, start=1):
+                size = part.get("size", "rest")
+                if size == "rest":
+                    end = "100%"
+                else:
+                    end_mib = start_mib + (parse_size(size) >> 20)
+                    end = f"{end_mib}MiB"
+                steps.append(f"parted -s -a optimal {device} -- mkpart primary "
+                             f"{start_mib}MiB {end}")
+                if part.get("role") in ("esp", "boot"):
+                    steps.append(f"parted -s {device} set {number} boot on")
+                if end != "100%":
+                    start_mib = end_mib
+            steps.append(f"partprobe {device} || true")
+        steps.append("udevadm settle || sleep 2")
     for array in storage.get("raid", []) or []:
         members = " ".join(node_of.get(d, "") for d in array.get("devices", []))
         node = f"/dev/md/{array['name']}"
         steps.append(f"mdadm --create {node} --run --level={array['level']} "
                      f"--raid-devices={len(array.get('devices', []))} {members}")
+        # An array almost always feeds a volume group (check_raid_consumers
+        # requires a consumer). Build it here too, or the filesystem would land on
+        # the array itself and the declared logical volumes would vanish silently.
+        group = next((g for g in (storage.get("lvm", []) or [])
+                      if array["name"] in (g.get("devices") or [])), None)
+        if group:
+            steps += [f"pvcreate -ff -y {node}",
+                      f"vgcreate {group['name']} {node}"]
+            root_lv = None
+            for volume in group.get("volumes", []) or []:
+                size = volume.get("size", "rest")
+                extent = ("-l 100%FREE" if size == "rest"
+                          else f"-L {size.replace('iB', '')}")
+                lv = f"/dev/{group['name']}/{volume['name']}"
+                steps.append(f"lvcreate -y {extent} -n {volume['name']} "
+                             f"{group['name']}")
+                vfs = volume.get("fs")
+                if vfs == "swap":
+                    steps += [f"mkswap {lv}", f"swapon {lv}"]
+                elif vfs:
+                    steps.append(f"mkfs.{vfs} -f {lv}" if vfs in ("btrfs", "xfs")
+                                 else f"mkfs.{vfs} -F {lv}")
+                if volume.get("mountpoint") == "/":
+                    root_lv = lv
+            if root_lv:
+                steps += [f"mkdir -p {PRE_MOUNT}", f"mount {root_lv} {PRE_MOUNT}"]
+            continue
         target = next((p for p in storage.get("partitions", [])
                        if p.get("id") == array["name"]), {})
         fs = role_fs(target) or "ext4"
