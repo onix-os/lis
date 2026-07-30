@@ -771,6 +771,16 @@ def translate(doc: dict) -> dict:
         "chmod 600 /var/lib/lis/system.lis.json"))
 
     late += storage_late_last
+    if doc.get("storage", {}).get("encryption"):
+        # curtin records the keyfile it used in the target's crypttab, but that
+        # path is on the installer's /run and does not exist in the installed
+        # system, so boot stalls waiting on a key it can never read. Setting the
+        # third field to "none" makes it prompt instead; the passphrase is the
+        # keyfile's own content, so the existing key slot already accepts it.
+        late.append(in_target(
+            "sed -i 's#^\\([^ \\t]*\\)\\([ \\t]*[^ \\t]*\\)[ \\t]*[^ \\t]*#\\1\\2 none#' "
+            "/etc/crypttab && update-initramfs -u -k all"))
+
     if late:
         auto["late-commands"] = late
 
