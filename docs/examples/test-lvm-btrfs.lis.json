@@ -49,8 +49,18 @@
           {
             "name": "root",
             "size": "rest",
-            "fs": "ext4",
-            "mountpoint": "/"
+            "fs": "btrfs",
+            "mountpoint": "/",
+            "subvolumes": [
+              {
+                "name": "@",
+                "mountpoint": "/"
+              },
+              {
+                "name": "@home",
+                "mountpoint": "/home"
+              }
+            ]
           }
         ]
       }
