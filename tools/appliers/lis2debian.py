@@ -756,6 +756,13 @@ def main() -> int:
             refuse(f"generated preseed line {number} is not a preseed directive — "
                    "a value with an embedded newline would be rejected by d-i: "
                    f"{line[:60]!r}")
+    # Declared encryption that produced no crypto directive would install an
+    # unencrypted root and report success — the one failure mode the spec's
+    # no-silent-drift rule exists to prevent, so verify the output, not the intent.
+    if doc.get("storage", {}).get("encryption") and "method{ crypto }" not in cfg:
+        refuse("storage.encryption is declared but the generated recipe contains no "
+               "method{ crypto } — this applier does not yet express this layout, "
+               "and applying it would silently install an unencrypted system")
     args.out.mkdir(parents=True, exist_ok=True)
     cfg_file = args.out / "preseed.cfg"
     cfg_file.write_text(cfg)
