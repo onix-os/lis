@@ -160,6 +160,22 @@ def wait_for_finish(child: pexpect.spawn, distro: str, markers: list[str],
         print(f"\n  [{TICK}] {distro} installer reported completion.")
         return
     if idx < len(markers) + len(failures):
+        # Subiquity's "An error occurred" says nothing on its own; the reason is in
+        # its own logs inside the live system, which vanish with the VM. Pull the
+        # tail onto the serial console before giving up.
+        if distro == "ubuntu":
+            print(f"\n  [{TICK}] dumping subiquity/curtin logs to the serial log")
+            for log in ("/var/log/installer/subiquity-server-debug.log",
+                        "/var/log/installer/curtin-install.log",
+                        "/var/log/syslog"):
+                try:
+                    child.sendline("")
+                    child.sendline(
+                        f"grep -iE 'error|traceback|failed|dm_crypt|keyfile' {log} "
+                        "2>/dev/null | tail -n 25")
+                    child.expect([r"[#$] $", pexpect.TIMEOUT], timeout=60)
+                except Exception:      # the console may already be unusable
+                    break
         raise InstallFailed(f"{distro} installer reported an error: "
                             f"{failures[idx - len(markers)]!r}")
     if idx == len(markers) + len(failures):
