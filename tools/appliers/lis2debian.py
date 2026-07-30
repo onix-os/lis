@@ -69,8 +69,14 @@ def recipe_entry(name: str, size: str, fs: str | None, mountpoint: str | None,
         # A crypto partition is the PV: partman opens it and adds
         # /dev/mapper/<part>_crypt to the pool itself.
         method = "crypto" if crypto else "lvm"
-        parts.append(f"$defaultignore{{ }} $primary{{ }} method{{ {method} }} "
-                     f"vg_name{{ {vg} }}")
+        # A crypto physical volume takes no vg_name: partman opens the container
+        # and partman-auto-lvm builds the group named by
+        # partman-auto-lvm/new_vg_name. Naming it here points the group at a
+        # physical volume that does not exist yet, which is exactly what d-i
+        # reports ("volume group definition contains a reference to a
+        # non-existent physical volume").
+        parts.append(f"$defaultignore{{ }} $primary{{ }} method{{ {method} }}"
+                     + ("" if crypto else f" vg_name{{ {vg} }}"))
         return " ".join(parts) + " ."
     if raid:
         # The documented RAID recipe names `raid` as the filesystem field:

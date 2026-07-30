@@ -657,7 +657,13 @@ def translate(doc: dict) -> dict:
     # bare "An error occurred". Keeping the key on the seed rather than inlining
     # it as `key:` also keeps the passphrase out of user-data, which is logged.
     if doc.get("storage", {}).get("encryption"):
-        early += seed_mount_commands()
+        # Each early-command runs in its own shell, so the seed mount has to be a
+        # single command — a `dev=$(...)` assignment does not survive into the
+        # next list entry (that is why the mount silently never happened).
+        early.append(" && ".join([
+            "mkdir -p /run/lis/seed",
+            "dev=$(blkid -L LIS || blkid -L LISDATA)",
+            'mount -o ro "$dev" /run/lis/seed']))
         # Stage each key into /run: curtin runs inside the subiquity snap's mount
         # namespace and cannot see the seed mount, but /run is shared. The key
         # never enters user-data, which is logged (SPEC §2.4).
