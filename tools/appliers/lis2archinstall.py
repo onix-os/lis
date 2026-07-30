@@ -333,6 +333,15 @@ def translate(doc: dict) -> tuple[dict, dict]:
             refuse("storage.raid: archinstall needs a separate /boot partition it "
                    "can detect under the pre-mounted root — declare one outside "
                    "the array (archlinux/archinstall#3111)")
+        # Pre_mount validates mounts against archinstall's own disk model, and an
+        # LVM volume on an mdadm array is not in it — the run dies with "Could not
+        # detect root at mountpoint" *after* pacstrap has written the system.
+        # Refuse up front rather than fail with a half-installed disk.
+        if any(a["name"] in (g.get("devices") or [])
+               for a in storage["raid"] for g in (storage.get("lvm") or [])):
+            refuse("storage.raid: archinstall cannot detect an LVM root on an mdadm "
+                   "array in a pre-mounted layout (archlinux/archinstall#3111) — "
+                   "put the root filesystem directly on the array")
         config["disk_config"] = {"config_type": "pre_mounted_config",
                                  "mountpoint": PRE_MOUNT}
     elif dc := disk_config(doc):
