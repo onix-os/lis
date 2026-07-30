@@ -217,8 +217,13 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
     # unencrypted while reporting success.
     encrypted_vg = any(c["id"] in consumed
                        for c in (storage.get("encryption", []) or []))
+    # Not "crypto": that makes partman-auto-lvm put our method{ crypto } line
+    # into pvscheme (auto-lvm.sh:245), where the VG map compares the raw disk
+    # against /dev/mapper/<part>_crypt and bails out no_such_pv (:97,:106).
+    # With "lvm" the pvscheme is empty, the loop never runs, and the fallback
+    # at :111 assigns the crypt device to the default VG. partman-crypto still
+    # opens the container — init.d/crypto acts on method{ crypto } either way.
     method = ("raid" if raid_arrays else
-              "crypto" if encrypted_vg else
               "lvm" if lvm_groups else "regular")
     lines.append(f"d-i partman-auto/method string {method}")
     if raid_arrays:
