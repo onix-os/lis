@@ -25,6 +25,9 @@ from lis_common import (track, check_unread, check_raid_consumers, chroot_intent
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
 
+# Containers holding the filesystem directly, as (id, fs, mountpoint).
+BARE_CRYPT: list = []
+
 FS_MAP = {"ext4": "ext4", "xfs": "xfs", "btrfs": "btrfs", "vfat": "fat32", "swap": "linux-swap"}
 
 
@@ -79,6 +82,12 @@ def recipe_entry(name: str, size: str, fs: str | None, mountpoint: str | None,
         # the physical volume with it means partman never creates the PV — and
         # the group then references one that does not exist.
         parts.append(f"$primary{{ }} method{{ {method} }} vg_name{{ {vg} }}")
+        return " ".join(parts) + " ."
+    if crypto and not vg:
+        # A container with the filesystem directly inside it: partman still opens
+        # it, and the mountpoint for the inner partition is supplied by the
+        # finish.d hook below (crypto_config reads $id/mountpoint, :111).
+        parts.append("$primary{ } method{ crypto }")
         return " ".join(parts) + " ."
     if raid:
         # The documented RAID recipe names `raid` as the filesystem field:
@@ -287,6 +296,8 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
         refuse("storage.wipe: false — partman-auto always rewrites the target disk")
 
     entries: list[str] = []
+    bare_crypt: list = BARE_CRYPT
+    bare_crypt.clear()
     for i, part in enumerate(storage.get("partitions", [])):
         if part.get("disk") not in disks:
             refuse(f"partition {i}: references unknown disk handle {part.get('disk')!r}")
@@ -313,6 +324,14 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
             entries.append(recipe_entry(handle, part.get("size", "rest"), None, None,
                                         f"partition '{handle}'", vg=group["name"],
                                         crypto=is_crypto))
+            continue
+        if handle in crypt_over:
+            # Encrypted but not fed to a VG: the container carries the filesystem
+            # itself. The recipe only marks it crypto; the mountpoint and fs for
+            # the partition *inside* the container come from the finish.d hook.
+            entries.append(recipe_entry(handle, part.get("size", "rest"), None, None,
+                                        f"partition '{handle}'", crypto=True))
+            bare_crypt.append((crypt_over[handle]["id"], fs, mountpoint))
             continue
         entries.append(recipe_entry(handle, part.get("size", "rest"), fs, mountpoint,
                                     f"partition '{handle}'",
@@ -637,6 +656,32 @@ def render_preseed(doc: dict) -> str:
             '| debconf-set-selections',
         ]
         early.insert(0, "; ".join(inject))
+    if BARE_CRYPT:
+        # partman-crypto's finish.d/crypto_config (order 55) accepts any partition
+        # that has a mountpoint file; the interactive menu is merely what normally
+        # writes one. A finish.d script ordered ahead of it can write the same
+        # state, which is what makes a filesystem directly on LUKS preseedable.
+        fs, mnt = BARE_CRYPT[0][1] or "ext4", BARE_CRYPT[0][2] or "/"
+        hook = ("#!/bin/sh\n"
+                ". /lib/partman/lib/base.sh\n"
+                "for dev in $DEVICES/*; do\n"
+                "  [ -d \"$dev\" ] || continue\n"
+                "  cd $dev\n"
+                "  open_dialog PARTITIONS\n"
+                "  while { read_line num id size type fsx path name; [ \"$id\" ]; }; do\n"
+                "    [ -f $id/crypt_realdev ] || continue\n"
+                f"    echo {mnt} > $id/mountpoint\n"
+                "    echo format > $id/method\n"
+                "    : > $id/format\n"
+                "    : > $id/use_filesystem\n"
+                f"    echo {fs} > $id/filesystem\n"
+                "  done\n"
+                "  close_dialog\n"
+                "done\n")
+        blob = base64.b64encode(hook.encode()).decode()
+        early.append("mkdir -p /lib/partman/finish.d")
+        early.append(f"echo {blob} | base64 -d > /lib/partman/finish.d/50lis_crypt_mount")
+        early.append("chmod 755 /lib/partman/finish.d/50lis_crypt_mount")
     if early:
         lines.append(f"d-i preseed/early_command string {'; '.join(early)}")
 
@@ -792,17 +837,9 @@ def main() -> int:
     # unencrypted root and report success — the one failure mode the spec's
     # no-silent-drift rule exists to prevent, so verify the output, not the intent.
     if doc.get("storage", {}).get("encryption") and "method{ crypto }" not in cfg:
-        # partman-crypto init.d/crypto:126 auto-creates a formatted filesystem
-        # inside the container but never a mountpoint — that is picked
-        # interactively, and partman-auto has no preseed vocabulary for it. So a
-        # filesystem mounted directly on LUKS is not automatable, even though
-        # partman itself supports the shape (finish.d/crypto_config:111). Feeding
-        # the container to an LVM group is, and this applier emits that.
-        refuse("storage.encryption: a filesystem mounted directly on the container "
-               "cannot be preseeded — partman-crypto formats the inside of the "
-               "container but only takes its mountpoint interactively. Have a "
-               "storage.lvm group consume the container and put the filesystem on a "
-               "logical volume; applying as-is would install an unencrypted system")
+        refuse("storage.encryption is declared but the generated recipe contains "
+               "no method{ crypto } — applying it would install an unencrypted "
+               "system")
     args.out.mkdir(parents=True, exist_ok=True)
     cfg_file = args.out / "preseed.cfg"
     cfg_file.write_text(cfg)
