@@ -50,7 +50,17 @@
             "name": "root",
             "size": "rest",
             "fs": "btrfs",
-            "mountpoint": "/"
+            "mountpoint": "/",
+            "subvolumes": [
+              {
+                "name": "@",
+                "mountpoint": "/"
+              },
+              {
+                "name": "@home",
+                "mountpoint": "/home"
+              }
+            ]
           }
         ]
       }

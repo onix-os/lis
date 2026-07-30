@@ -234,6 +234,13 @@ def lvm_config(storage: dict, pv_ids: dict[str, str]) -> dict | None:
             }
             if entry["length"].pop("lis_rest", False):
                 REST_SIZED.add(entry["obj_id"])
+            if fs == "btrfs" and not vol.get("subvolumes"):
+                # archinstall mounts a btrfs volume's subvolumes, not the volume:
+                # with none declared it formats, probes, unmounts and mounts
+                # nothing, and pacstrap then installs into the live filesystem.
+                refuse(f"lvm volume '{vol['name']}': a btrfs volume needs at least "
+                       "one subvolume — archinstall mounts subvolumes, so nothing "
+                       "would be mounted at its mountpoint")
             if subs := vol.get("subvolumes"):
                 if fs != "btrfs":
                     refuse(f"lvm volume '{vol['name']}': subvolumes on a {fs} filesystem")
