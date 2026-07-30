@@ -400,7 +400,11 @@ def unlock_if_asked(child: pexpect.spawn, recipe: dict) -> None:
     """
     if not (recipe.get("storage", {}) or {}).get("encryption"):
         return
-    patterns = [r"[Ee]nter passphrase", r"[Pp]assphrase for", r"Please enter passphrase"]
+    # Ubuntu's initramfs asks "Please unlock disk cryptroot:" — none of the
+    # other wordings match it, so the prompt sat unanswered and the guest never
+    # finished booting.
+    patterns = [r"[Ee]nter passphrase", r"[Pp]assphrase for", r"Please enter passphrase",
+                r"[Pp]lease unlock disk"]
     for _ in range(3):     # initrd may ask again per container, or after a typo
         try:
             child.expect(patterns, timeout=180)
