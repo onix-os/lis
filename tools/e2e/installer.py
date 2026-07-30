@@ -242,6 +242,22 @@ def install_ubuntu(target_disk, seed_disk, iso, ram, recipe, work):
 
 def install_debian(target_disk, seed_disk, iso, ram, recipe, work):
     out = run_applier("lis2debian.py", recipe, work / "preseed")
+    # d-i keeps partman's reasoning in /var/log/partman inside the installer, and
+    # it dies with the VM — so a partitioning failure shows only a dialog with no
+    # cause. Stream it to the serial console, which we do capture. Test-harness
+    # only: appended here rather than emitted by the applier.
+    cfg = out / "preseed.cfg"
+    text = cfg.read_text()
+    tap = ("(while :; do [ -f /var/log/partman ] && "
+           "tail -F /var/log/partman > /dev/ttyS0 2>&1; sleep 2; done &); ")
+    if "preseed/early_command string " in text:
+        # Only one early_command may exist — a second silently replaces the
+        # first, dropping the seed mount the LUKS key depends on.
+        text = text.replace("preseed/early_command string ",
+                            "preseed/early_command string " + tap, 1)
+    else:
+        text += "\nd-i preseed/early_command string " + tap + "true\n"
+    cfg.write_text(text)
     serve(out, work / "http.log")
     vmlinuz, initrd = work / "debian-vmlinuz", work / "debian-initrd.gz"
     extract(iso, {"/install.amd/vmlinuz": vmlinuz, "/install.amd/initrd.gz": initrd})
