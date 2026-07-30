@@ -260,6 +260,14 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
         lines.append("d-i partman-lvm/device_remove_lvm boolean true")
         lines.append("d-i partman-lvm/confirm boolean true")
         lines.append("d-i partman-lvm/confirm_nooverwrite boolean true")
+    if encrypted_vg:
+        # partman-crypto init.d/crypto:158 does
+        #   db_register partman-crypto/confirm partman-crypto/confirm_nooverwrite
+        # so the question actually asked is the registered alias. Leaving it
+        # unanswered hangs the installer at "Starting up the partitioner".
+        lines.append("d-i partman-crypto/confirm boolean true")
+        lines.append("d-i partman-crypto/confirm_nooverwrite boolean true")
+        lines.append("d-i partman-crypto/erase_data boolean false")
     if not storage.get("wipe"):
         refuse("storage.wipe: false — partman-auto always rewrites the target disk")
 
