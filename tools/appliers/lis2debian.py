@@ -204,7 +204,15 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
     # partman-auto/disk takes a space-separated list; an array needs every
     # member disk named, not just the first.
     lines.append("d-i partman-auto/disk string " + " ".join(disks.values()))
-    method = "raid" if raid_arrays else ("lvm" if lvm_groups else "regular")
+    # "crypto" is partman's name for LUKS with LVM inside it, so a document whose
+    # encryption container feeds a volume group selects crypto rather than lvm —
+    # with plain "lvm" partman-crypto never runs and the install comes out
+    # unencrypted while reporting success.
+    encrypted_vg = any(c["id"] in consumed
+                       for c in (storage.get("encryption", []) or []))
+    method = ("raid" if raid_arrays else
+              "crypto" if encrypted_vg else
+              "lvm" if lvm_groups else "regular")
     lines.append(f"d-i partman-auto/method string {method}")
     if raid_arrays:
         # partman-auto applies a single expert_recipe to every disk in
