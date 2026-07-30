@@ -74,8 +74,11 @@ def recipe_entry(name: str, size: str, fs: str | None, mountpoint: str | None,
         # in_vg{ } (auto-lvm.sh:79); without that they land in the default group
         # while the PV joins ours, leaving a VG with no PV — the no_such_pv
         # bail_out reported as "non-existing physical volume".
-        parts.append(f"$defaultignore{{ }} $primary{{ }} method{{ {method} }} "
-                     f"vg_name{{ {vg} }}")
+        # No $defaultignore here: Debian's own recipes put that on entries meant
+        # to be skipped (the /boot line in recipes-arm64-efi/server), so marking
+        # the physical volume with it means partman never creates the PV — and
+        # the group then references one that does not exist.
+        parts.append(f"$primary{{ }} method{{ {method} }} vg_name{{ {vg} }}")
         return " ".join(parts) + " ."
     if raid:
         # The documented RAID recipe names `raid` as the filesystem field:
