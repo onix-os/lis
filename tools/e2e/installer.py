@@ -309,8 +309,12 @@ def install_from_live_shell(distro, target_disk, seed_disk, iso, ram, work,
         # The console echoes the command back, so the marker must not be a literal
         # in the command itself — print the exit status instead of the verdict.
         "grep -q /run/lis/seed /proc/mounts; echo \"lis_seed=$?\"")
+    # Wait for the marker, not for a prompt: the console echoes the command back
+    # and that echo ends in a prompt, so matching `prompts` here returns before
+    # the command has produced any output.
+    status = child.expect([r"lis_seed=0", r"lis_seed=[1-9]"], timeout=120)
     child.expect(prompts, timeout=120)
-    if "lis_seed=0" not in child.before:
+    if status != 0:
         raise InstallFailed("could not mount the LIS seed volume in the live environment")
     if bootstrap:
         # Some live images ship no python at all, so the applier cannot run
