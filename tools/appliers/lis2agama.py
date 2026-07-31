@@ -346,6 +346,7 @@ def crypt_placeholder(cid: str) -> str:
 
 
 def render_autoyast(doc: dict) -> str:
+    claimed_mounts: set = set()
     system = doc.get("system", {}) or {}
     storage = doc.get("storage", {}) or {}
     installer = doc.get("installer", {}) or {}
@@ -422,6 +423,14 @@ def render_autoyast(doc: dict) -> str:
                 filesystem.set(f"{{{CONFIG_NS}}}type", "symbol")
                 filesystem.text = FS_MAP.get(fs, fs)
             mountpoint = role_mountpoint(part)
+            # role_mountpoint() synthesises /boot from role: "boot", so a mirrored
+            # boot partition that declares no mountpoint would claim it too and
+            # AutoYaST stops on a duplicate fstab entry. The document declared one;
+            # the first claimant keeps it.
+            if mountpoint and mountpoint in claimed_mounts:
+                mountpoint = None
+            elif mountpoint:
+                claimed_mounts.add(mountpoint)
             if fs == "swap":
                 ET.SubElement(node, "mount").text = "swap"
             elif mountpoint:

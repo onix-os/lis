@@ -239,10 +239,18 @@ def render_storage(doc: dict, lines: list[str]) -> None:
                        "for subvolumes on a logvol)")
             lv_mount = mountpoint
             if fs == "btrfs":
-                # The btrfs subvolume claims the mountpoint; if the logvol claims
-                # it too, anaconda tries to remove the LV to hand / over and
-                # blivet refuses: "Cannot remove non-leaf device".
-                lv_mount = "none"
+                # A btrfs LV cannot be expressed: giving the logvol the mountpoint
+                # makes anaconda try to remove the LV to hand it to the subvolume
+                # ("Cannot remove non-leaf device 'vg0-root'"), and "none" is not
+                # accepted either — the btrfs handler normalises that sentinel
+                # (custom_partitioning.py:1169) but the logvol handler does not,
+                # so _check_mount_point raises 'The mount point "none" is not
+                # valid. It must start with a /.'
+                refuse(f"lvm volume '{vol['name']}': Anaconda cannot put btrfs on "
+                       "a logical volume — the volume must own the mountpoint, but "
+                       "then the subvolume cannot take it, and an unmounted logvol "
+                       "is rejected. Use ext4/xfs on the logical volume, or put "
+                       "btrfs on a plain partition")
             lines.append(f"logvol {lv_mount} --vgname={group['name']} "
                          f"--name={vol['name']} --fstype={FS_MAP.get(fs, fs)} {size}")
             if subs := vol.get("subvolumes"):
