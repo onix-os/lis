@@ -533,6 +533,16 @@ def render_autoyast(doc: dict) -> str:
                        if q.get("id") == array["name"]), {})
         opts = ET.SubElement(node, "raid_options")
         ET.SubElement(opts, "raid_type").text = f"raid{array['level']}"
+        # If a volume group consumes the array, the array *is* its physical
+        # volume — without lvm_group the group has no PV and AutoYaST stops at
+        # "Partitioning issues" naming the group.
+        owner = next((g for g in (storage.get("lvm", []) or [])
+                      if array["name"] in (g.get("devices") or [])), None)
+        if owner:
+            ET.SubElement(node, "lvm_group").text = owner["name"]
+            pid = ET.SubElement(node, "partition_id")
+            pid.set(f"{{{CONFIG_NS}}}type", "integer")
+            pid.text = "142"
         if mount := role_mountpoint(target):
             ET.SubElement(node, "mount").text = mount
         if fs := role_fs(target):
