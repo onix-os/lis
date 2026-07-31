@@ -237,9 +237,13 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
     # With "lvm" the pvscheme is empty, the loop never runs, and the fallback
     # at :111 assigns the crypt device to the default VG. partman-crypto still
     # opens the container — init.d/crypto acts on method{ crypto } either way.
+    # Encryption selects "crypto" even with LVM: that is the only supported
+    # encrypted mode, and partman-auto-crypto places the LUKS container with the
+    # volume group inside it. With plain "lvm" the PV is built unencrypted
+    # (autopartition-lvm creates it as a bare ext3 partition).
     method = ("raid" if raid_arrays else
-              "lvm" if lvm_groups else
-              "crypto" if encrypted_vg else "regular")
+              "crypto" if encrypted_vg else
+              "lvm" if lvm_groups else "regular")
     lines.append(f"d-i partman-auto/method string {method}")
     if raid_arrays:
         # partman-auto applies a single expert_recipe to every disk in
