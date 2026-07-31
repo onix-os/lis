@@ -300,6 +300,9 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
     if lvm_groups:
         lines.append("d-i partman-auto-lvm/new_vg_name string " + lvm_groups[0]["name"])
         lines.append("d-i partman-lvm/device_remove_lvm boolean true")
+        # Without guided_size partman-auto-lvm asks how much of the group to use
+        # and waits — the canonical encrypted-LVM preseed sets it to max.
+        lines.append("d-i partman-auto-lvm/guided_size string max")
         lines.append("d-i partman-lvm/confirm boolean true")
         lines.append("d-i partman-lvm/confirm_nooverwrite boolean true")
     if encrypted_vg:
