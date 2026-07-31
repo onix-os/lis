@@ -966,17 +966,20 @@ def chroot_intents(doc: dict, family: str) -> list[str]:
 def seed_mount_commands() -> list[str]:
     """Shell that makes the LIS seed readable inside an installer environment.
 
-    Deliberately avoids `blkid -L`: that is a util-linux extension, and busybox
-    blkid (debian-installer, Alpine) ignores it and prints every device, so the
-    lookup silently yielded nothing and the seed was never mounted — which shows
-    up much later as an empty LUKS passphrase. Reads /proc/partitions rather than
-    globbing /dev, because a glob matching nothing aborts the loop under zsh.
+    Does not use blkid: `-L` is a util-linux extension that busybox ignores, and
+    in debian-installer the early_command runs before the udeb providing blkid is
+    even unpacked. Either way the lookup yields nothing and the seed never
+    mounts, surfacing much later as an empty passphrase. Mounting each candidate
+    read-only and checking for the seed's own layout needs no external tool.
+    Reads /proc/partitions rather than globbing /dev, because a glob that matches
+    nothing aborts the loop under zsh.
     """
     return [f"mkdir -p {SEED_MOUNT}",
             'while read -r _m _n _b name; do '
             'test -b "/dev/$name" || continue; '
-            'blkid "/dev/$name" 2>/dev/null | grep -q \'LABEL="LIS\' && '
-            f'mount -o ro "/dev/$name" {SEED_MOUNT} 2>/dev/null && break; '
+            f'mount -o ro "/dev/$name" {SEED_MOUNT} 2>/dev/null || continue; '
+            f'test -e {SEED_MOUNT}/lis.json && break; '
+            f'umount {SEED_MOUNT} 2>/dev/null || true; '
             'done < /proc/partitions']
 
 
