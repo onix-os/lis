@@ -365,13 +365,26 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
             late += early
             late_last += final
 
+    crypt_ids = {c["id"] for c in (storage.get("encryption", []) or [])}
+    if encrypted_vg and len(lvm_groups) > 1:
+        refuse("storage.lvm: partman-auto-lvm names a single volume group "
+               "(partman-auto-lvm/new_vg_name), and on the crypto path pvscheme is "
+               "empty (auto-lvm.sh:245) so no second named group can ever receive a "
+               "physical volume — declare a single volume group")
     for group in lvm_groups:
+        # A group fed through a LUKS container must NOT be named with in_vg{ }: the
+        # VG map is built before the container exists, so the synthesised PV
+        # /dev/mapper/<part>_crypt lands in @DEFAULT@ (auto-lvm.sh:111-115) and a
+        # named map file stays empty -> bail_out no_pv_in_vg (:118-123).
+        # new_vg_name renames @DEFAULT@ to the declared name anyway (:335-338).
+        fed_by_crypto = encrypted_vg and any(d in crypt_ids
+                                             for d in group.get("devices", []))
         for vol in group.get("volumes", []):
             entries.append(recipe_entry(vol["name"], vol.get("size", "rest"), vol.get("fs"),
                                         vol.get("mountpoint"),
                                         f"lvm '{group['name']}' volume '{vol['name']}'",
                                         lvmok=True, lv=vol["name"],
-                                        vg_of_lv=group["name"]))
+                                        vg_of_lv=None if fed_by_crypto else group["name"]))
             if subs := vol.get("subvolumes"):
                 early, final = btrfs_subvolume_commands(
                     vol.get("mountpoint"), vol.get("fs"), subs,

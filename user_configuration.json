@@ -1,0 +1,65 @@
+{
+  "archinstall_language": "English",
+  "hostname": "lis-test-host",
+  "timezone": "UTC",
+  "ntp": true,
+  "locale_config": {
+    "kb_layout": "us",
+    "sys_enc": "UTF-8",
+    "sys_lang": "en_US.UTF-8"
+  },
+  "bootloader_config": {
+    "bootloader": "Grub",
+    "uki": false,
+    "removable": false
+  },
+  "kernels": [
+    "linux"
+  ],
+  "packages": [
+    "curl",
+    "git",
+    "bash"
+  ],
+  "services": [],
+  "swap": true,
+  "disk_config": {
+    "config_type": "pre_mounted_config",
+    "mountpoint": "/mnt/lis"
+  },
+  "network_config": {
+    "type": "nm"
+  },
+  "custom_commands": [
+    "echo PRE_INSTALL_HOOK_PASSED > /tmp/lis-pre-install.marker",
+    "usermod -c \"Test Fake User\" fakeuser",
+    "chsh -s /bin/bash fakeuser",
+    "su - fakeuser -c \"echo USER_POST_INSTALL_HOOK_PASSED > /home/fakeuser/user_hook.txt\"",
+    "install -d -m755 /etc/sudoers.d",
+    "printf '%s ALL=(ALL) NOPASSWD: ALL\\n' fakeuser > /etc/sudoers.d/99-lis-fakeuser",
+    "chmod 0440 /etc/sudoers.d/99-lis-fakeuser",
+    "usermod -u 1234 fakeuser 2>/dev/null || true",
+    "chown -R 1234 /home/fakeuser 2>/dev/null || true",
+    "{ echo '0.0 0 0.0'; echo 0; echo UTC; } > /etc/adjtime",
+    "grep -q '^LC_TIME=' /etc/locale.conf 2>/dev/null && sed -i 's/^LC_TIME=.*/LC_TIME=en_US.UTF-8/' /etc/locale.conf || echo LC_TIME=en_US.UTF-8 >> /etc/locale.conf",
+    "if grep -q '^GRUB_TIMEOUT=' /etc/default/grub 2>/dev/null; then sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=5/' /etc/default/grub; else echo 'GRUB_TIMEOUT=5' >> /etc/default/grub; fi",
+    "grub-mkconfig -o /boot/grub/grub.cfg",
+    "install -d -m755 /var/lib/lis && echo POST_INSTALL_HOOK_PASSED > /var/lib/lis/post_install.txt",
+    "if [ -e /etc/NIXOS ]; then :; elif command -v systemctl >/dev/null 2>&1; then install -d /etc/systemd/system/serial-getty@ttyS0.service.d; printf '[Service]\\nExecStart=\\nExecStart=-/sbin/agetty --autologin root --noclear %%I 115200 linux\\n' > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf; systemctl enable serial-getty@ttyS0.service; elif [ -f /etc/inittab ]; then sed -i '/ttyS0/d' /etc/inittab; echo 'ttyS0::respawn:/sbin/getty -n -l /bin/ash -L ttyS0 115200 vt100' >> /etc/inittab; fi",
+    "install -d /etc",
+    "echo RklMRVNfU0VDVElPTl9QQVNTRUQK | base64 -d > /etc/lis-test-file",
+    "chmod 0644 /etc/lis-test-file",
+    "chown root:root /etc/lis-test-file",
+    "install -d -m755 /var/lib/lis /usr/local/bin",
+    "echo IyEvYmluL3NoCmluc3RhbGwgLWQgLW03NTUgL3Zhci9saWIvbGlzICYmIGVjaG8gRklSU1RCT09UX0hPT0tfUEFTU0VEID4gL3Zhci9saWIvbGlzL2ZpcnN0Ym9vdC50eHQKc3UgLSBmYWtldXNlciAtYyAiZWNobyBVU0VSX0ZJUlNUQk9PVF9IT09LX1BBU1NFRCA+IC9ob21lL2Zha2V1c2VyL3VzZXJfZmlyc3Rib290LnR4dCIKdG91Y2ggL3Zhci9saWIvbGlzLy5maXJzdGJvb3QtZG9uZQo= | base64 -d > /usr/local/bin/lis-firstboot",
+    "chmod 755 /usr/local/bin/lis-firstboot",
+    "echo W1VuaXRdCkRlc2NyaXB0aW9uPUxJUyBmaXJzdCBib290CkFmdGVyPW11bHRpLXVzZXIudGFyZ2V0CkNvbmRpdGlvblBhdGhFeGlzdHM9IS92YXIvbGliL2xpcy8uZmlyc3Rib290LWRvbmUKCltTZXJ2aWNlXQpUeXBlPW9uZXNob3QKRXhlY1N0YXJ0PS91c3IvbG9jYWwvYmluL2xpcy1maXJzdGJvb3QKCltJbnN0YWxsXQpXYW50ZWRCeT1tdWx0aS11c2VyLnRhcmdldAo= | base64 -d > /etc/systemd/system/lis-firstboot.service",
+    "systemctl enable lis-firstboot.service",
+    "sed -i \"s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\\\"console=tty0 console=ttyS0,115200n8\\\"|\" /etc/default/grub",
+    "grub-mkconfig -o /boot/grub/grub.cfg",
+    "install -d -m755 /var/lib/lis",
+    "echo eyJsaXMiOiIwLjEuMCIsIm1ldGEiOnsibmFtZSI6InJhaWQtdGVzdC1zeXN0ZW0iLCJkZXNjcmlwdGlvbiI6IlJBSUQxIGFjcm9zcyB0d28gZGlza3MgZmVlZGluZyBhIHZvbHVtZSBncm91cDsgL2Jvb3QgbGl2ZXMgb24gdGhlIHJvb3Qgdm9sdW1lIGJlY2F1c2UgcGFydG1hbiBhcHBsaWVzIG9uZSByZWNpcGUgdG8gZXZlcnkgZGlzay4iLCJnZW5lcmF0b3IiOiJsaXMtdGVzdC1zdWl0ZSAwLjEuMCJ9LCJ0YXJnZXQiOnsiYXJjaCI6Ing4Nl82NCIsImZpcm13YXJlIjoiYmlvcyIsImRpc2tzIjpbeyJpZCI6Im1haW4iLCJtYXRjaCI6eyJwYXRoIjoiL2Rldi92ZGEifX0seyJpZCI6InNlY29uZCIsIm1hdGNoIjp7InBhdGgiOiIvZGV2L3ZkYiJ9fV19LCJzdG9yYWdlIjp7IndpcGUiOnRydWUsInBhcnRpdGlvbnMiOlt7ImRpc2siOiJtYWluIiwiaWQiOiJib290Iiwicm9sZSI6ImJvb3QiLCJzaXplIjoiMUdpQiIsImZzIjoiZXh0NCIsIm1vdW50cG9pbnQiOiIvYm9vdCJ9LHsiZGlzayI6InNlY29uZCIsImlkIjoiYm9vdDIiLCJyb2xlIjoiYm9vdCIsInNpemUiOiIxR2lCIiwiZnMiOiJleHQ0In0seyJkaXNrIjoibWFpbiIsImlkIjoicHJhaWQxIiwic2l6ZSI6InJlc3QifSx7ImRpc2siOiJzZWNvbmQiLCJpZCI6InByYWlkMiIsInNpemUiOiJyZXN0In1dLCJyYWlkIjpbeyJuYW1lIjoibWQwIiwibGV2ZWwiOjEsImRldmljZXMiOlsicHJhaWQxIiwicHJhaWQyIl19XSwibHZtIjpbeyJuYW1lIjoidmcwIiwiZGV2aWNlcyI6WyJtZDAiXSwidm9sdW1lcyI6W3sibmFtZSI6InN3YXAiLCJzaXplIjoiMkdpQiIsImZzIjoic3dhcCJ9LHsibmFtZSI6InJvb3QiLCJzaXplIjoicmVzdCIsImZzIjoiZXh0NCIsIm1vdW50cG9pbnQiOiIvIn1dfV19LCJib290Ijp7ImxvYWRlciI6ImdydWIiLCJ0aW1lb3V0Ijo1LCJrZXJuZWwiOnsicGFyYW1zIjpbImNvbnNvbGU9dHR5MCIsImNvbnNvbGU9dHR5UzAsMTE1MjAwbjgiXX19LCJzeXN0ZW0iOnsiaG9zdG5hbWUiOiJsaXMtdGVzdC1ob3N0IiwidGltZXpvbmUiOiJVVEMiLCJsb2NhbGUiOiJlbl9VUy5VVEYtOCIsImtleW1hcCI6eyJjb25zb2xlIjoidXMiLCJsYXlvdXQiOiJ1cyJ9LCJod2Nsb2NrIjoidXRjIiwibG9jYWxlX292ZXJyaWRlcyI6eyJMQ19USU1FIjoiZW5fVVMuVVRGLTgifX0sInVzZXJzIjpbeyJuYW1lIjoiZmFrZXVzZXIiLCJjb21tZW50IjoiVGVzdCBGYWtlIFVzZXIiLCJhZG1pbiI6dHJ1ZSwic2hlbGwiOiIvYmluL2Jhc2giLCJncm91cHMiOlsidmlkZW8iXSwicGFzc3dvcmQiOnsiaGFzaCI6IiQ2JGxpc2UyZXNhbHQkRlouc1dMWk9wS1djTzBPdjVYaUdEenFWbTBkeEhCMy5IMW1GTGcuYW9GVi9aZ1ZyeFNxL2JjMXhrS2o0UGlUSHhmZ2k5TXhoSC9rTC4zMkx1OTRDVDEifSwic2NyaXB0cyI6eyJwb3N0X2luc3RhbGwiOlt7ImNvbnRlbnQiOiJlY2hvIFVTRVJfUE9TVF9JTlNUQUxMX0hPT0tfUEFTU0VEID4gL2hvbWUvZmFrZXVzZXIvdXNlcl9ob29rLnR4dCIsImNocm9vdCI6dHJ1ZX1dLCJmaXJzdGJvb3QiOlt7ImNvbnRlbnQiOiJlY2hvIFVTRVJfRklSU1RCT09UX0hPT0tfUEFTU0VEID4gL2hvbWUvZmFrZXVzZXIvdXNlcl9maXJzdGJvb3QudHh0In1dfSwic3VkbyI6Im5vcGFzc3dkIiwidWlkIjoxMjM0fV0sInNvZnR3YXJlIjp7InJvbGUiOiJtaW5pbWFsIiwicGFja2FnZXMiOlsiY3VybCIsImdpdCJdfSwic2NyaXB0cyI6eyJwcmVfaW5zdGFsbCI6W3siY29udGVudCI6ImVjaG8gUFJFX0lOU1RBTExfSE9PS19QQVNTRUQgPiAvdG1wL2xpcy1wcmUtaW5zdGFsbC5tYXJrZXIifV0sInBvc3RfaW5zdGFsbCI6W3siY29udGVudCI6Imluc3RhbGwgLWQgLW03NTUgL3Zhci9saWIvbGlzICYmIGVjaG8gUE9TVF9JTlNUQUxMX0hPT0tfUEFTU0VEID4gL3Zhci9saWIvbGlzL3Bvc3RfaW5zdGFsbC50eHQiLCJjaHJvb3QiOnRydWV9LHsiY29udGVudCI6ImlmIFsgLWUgL2V0Yy9OSVhPUyBdOyB0aGVuIDo7IGVsaWYgY29tbWFuZCAtdiBzeXN0ZW1jdGwgPi9kZXYvbnVsbCAyPiYxOyB0aGVuIGluc3RhbGwgLWQgL2V0Yy9zeXN0ZW1kL3N5c3RlbS9zZXJpYWwtZ2V0dHlAdHR5UzAuc2VydmljZS5kOyBwcmludGYgJ1tTZXJ2aWNlXVxcbkV4ZWNTdGFydD1cXG5FeGVjU3RhcnQ9LS9zYmluL2FnZXR0eSAtLWF1dG9sb2dpbiByb290IC0tbm9jbGVhciAlJUkgMTE1MjAwIGxpbnV4XFxuJyA+IC9ldGMvc3lzdGVtZC9zeXN0ZW0vc2VyaWFsLWdldHR5QHR0eVMwLnNlcnZpY2UuZC9hdXRvbG9naW4uY29uZjsgc3lzdGVtY3RsIGVuYWJsZSBzZXJpYWwtZ2V0dHlAdHR5UzAuc2VydmljZTsgZWxpZiBbIC1mIC9ldGMvaW5pdHRhYiBdOyB0aGVuIHNlZCAtaSAnL3R0eVMwL2QnIC9ldGMvaW5pdHRhYjsgZWNobyAndHR5UzA6OnJlc3Bhd246L3NiaW4vZ2V0dHkgLW4gLWwgL2Jpbi9hc2ggLUwgdHR5UzAgMTE1MjAwIHZ0MTAwJyA+PiAvZXRjL2luaXR0YWI7IGZpIiwiY2hyb290Ijp0cnVlfV0sImZpcnN0Ym9vdCI6W3siY29udGVudCI6Imluc3RhbGwgLWQgLW03NTUgL3Zhci9saWIvbGlzICYmIGVjaG8gRklSU1RCT09UX0hPT0tfUEFTU0VEID4gL3Zhci9saWIvbGlzL2ZpcnN0Ym9vdC50eHQifV19LCJmaWxlcyI6W3sicGF0aCI6Ii9ldGMvbGlzLXRlc3QtZmlsZSIsImNvbnRlbnQiOiJSa2xNUlZOZlUwVkRWRWxQVGw5UVFWTlRSVVFLIiwiZW5jb2RpbmciOiJiYXNlNjQiLCJtb2RlIjoiMDY0NCIsIm93bmVyIjoicm9vdDpyb290In1dfQ== | base64 -d > /var/lib/lis/system.lis.json",
+    "chmod 600 /var/lib/lis/system.lis.json",
+    "passwd -l root"
+  ]
+}
