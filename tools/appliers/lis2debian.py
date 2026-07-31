@@ -693,6 +693,13 @@ def render_preseed(doc: dict) -> str:
             '| debconf-set-selections',
             'echo "partman-crypto partman-crypto/passphrase-again password $pass" '
             '| debconf-set-selections',
+            # debconf-set-selections sets the value but leaves the question
+            # unseen, so d-i asks it anyway and the install stops on
+            # "You need to choose a passphrase to encrypt ...". A preseed *file*
+            # marks questions seen; a runtime set must do it explicitly.
+            'echo "fset partman-crypto/passphrase seen true" | debconf-communicate',
+            'echo "fset partman-crypto/passphrase-again seen true" '
+            '| debconf-communicate',
         ]
         early.insert(0, "; ".join(inject))
     if BARE_CRYPT:
