@@ -520,6 +520,11 @@ def render_autoyast(doc: dict) -> str:
     for array in storage.get("raid", []) or []:
         drive = ET.SubElement(partitioning, "drive")
         ET.SubElement(drive, "device").text = f"/dev/md/{array['name']}"
+        # Without the type symbol AutoYaST treats the drive as a
+        # physical disk and aborts with "Disk '…' was not found".
+        dtype = ET.SubElement(drive, "type")
+        dtype.set(f"{{{CONFIG_NS}}}type", "symbol")
+        dtype.text = "CT_MD"
         ET.SubElement(drive, "use").text = "all"
         plist = ET.SubElement(drive, "partitions")
         plist.set(f"{{{CONFIG_NS}}}type", "list")
@@ -538,6 +543,11 @@ def render_autoyast(doc: dict) -> str:
     for group in storage.get("lvm", []) or []:
         drive = ET.SubElement(partitioning, "drive")
         ET.SubElement(drive, "device").text = f"/dev/{group['name']}"
+        # Without the type symbol AutoYaST treats the drive as a
+        # physical disk and aborts with "Disk '…' was not found".
+        dtype = ET.SubElement(drive, "type")
+        dtype.set(f"{{{CONFIG_NS}}}type", "symbol")
+        dtype.text = "CT_LVM"
         boolean(drive, "is_lvm_vg", True)
         plist = ET.SubElement(drive, "partitions")
         plist.set(f"{{{CONFIG_NS}}}type", "list")
