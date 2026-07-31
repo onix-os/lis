@@ -326,6 +326,11 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
                                         f"partition '{handle}'", raid=True))
             continue
         owner = consumed_by(handle, lvm_groups, crypt_over)
+        if owner and owner[1] and encrypted_vg:
+            # partman-auto-crypto builds the container itself from the space left
+            # over: the canonical encrypted-LVM recipe carries only /boot and the
+            # $lvmok{ } volumes. An explicit crypto PV entry competes with it.
+            continue
         if owner:
             group, is_crypto = owner
             entries.append(recipe_entry(handle, part.get("size", "rest"), None, None,
@@ -843,7 +848,12 @@ def main() -> int:
     # Declared encryption that produced no crypto directive would install an
     # unencrypted root and report success — the one failure mode the spec's
     # no-silent-drift rule exists to prevent, so verify the output, not the intent.
-    if doc.get("storage", {}).get("encryption") and "method{ crypto }" not in cfg:
+    # Encryption is honored either by a crypto entry in the recipe or by
+    # partman-auto/method=crypto, which builds the container itself. Neither
+    # present means the disk would come out unencrypted.
+    if (doc.get("storage", {}).get("encryption")
+            and "method{ crypto }" not in cfg
+            and "partman-auto/method string crypto" not in cfg):
         refuse("storage.encryption is declared but the generated recipe contains "
                "no method{ crypto } — applying it would install an unencrypted "
                "system")
