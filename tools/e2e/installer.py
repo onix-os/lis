@@ -163,6 +163,19 @@ def wait_for_finish(child: pexpect.spawn, distro: str, markers: list[str],
         # Subiquity's "An error occurred" says nothing on its own; the reason is in
         # its own logs inside the live system, which vanish with the VM. Pull the
         # tail onto the serial console before giving up.
+        if distro == "fedora":
+            # anaconda keeps the storage reason in its own log tabs, which never
+            # reach the serial console — "Failed to save storage configuration"
+            # on its own names nothing.
+            print(f"\n  [{TICK}] dumping anaconda storage logs to the serial log")
+            try:
+                child.sendline("")
+                for log in ("/tmp/storage.log", "/tmp/anaconda.log"):
+                    child.sendline(f"grep -iE 'error|cannot|fail|invalid|traceback' "
+                                   f"{log} 2>/dev/null | tail -n 30")
+                    child.expect([r"[#$] $", pexpect.TIMEOUT], timeout=60)
+            except Exception:
+                pass
         if distro == "suse":
             # libstorage-ng reports the real commit error in y2log; the console
             # only shows a 10s dialog that falls through to Abort, so the "what"
