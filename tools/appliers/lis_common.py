@@ -975,6 +975,12 @@ def seed_mount_commands() -> list[str]:
     nothing aborts the loop under zsh.
     """
     return [f"mkdir -p {SEED_MOUNT}",
+            # The seed is FAT32 and preseed/early_command runs before the vfat
+            # driver is loaded, so every mount attempt fails silently no matter
+            # how the device is located. anna-install pulls the udeb when the
+            # module is not already there.
+            "modprobe vfat 2>/dev/null || "
+            "anna-install fat-modules 2>/dev/null || true",
             'while read -r _m _n _b name; do '
             'test -b "/dev/$name" || continue; '
             f'mount -o ro "/dev/$name" {SEED_MOUNT} 2>/dev/null || continue; '
