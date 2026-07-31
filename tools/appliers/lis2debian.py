@@ -227,8 +227,10 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
     # encryption container feeds a volume group selects crypto rather than lvm —
     # with plain "lvm" partman-crypto never runs and the install comes out
     # unencrypted while reporting success.
-    encrypted_vg = any(c["id"] in consumed
-                       for c in (storage.get("encryption", []) or []))
+    # Any encryption at all selects "crypto": with "regular", partman-auto-crypto
+    # never runs and method{ crypto } in the recipe is ignored — the container
+    # comes out as a plain ext4 partition (seen in partman/choose_partition).
+    encrypted_vg = bool(storage.get("encryption"))
     # Not "crypto": that makes partman-auto-lvm put our method{ crypto } line
     # into pvscheme (auto-lvm.sh:245), where the VG map compares the raw disk
     # against /dev/mapper/<part>_crypt and bails out no_such_pv (:97,:106).
@@ -236,7 +238,8 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
     # at :111 assigns the crypt device to the default VG. partman-crypto still
     # opens the container — init.d/crypto acts on method{ crypto } either way.
     method = ("raid" if raid_arrays else
-              "lvm" if lvm_groups else "regular")
+              "lvm" if lvm_groups else
+              "crypto" if encrypted_vg else "regular")
     lines.append(f"d-i partman-auto/method string {method}")
     if raid_arrays:
         # partman-auto applies a single expert_recipe to every disk in
