@@ -237,7 +237,13 @@ def render_storage(doc: dict, lines: list[str]) -> None:
                        "btrfs on a logical volume — use ext4/xfs there, or put "
                        "btrfs on a plain partition (see also Red Hat bug 1470524 "
                        "for subvolumes on a logvol)")
-            lines.append(f"logvol {mountpoint} --vgname={group['name']} "
+            lv_mount = mountpoint
+            if fs == "btrfs":
+                # The btrfs subvolume claims the mountpoint; if the logvol claims
+                # it too, anaconda tries to remove the LV to hand / over and
+                # blivet refuses: "Cannot remove non-leaf device".
+                lv_mount = "none"
+            lines.append(f"logvol {lv_mount} --vgname={group['name']} "
                          f"--name={vol['name']} --fstype={FS_MAP.get(fs, fs)} {size}")
             if subs := vol.get("subvolumes"):
                 # Anaconda itself cannot carve subvolumes off a logical volume
