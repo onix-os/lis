@@ -698,9 +698,16 @@ def render_preseed(doc: dict) -> str:
             # unseen, so d-i asks it anyway and the install stops on
             # "You need to choose a passphrase to encrypt ...". A preseed *file*
             # marks questions seen; a runtime set must do it explicitly.
-            'echo "fset partman-crypto/passphrase seen true" | debconf-communicate',
-            'echo "fset partman-crypto/passphrase-again seen true" '
-            '| debconf-communicate',
+            # debconf-communicate does not exist in the installer — d-i scripts
+            # talk to cdebconf by sourcing confmodule. Under preseed/early_command
+            # the missing binary failed silently, leaving the question unseen; under
+            # partman/early_command the non-zero exit raises "Failed to run
+            # preseeded command" and blocks. db_fset is what marks it seen.
+            '. /usr/share/debconf/confmodule; '
+            'db_set partman-crypto/passphrase "$pass"; '
+            'db_fset partman-crypto/passphrase seen true; '
+            'db_set partman-crypto/passphrase-again "$pass"; '
+            'db_fset partman-crypto/passphrase-again seen true',
         ]
         # NOT preseed/early_command: that runs before anna fetches partman-crypto
         # (observed 5s apart in the installer syslog), so the question does not
