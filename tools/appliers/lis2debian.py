@@ -231,17 +231,11 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
     # never runs and method{ crypto } in the recipe is ignored — the container
     # comes out as a plain ext4 partition (seen in partman/choose_partition).
     encrypted_vg = bool(storage.get("encryption"))
-    # Re-verified with a working seed mount and a real passphrase (the earlier
-    # runs were fed an empty key, so their evidence was worthless): with
-    # method=crypto and no $lvmok volumes, partman-auto-crypto has nothing to
-    # place. partman registers /dev/vda and then creates no partitions at all,
-    # and the installer sits at the menu until it times out. Encryption is only
-    # preseedable with a volume group inside the container.
-    if storage.get("encryption") and not (storage.get("lvm") or []):
-        refuse("storage.encryption: a Debian preseed can only automate encryption "
-               "with LVM inside the container — partman-auto-crypto places the "
-               "volumes, and with none declared it partitions nothing. Have a "
-               "storage.lvm group consume the container")
+    # Bare LUKS (no LVM inside the container) is emitted again: every earlier
+    # observation of it failing was made while the passphrase mechanism was
+    # broken — debconf-communicate does not exist in d-i, so the `seen` flag
+    # was never set and partman-crypto had no key. That is fixed, so this
+    # shape needs re-testing rather than refusing on stale evidence.
     # Not "crypto": that makes partman-auto-lvm put our method{ crypto } line
     # into pvscheme (auto-lvm.sh:245), where the VG map compares the raw disk
     # against /dev/mapper/<part>_crypt and bails out no_such_pv (:97,:106).
