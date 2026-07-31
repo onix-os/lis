@@ -539,10 +539,10 @@ def render_autoyast(doc: dict) -> str:
         owner = next((g for g in (storage.get("lvm", []) or [])
                       if array["name"] in (g.get("devices") or [])), None)
         if owner:
+            # No partition_id here: 0x8E is a partition-table type byte and the
+            # array is used whole, not partitioned. Setting it segfaults YaST in
+            # "Preparing disks".
             ET.SubElement(node, "lvm_group").text = owner["name"]
-            pid = ET.SubElement(node, "partition_id")
-            pid.set(f"{{{CONFIG_NS}}}type", "integer")
-            pid.text = "142"
         if mount := role_mountpoint(target):
             ET.SubElement(node, "mount").text = mount
         if fs := role_fs(target):
