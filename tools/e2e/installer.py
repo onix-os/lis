@@ -251,10 +251,10 @@ def install_debian(target_disk, seed_disk, iso, ram, recipe, work):
     # /var/log/partman only exists when partman debug is on; d-i's actual log is
     # /var/log/syslog, which carries partman's messages either way.
     tap = ("(tail -F /var/log/syslog /var/log/partman 2>/dev/null "
-           "> /dev/ttyS0 2>&1 &); "
+           "> /dev/ttyS0 2>&1 </dev/null &); "
            # syslog narrates what partman did; the device tree says what
            # actually exists, which a stalled run never otherwise reveals.
-           '(while :; do sleep 60; echo LIS_STATE_BEGIN > /dev/ttyS0; for d in /var/lib/partman/devices/*/*; do test -d "$d" || continue; echo "$d m=$(cat $d/method 2>/dev/null) f=$(cat $d/filesystem 2>/dev/null) mp=$(cat $d/mountpoint 2>/dev/null) cr=$(cat $d/crypt_realdev 2>/dev/null)" > /dev/ttyS0; done; ls /var/lib/partman/auto_lvm_map/ 2>/dev/null > /dev/ttyS0; echo LIS_STATE_END > /dev/ttyS0; done &); ')
+           '(while :; do sleep 60; echo LIS_STATE_BEGIN > /dev/ttyS0; for d in /var/lib/partman/devices/*/*; do test -d "$d" || continue; echo "$d m=$(cat $d/method 2>/dev/null) f=$(cat $d/filesystem 2>/dev/null) mp=$(cat $d/mountpoint 2>/dev/null) cr=$(cat $d/crypt_realdev 2>/dev/null)" > /dev/ttyS0; done; ls /var/lib/partman/auto_lvm_map/ 2>/dev/null > /dev/ttyS0; echo LIS_STATE_END > /dev/ttyS0; done &) </dev/null >/dev/null 2>&1; ')
     if "preseed/early_command string " in text:
         # Only one early_command may exist — a second silently replaces the
         # first, dropping the seed mount the LUKS key depends on.
