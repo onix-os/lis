@@ -53,6 +53,10 @@ def size_mib(size: str, what: str) -> str:
 # Containers whose `part` line must be written by %pre, as (id, key path).
 DEFERRED_CRYPT: list[tuple[str, str]] = []
 
+# btrfs logical volumes whose subvolumes %post must create:
+# (device, mountpoint, subvolumes).
+LV_SUBVOLS: list = []
+
 
 def render_storage(doc: dict, lines: list[str]) -> None:
     """LIS storage → clearpart/part/raid/volgroup/logvol directives."""
@@ -215,11 +219,13 @@ def render_storage(doc: dict, lines: list[str]) -> None:
             # came from the subvolume handling below, not from the filesystem.
             lines.append(f"logvol {mountpoint} --vgname={group['name']} "
                          f"--name={vol['name']} --fstype={FS_MAP.get(fs, fs)} {size}")
-            if vol.get("subvolumes"):
-                refuse(f"lvm volume '{vol['name']}': Anaconda fails to create "
-                       "btrfs subvolumes on a logical volume (Red Hat bug "
-                       "1470524) — put the subvolumes on a plain btrfs "
-                       "partition, or use ext4/xfs on the logical volume")
+            if subs := vol.get("subvolumes"):
+                # Anaconda itself cannot carve subvolumes off a logical volume
+                # (Red Hat bug 1470524), so they are built after the install from
+                # a %post --nochroot block, where /mnt/sysimage and the raw
+                # device are both reachable.
+                LV_SUBVOLS.append((f"/dev/{group['name']}/{vol['name']}",
+                                   mountpoint, subs))
 
     if (storage.get("swap", {}) or {}).get("zram"):
         warn("storage.swap.zram honored by installing zram-generator-defaults")
@@ -434,6 +440,38 @@ def render_kickstart(doc: dict) -> str:
     late.append("chmod 600 /var/lib/lis/system.lis.json")
 
     lines += ["", "%post --erroronfail", *late, "%end"]
+
+    for device, mountpoint, subs in LV_SUBVOLS:
+        # Anaconda installed straight onto the volume (subvolid 5). Snapshot that
+        # tree into the subvolume the document names for this mountpoint, make it
+        # the default so a plain mount lands there, create the rest, and rewrite
+        # fstab. Runs --nochroot: /mnt/sysimage and the device are both needed.
+        root_sub = next((v["name"] for v in subs
+                         if v.get("mountpoint") == mountpoint), None)
+        steps = ["set -eu",
+                 "top=/mnt/lis-btrfs-top",
+                 "mkdir -p $top",
+                 f"mount -o subvolid=5 {device} $top"]
+        if root_sub:
+            steps += [f"btrfs subvolume snapshot /mnt/sysimage $top/{root_sub}",
+                      f'id=$(btrfs subvolume list $top | '
+                      f'awk \'$NF=="{root_sub}" {{print $2}}\' | head -n1)',
+                      "btrfs subvolume set-default $id $top",
+                      # the plain-mount entry now resolves to the snapshot
+                      f"sed -i 's#\\(btrfs[[:space:]]\\+\\)#\\1subvol={root_sub},#' "
+                      "/mnt/sysimage/etc/fstab"]
+        for vol in subs:
+            name = vol["name"]
+            if name == root_sub:
+                continue
+            steps.append(f"btrfs subvolume create $top/{name}")
+            if mnt := vol.get("mountpoint"):
+                steps += [f"[ -d /mnt/sysimage{mnt} ] && "
+                          f"cp -a /mnt/sysimage{mnt}/. $top/{name}/ || true",
+                          f"echo '{device} {mnt} btrfs subvol={name},defaults 0 0' "
+                          ">> /mnt/sysimage/etc/fstab"]
+        steps.append("umount $top")
+        lines += ["", "%post --nochroot --erroronfail", *steps, "%end"]
 
     firstboot = [s["content"] for s in scripts.get("firstboot", []) if s.get("content")]
     for user in users:
