@@ -57,6 +57,9 @@ DEFERRED_CRYPT: list[tuple[str, str]] = []
 # (device, mountpoint, subvolumes).
 LV_SUBVOLS: list = []
 
+# btrfs logical volumes: (label, blivet member name, mountpoint, subvolumes).
+LV_BTRFS: list = []
+
 
 def render_storage(doc: dict, lines: list[str]) -> None:
     """LIS storage → clearpart/part/raid/volgroup/logvol directives."""
@@ -219,6 +222,17 @@ def render_storage(doc: dict, lines: list[str]) -> None:
             # VM, twice). The schema accepting the value is not the same as the
             # installer honoring it, so this is refused rather than emitted.
             if fs == "btrfs":
+                # A logvol alone never gets a filesystem: blivet's BTRFS format
+                # create() is a no-op (blivet/formats/fs.py:1067 — "creation is
+                # done in blockdev.btrfs.create_volume"), and _execute_logvol only
+                # attaches the format. The `btrfs` command is what actually makes
+                # the volume, and _execute_btrfs runs after _execute_logvol, so it
+                # can take the logical volume as its member by blivet name.
+                label = f"{group['name']}{vol['name']}"
+                member = f"{group['name']}-{vol['name']}"
+                LV_BTRFS.append((label, member, mountpoint,
+                                 vol.get("subvolumes") or []))
+            if False:
                 refuse(f"lvm volume '{vol['name']}': Anaconda stalls creating "
                        "btrfs on a logical volume — use ext4/xfs there, or put "
                        "btrfs on a plain partition (see also Red Hat bug 1470524 "
@@ -230,8 +244,17 @@ def render_storage(doc: dict, lines: list[str]) -> None:
                 # (Red Hat bug 1470524), so they are built after the install from
                 # a %post --nochroot block, where /mnt/sysimage and the raw
                 # device are both reachable.
-                LV_SUBVOLS.append((f"/dev/{group['name']}/{vol['name']}",
-                                   mountpoint, subs))
+                pass   # handled by the btrfs command emitted below
+
+    for label, member, mountpoint, subs in LV_BTRFS:
+        lines.append(f"btrfs none --label={label} {member}")
+        covered = any(x.get("mountpoint") == mountpoint for x in subs)
+        if mountpoint and not covered:
+            lines.append(f"btrfs {mountpoint} --subvol --name=root LABEL={label}")
+        for sub in subs:
+            name = sub["name"].lstrip("@") or "root"
+            lines.append(f"btrfs {sub['mountpoint']} --subvol --name={name} "
+                         f"LABEL={label}")
 
     if (storage.get("swap", {}) or {}).get("zram"):
         warn("storage.swap.zram honored by installing zram-generator-defaults")
