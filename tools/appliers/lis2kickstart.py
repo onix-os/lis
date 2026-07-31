@@ -213,10 +213,16 @@ def render_storage(doc: dict, lines: list[str]) -> None:
             if not mountpoint:
                 refuse(f"lvm volume '{vol['name']}': no mountpoint")
                 continue
-            # btrfs is a documented --fstype for logvol (pykickstart's logvol
-            # reference lists ext4/ext3/ext2/btrfs/swap/vfat), so plain
-            # btrfs-on-LVM is expressible. The earlier "bad superblock" failure
-            # came from the subvolume handling below, not from the filesystem.
+            # pykickstart lists btrfs as a valid logvol --fstype, but Anaconda
+            # does not actually complete it: the install stalls at "Creating
+            # btrfs on /dev/mapper/<vg>-<lv>" and never returns (observed in a
+            # VM, twice). The schema accepting the value is not the same as the
+            # installer honoring it, so this is refused rather than emitted.
+            if fs == "btrfs":
+                refuse(f"lvm volume '{vol['name']}': Anaconda stalls creating "
+                       "btrfs on a logical volume — use ext4/xfs there, or put "
+                       "btrfs on a plain partition (see also Red Hat bug 1470524 "
+                       "for subvolumes on a logvol)")
             lines.append(f"logvol {mountpoint} --vgname={group['name']} "
                          f"--name={vol['name']} --fstype={FS_MAP.get(fs, fs)} {size}")
             if subs := vol.get("subvolumes"):
