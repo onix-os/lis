@@ -964,10 +964,20 @@ def chroot_intents(doc: dict, family: str) -> list[str]:
 
 
 def seed_mount_commands() -> list[str]:
-    """Shell that makes the LIS seed readable inside an installer environment."""
+    """Shell that makes the LIS seed readable inside an installer environment.
+
+    Deliberately avoids `blkid -L`: that is a util-linux extension, and busybox
+    blkid (debian-installer, Alpine) ignores it and prints every device, so the
+    lookup silently yielded nothing and the seed was never mounted — which shows
+    up much later as an empty LUKS passphrase. Reads /proc/partitions rather than
+    globbing /dev, because a glob matching nothing aborts the loop under zsh.
+    """
     return [f"mkdir -p {SEED_MOUNT}",
-            f'dev=$(blkid -L LIS || blkid -L LISDATA || true)',
-            f'[ -n "$dev" ] && mount -o ro "$dev" {SEED_MOUNT} 2>/dev/null || true']
+            'while read -r _m _n _b name; do '
+            'test -b "/dev/$name" || continue; '
+            'blkid "/dev/$name" 2>/dev/null | grep -q \'LABEL="LIS\' && '
+            f'mount -o ro "/dev/$name" {SEED_MOUNT} 2>/dev/null && break; '
+            'done < /proc/partitions']
 
 
 def resolve_disk_paths(doc: dict) -> None:
