@@ -683,6 +683,7 @@ def render_preseed(doc: dict) -> str:
     # partman-crypto asks for the passphrase interactively; early_command runs
     # before partitioning, so the answer is pre-seeded into debconf from the
     # seed volume and never appears in this file (delivery.md §6).
+    crypt_early = ""
     crypt_keys = [luks_key_path(doc, c["id"])
                   for c in (storage.get("encryption", []) or [])]
     crypt_keys = [k for k in crypt_keys if k]
@@ -701,7 +702,13 @@ def render_preseed(doc: dict) -> str:
             'echo "fset partman-crypto/passphrase-again seen true" '
             '| debconf-communicate',
         ]
-        early.insert(0, "; ".join(inject))
+        # NOT preseed/early_command: that runs before anna fetches partman-crypto
+        # (observed 5s apart in the installer syslog), so the question does not
+        # exist yet and the value is lost — the install then stops on
+        # "You need to choose a passphrase to encrypt ...". partman-base's
+        # init.d/01early_command runs partman/early_command after the partman
+        # udebs are unpacked and before partitioning, which is the right moment.
+        crypt_early = "; ".join(inject)
     if BARE_CRYPT:
         # partman-crypto's finish.d/crypto_config (order 55) accepts any partition
         # that has a mountpoint file; the interactive menu is merely what normally
@@ -730,6 +737,8 @@ def render_preseed(doc: dict) -> str:
         early.append("chmod 755 /lib/partman/finish.d/50lis_crypt_mount")
     if early:
         lines.append(f"d-i preseed/early_command string {'; '.join(early)}")
+    if crypt_early:
+        lines.append(f"d-i partman/early_command string {crypt_early}")
 
     for cmd in sudoers_commands(doc):
         late.append(f"in-target sh -c {shquote(cmd)}")
