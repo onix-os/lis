@@ -518,16 +518,6 @@ def render_autoyast(doc: dict) -> str:
     # The array and the volume group are drives in their own right; without
     # these entries the members are assembled and then nothing is put on them.
     for array in storage.get("raid", []) or []:
-        # AutoYaST crashes in "Preparing disks" when a volume group sits on an md
-        # array — a longstanding libstorage defect (openSUSE bug 755021 and the
-        # autoinstall LVM-on-RAID reports). The profile validates, then YaST
-        # segfaults, so refuse instead of destroying the target.
-        if any(array["name"] in (g.get("devices") or [])
-               for g in (storage.get("lvm", []) or [])):
-            refuse(f"storage.raid ({array['name']}): AutoYaST cannot put a volume "
-                   "group on a software RAID array — YaST crashes while preparing "
-                   "disks (openSUSE bug 755021). Put the filesystem directly on "
-                   "the array, or use LVM without RAID")
         drive = ET.SubElement(partitioning, "drive")
         ET.SubElement(drive, "device").text = f"/dev/md/{array['name']}"
         # Without the type symbol AutoYaST treats the drive as a
@@ -535,6 +525,9 @@ def render_autoyast(doc: dict) -> str:
         dtype = ET.SubElement(drive, "type")
         dtype.set(f"{{{CONFIG_NS}}}type", "symbol")
         dtype.text = "CT_MD"
+        # An array is used whole: without disklabel=none AutoYaST expects a
+        # partition table on /dev/md/<name> and the commit step fails.
+        ET.SubElement(drive, "disklabel").text = "none"
         ET.SubElement(drive, "use").text = "all"
         plist = ET.SubElement(drive, "partitions")
         plist.set(f"{{{CONFIG_NS}}}type", "list")

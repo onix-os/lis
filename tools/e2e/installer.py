@@ -163,6 +163,18 @@ def wait_for_finish(child: pexpect.spawn, distro: str, markers: list[str],
         # Subiquity's "An error occurred" says nothing on its own; the reason is in
         # its own logs inside the live system, which vanish with the VM. Pull the
         # tail onto the serial console before giving up.
+        if distro == "suse":
+            # libstorage-ng reports the real commit error in y2log; the console
+            # only shows a 10s dialog that falls through to Abort, so the "what"
+            # is otherwise lost with the VM.
+            print(f"\n  [{TICK}] dumping YaST logs to the serial log")
+            try:
+                child.sendline("")
+                child.sendline("grep -iE 'error|exception|libstorage|commit' "
+                               "/var/log/YaST2/y2log 2>/dev/null | tail -n 40")
+                child.expect([r"[#$] $", pexpect.TIMEOUT], timeout=60)
+            except Exception:
+                pass
         if distro == "ubuntu":
             print(f"\n  [{TICK}] dumping subiquity/curtin logs to the serial log")
             for log in ("/var/log/installer/subiquity-server-debug.log",
