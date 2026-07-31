@@ -323,25 +323,21 @@ def translate(doc: dict) -> tuple[dict, dict]:
     # bootloader instead. Setting an invented key would drop them silently.
     kernel_params = " ".join((boot.get("kernel", {}) or {}).get("params", []))
     if storage.get("raid"):
-        # The Pre_mount bootloader step needs a boot partition it can detect under
-        # the pre-mount root; with /boot on the root volume archinstall dies with
-        # "Could not detect boot at mountpoint" after pacstrap has already run
-        # (archlinux/archinstall#3111, open upstream). This branch skips
-        # disk_config() entirely, so the check has to live here.
-        if not any(p.get("mountpoint") == "/boot"
-                   for p in storage.get("partitions", []) or []):
-            refuse("storage.raid: archinstall needs a separate /boot partition it "
-                   "can detect under the pre-mounted root — declare one outside "
-                   "the array (archlinux/archinstall#3111)")
-        # Pre_mount validates mounts against archinstall's own disk model, and an
-        # LVM volume on an mdadm array is not in it — the run dies with "Could not
-        # detect root at mountpoint" *after* pacstrap has written the system.
-        # Refuse up front rather than fail with a half-installed disk.
-        if any(a["name"] in (g.get("devices") or [])
-               for a in storage["raid"] for g in (storage.get("lvm") or [])):
-            refuse("storage.raid: archinstall cannot detect an LVM root on an mdadm "
-                   "array in a pre-mounted layout (archlinux/archinstall#3111) — "
-                   "put the root filesystem directly on the array")
+        # archinstall has no mdadm support at all (grep -rniE 'mdadm|raid' over the
+        # package returns nothing), and its pre-mounted layout builds a device
+        # model only from parted partition-table entries
+        # (device_handler.detect_pre_mounted_mods), so neither /dev/md/<name> nor
+        # an LVM volume on it can be seen as the root filesystem. The run dies in
+        # add_bootloader with "Could not detect root at mountpoint" *after*
+        # pacstrap has already written the target. The earlier /boot-only check
+        # cited #3111, which is closed and about the boot partition.
+        refuse(f"storage.raid ({', '.join(a['name'] for a in storage['raid'])}): "
+               "archinstall cannot install onto software RAID — it has no mdadm "
+               "support, and its pre-mounted layout sees only partition-table "
+               "entries, so the array cannot be detected as the root filesystem "
+               "(archlinux/archinstall#2925, #3914). It also never installs mdadm "
+               "into the target. Use a distro whose installer speaks mdadm, or "
+               "declare a layout without storage.raid")
         config["disk_config"] = {"config_type": "pre_mounted_config",
                                  "mountpoint": PRE_MOUNT}
     elif dc := disk_config(doc):
