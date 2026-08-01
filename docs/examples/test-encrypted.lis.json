@@ -30,6 +30,13 @@
       },
       {
         "disk": "main",
+        "id": "swap",
+        "role": "swap",
+        "size": "2GiB",
+        "fs": "swap"
+      },
+      {
+        "disk": "main",
         "id": "root",
         "role": "root",
         "size": "rest",
