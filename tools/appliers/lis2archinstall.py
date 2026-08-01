@@ -91,6 +91,32 @@ def start_of(size: str) -> int:
     return 0
 
 
+def backing(storage: dict, handle: str) -> str:
+    """A device handle resolved to the partition archinstall actually knows.
+
+    A LUKS container is not a thing an archinstall profile can name: encryption
+    is an attribute of the partition underneath it (DiskEncryption.partitions is
+    a list of PartitionModification obj_ids, models/device.py:1477), and the
+    mapper device that comes out is what the volume group is built on
+    (filesystem.py:145 `self._setup_lvm(lvm_config, enc_mods)`). So a volume
+    group whose `devices` name a container is really consuming that container's
+    `over` partition.
+    """
+    seen: set[str] = set()
+    containers = {c["id"]: c.get("over") for c in storage.get("encryption", []) or []}
+    while handle in containers and handle not in seen:
+        seen.add(handle)
+        handle = containers[handle] or handle
+    return handle
+
+
+def lvm_pv_handles(storage: dict) -> set[str]:
+    """Partition handles that end up carrying a physical volume."""
+    return {backing(storage, handle)
+            for group in storage.get("lvm", []) or []
+            for handle in group.get("devices", []) or []}
+
+
 def disk_config(doc: dict) -> dict | None:
     """LIS storage → archinstall disk_config (partitions + LVM volume groups)."""
     storage = doc.get("storage", {}) or {}
@@ -116,9 +142,10 @@ def disk_config(doc: dict) -> dict | None:
             continue
         disks[disk["id"]] = path
 
-    consumed: set[str] = set()
-    for group in storage.get("lvm", []) or []:
-        consumed.update(group.get("devices", []))
+    # Resolved through storage.encryption: a group that names a LUKS container
+    # consumes the partition under it, and that partition must be left
+    # unmounted and unformatted just as a bare physical volume would be.
+    consumed = lvm_pv_handles(storage)
 
     mods: dict[str, dict] = {}
     pv_ids = PV_IDS                      # LIS partition handle → archinstall obj_id
@@ -153,8 +180,12 @@ def disk_config(doc: dict) -> dict | None:
             # archinstall raises "File system type is not set" for a member with
             # none. ext4 is only the type recorded in the partition table; the
             # LVM/RAID step claims the device before anything is made on it.
-            "fs_type": (FS_MAP.get(fs, fs) if fs not in (None, "none")
-                        else ("ext4" if handle in consumed else None)),
+            # A physical volume takes that placeholder whatever the document
+            # says its role would imply — the filesystem the role stands for is
+            # made on a logical volume, never here.
+            "fs_type": ("ext4" if handle in consumed
+                        else FS_MAP.get(fs, fs) if fs not in (None, "none")
+                        else None),
             "start": {"unit": "MiB", "value": cursor, "sector_size": SECTOR},
             "size": size_obj(part.get("size", "rest"), f"partition '{handle}'"),
             "mountpoint": None,
@@ -415,7 +446,14 @@ def lvm_config(storage: dict, pv_ids: dict[str, str]) -> dict | None:
     for group in groups:
         pvs, missing = [], []
         for handle in group.get("devices", []):
-            (pvs if handle in pv_ids else missing).append(pv_ids.get(handle, handle))
+            # A LUKS container is named by the group but is not an archinstall
+            # object of its own; the partition it wraps is the physical volume,
+            # and archinstall opens it and hands the mapper to vgcreate.
+            under = backing(storage, handle)
+            if under in pv_ids:
+                pvs.append(pv_ids[under])
+            else:
+                missing.append(handle)
         for handle in missing:
             refuse(f"lvm '{group['name']}': device handle {handle!r} does not resolve "
                    "to a partition on a declared disk")
@@ -457,8 +495,7 @@ def lvm_config(storage: dict, pv_ids: dict[str, str]) -> dict | None:
     # archinstall's LVM path formats the boot partition and nothing else
     # (filesystem.py: perform_filesystem_operations), so any other plain
     # partition is created but never made — swapon then fails on it.
-    in_group = {d for g in (storage.get("lvm", []) or [])
-                for d in g.get("devices", [])}
+    in_group = lvm_pv_handles(storage)
     for part in storage.get("partitions", []) or []:
         handle = part.get("id")
         if handle in in_group or part.get("role") in ("esp", "boot"):
@@ -545,11 +582,54 @@ def translate(doc: dict) -> tuple[dict, dict]:
         # disk_config carries disk_encryption {encryption_type, partitions:
         # [obj_id], lvm_volumes: []}, and the passphrase travels separately in
         # the credentials file as `encryption_password`.
-        encrypted = [c["over"] for c in (storage.get("encryption", []) or [])]
-        obj_ids = [PV_IDS[h] for h in encrypted if h in PV_IDS]
+        containers = storage.get("encryption", []) or []
+        # Handles the volume groups name, before resolution: a container listed
+        # here is a physical volume, so the layout is LVM *inside* LUKS.
+        pv_devices = {handle for group in (storage.get("lvm", []) or [])
+                      for handle in group.get("devices", []) or []}
+        obj_ids, over_pv = [], []
+        for container in containers:
+            over = container.get("over")
+            if over not in PV_IDS:
+                refuse(f"storage.encryption ({container['id']}): 'over' handle "
+                       f"{over!r} does not resolve to a partition on a declared "
+                       "disk — archinstall encrypts partitions and logical "
+                       "volumes, and only ever names them by obj_id "
+                       "(models/device.py:1465 _DiskEncryptionSerialization)")
+                continue
+            obj_ids.append(PV_IDS[over])
+            if container["id"] in pv_devices:
+                over_pv.append(container["id"])
         if obj_ids:
+            # EncryptionType (models/device.py:1439) distinguishes the two
+            # nestings: LVM_ON_LUKS opens the LUKS partitions first and builds
+            # the volume group on their mappers (filesystem.py:142-146), while
+            # LUKS_ON_LVM creates the group first and encrypts each logical
+            # volume (filesystem.py:151-154). The document wraps the *physical*
+            # volume, so it is LVM on LUKS; emitting the other one would invert
+            # the layout the document describes.
+            enc_type = "luks"
+            if dc.get("lvm_config"):
+                if len(over_pv) != len(containers):
+                    refuse("storage.encryption: with a volume group present, "
+                           "archinstall runs an encrypted layout only through "
+                           "_setup_lvm_encrypted (filesystem.py:141-159), which "
+                           "matches LVM_ON_LUKS or LUKS_ON_LVM and nothing else "
+                           "— every container has to wrap a physical volume of "
+                           "the group, or none may")
+                enc_type = "lvm_on_luks"
+                # DiskEncryption.validate_enc (models/device.py:1511) drops the
+                # whole encryption config — parse_arg returns None — when a
+                # volume group is combined with more than two partitions, so
+                # the install would silently come out unencrypted.
+                total = sum(len(mod["partitions"]) for mod in dc["device_modifications"])
+                if total > 2:
+                    refuse(f"storage.partitions: {total} partitions with a volume "
+                           "group and encryption — DiskEncryption.validate_enc "
+                           "(models/device.py:1511) refuses more than two, and "
+                           "archinstall then installs with no encryption at all")
             dc["disk_encryption"] = {
-                "encryption_type": "luks",
+                "encryption_type": enc_type,
                 "partitions": obj_ids,
                 "lvm_volumes": [],
             }
