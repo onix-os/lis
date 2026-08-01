@@ -22,21 +22,29 @@ import pathlib
 import sys
 import uuid
 
-from lis_common import (parse_size, track, check_unread, check_raid_consumers, chroot_intents, registration_commands, enrollment_commands, luks_key_path, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, check_raid_consumers, chroot_intents, registration_commands, enrollment_commands, luks_key_path, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
 
 SECTOR = {"unit": "B", "value": 512}
 UNIT_BYTES = {"B": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30, "TiB": 1 << 40}
-# Where this applier mounts a layout it built itself before handing it over.
-PRE_MOUNT = "/mnt/lis"
+# A document with storage.raid takes two archinstall runs (see apply_raid): the
+# profile for the first one, and the profile the second one is actually given.
+DISKS_PROFILE = "user_configuration.disks.json"
+APPLY_PROFILE = "user_configuration.apply.json"
+# mdadm levels archinstall's target can assemble at boot.
+RAID_LEVELS = {"0", "1", "4", "5", "6", "10"}
 
 # LIS partition handle → the obj_id archinstall knows it by.
 PV_IDS: dict[str, str] = {}
 
 # obj_ids whose size the document left open ('rest' / percent).
 REST_SIZED: set[str] = set()
+
+# storage.wipe, which belongs to the first of the two archinstall runs a RAID
+# layout takes. The profile the second run is given must never carry it.
+FIRST_PASS_WIPE = False
 
 
 def b64(text: str) -> str:
@@ -88,14 +96,6 @@ def disk_config(doc: dict) -> dict | None:
     storage = doc.get("storage", {}) or {}
     target = doc.get("target", {}) or {}
 
-    if storage.get("raid"):
-        # archinstall has no mdadm vocabulary, but its own DiskLayoutType offers
-        # Pre_mount = 'pre_mounted_config': the array is built here at apply time
-        # and archinstall installs into the mounted result. Read from
-        # archinstall/lib/models/device.py.
-        warn(f"storage.raid ({', '.join(a['name'] for a in storage['raid'])}): the "
-             "array is assembled by this applier before archinstall runs, which "
-             "then installs into the pre-mounted layout")
     for container in storage.get("encryption", []) or []:
         if not luks_key_path(doc, container["id"]):
             refuse(f"storage.encryption ({container['id']}): no key material — declare "
@@ -197,6 +197,210 @@ def disk_config(doc: dict) -> dict | None:
     return config
 
 
+def part_node(device: str, number: int) -> str:
+    """Kernel node of the Nth partition: /dev/vda1, but /dev/nvme0n1p1."""
+    return f"{device}p{number}" if device[-1].isdigit() else f"{device}{number}"
+
+
+def array_node(name: str) -> str:
+    """The node mdadm gives an array — /dev/md0 for the usual md<N> names."""
+    return (f"/dev/{name}" if name.startswith("md") and name[2:].isdigit()
+            else f"/dev/md/{name}")
+
+
+def raid_disk_config(doc: dict) -> dict | None:
+    """LIS storage carrying storage.raid[] → archinstall's disk config.
+
+    archinstall has no mdadm vocabulary (grep -rniE 'mdadm|raid' over the
+    installed package returns nothing), and its device model cannot address an
+    array that already exists either: load_devices() keeps only devices whose
+    path is a *top-level* entry of `lsblk --json` — find_lsblk_info in
+    lib/disk/utils.py scans that flat list and never descends into `children` —
+    and an assembled array is always nested under its member partitions. On the
+    ISO's archinstall 4.4 with /dev/md0 up, device_handler.devices reports
+    exactly ['/dev/vda', '/dev/vdb']. A device_modification naming the array is
+    therefore dropped in silence by DiskLayoutConfiguration.parse_arg
+    ("if not device: continue"), so no physical volume can be placed on it.
+    Nor is the pre-mounted layout a way round that: detect_pre_mounted_mods
+    builds its model out of parted partition-table entries only, so an LVM
+    volume — a device-mapper device with no partition table — is invisible to
+    it, and add_bootloader dies with "Could not detect root at mountpoint"
+    after pacstrap has already run (archlinux/archinstall#2925, #3914).
+
+    What is left is to build the array *between* two archinstall runs and hand
+    the second one an array that presents itself as a disk. This function emits
+    that second run's profile; apply_raid() drives both. Everything the document
+    asks for is still made by archinstall: it partitions both disks, it puts the
+    partition table on the array, it creates the physical volume, the volume
+    group, the logical volumes and their filesystems, and it mounts, bootstraps
+    and installs the bootloader. This applier only assembles the array out of
+    partitions archinstall itself created — mdadm --create writes no partition
+    table and no filesystem.
+    """
+    storage = doc.get("storage", {}) or {}
+    target = doc.get("target", {}) or {}
+
+    disks: dict[str, str] = {}
+    for disk in target.get("disks", []):
+        match_selectors(disk)
+        path = (disk.get("match", {}) or {}).get("path")
+        if not path:
+            refuse(f"disk '{disk['id']}': archinstall needs an explicit match.path — "
+                   "it cannot evaluate LIS match rules (type/largest/smallest)")
+            continue
+        disks[disk["id"]] = path
+
+    members = {handle for array in storage.get("raid", []) or []
+               for handle in array.get("devices", []) or []}
+    # Asking the second run to wipe a disk it is only re-reading would hand
+    # device_handler.partition() a freshDisk() with no partitions to add to it,
+    # and commit that empty table over the array's own members.
+    global FIRST_PASS_WIPE
+    FIRST_PASS_WIPE = bool(storage.get("wipe", False))
+
+    mods: dict[str, dict] = {}
+    numbers: dict[str, int] = {}
+    starts: dict[str, int] = {}
+    pv_ids = PV_IDS
+    pv_ids.clear()
+    boot_mounted = False
+
+    for i, part in enumerate(storage.get("partitions", []) or []):
+        path = disks.get(part.get("disk"))
+        if not path:
+            if part.get("disk") not in disks:
+                refuse(f"partition {i}: references unknown disk handle {part.get('disk')!r}")
+            continue
+        if part.get("existing"):
+            refuse(f"partition {i} on '{part['disk']}': adopting an existing partition "
+                   "is not expressible in an archinstall profile")
+            continue
+        mod = mods.setdefault(path, {"device": path, "wipe": False, "partitions": []})
+        handle = part.get("id") or f"auto-{i}"
+        number = numbers[path] = numbers.get(path, 0) + 1
+        obj_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"lis:{path}:{handle}"))
+        pv_ids[handle] = obj_id
+        cursor = starts.setdefault(path, 1)
+        fs = role_fs(part)
+        role = part.get("role")
+        entry = {
+            # The first pass creates these; by the second one they are on the
+            # disk already. first_pass_profile() flips this back to 'create'.
+            "status": "existing",
+            "type": "primary",
+            "obj_id": obj_id,
+            # A partition-table filesystem type is mandatory — device_handler
+            # _setup_partition reads safe_fs_type, which raises without one. On
+            # an array member it is only the type recorded in the table: mdadm
+            # claims the partition before anything is made on it.
+            "fs_type": (FS_MAP.get(fs, fs) if fs not in (None, "none") else "ext4"),
+            "start": {"unit": "MiB", "value": cursor, "sector_size": SECTOR},
+            "size": size_obj(part.get("size", "rest"), f"partition '{handle}'"),
+            # Only the mountpoint the document names, never the role default: a
+            # mirrored layout declares a boot partition per disk, and mounting
+            # both at /boot would hide one behind the other.
+            "mountpoint": part.get("mountpoint"),
+            "mount_options": part.get("mount_options", []),
+            "flags": [],
+            "wipe": True,
+            "dev_path": part_node(path, number),
+        }
+        if entry["size"].pop("lis_rest", False):
+            REST_SIZED.add(obj_id)
+        starts[path] = cursor + start_of(part.get("size", "rest"))
+        if role == "esp":
+            entry["flags"] = ["boot", "esp"]
+        elif role == "boot":
+            # archinstall finds the boot partition by flag *and* mountpoint
+            # (DeviceModification.get_boot_partition), and refuses to lay down a
+            # bootloader without one.
+            entry["flags"] = ["boot"]
+        elif role == "swap":
+            entry["flags"] = ["swap"]
+        if entry["mountpoint"] and role in ("esp", "boot"):
+            boot_mounted = True
+        if handle in members and entry["mountpoint"]:
+            refuse(f"partition '{handle}': an array member cannot carry a mountpoint")
+        if part.get("subvolumes"):
+            refuse(f"partition '{handle}': subvolumes on an array member or a plain "
+                   "partition of a RAID layout are not expressible here")
+        mod["partitions"].append(entry)
+
+    if not mods:
+        return None
+
+    if not boot_mounted:
+        refuse("storage.partitions: no boot/esp partition carries a mountpoint — "
+               "archinstall installs a bootloader only onto a partition that is "
+               "flagged boot *and* mounted, and the root of a RAID layout cannot "
+               "hold /boot for it")
+
+    for array in storage.get("raid", []) or []:
+        node = array_node(array["name"])
+        level = str(array.get("level", "")).removeprefix("raid")
+        if level not in RAID_LEVELS:
+            refuse(f"storage.raid ({array['name']}): mdadm has no level "
+                   f"{array.get('level')!r}")
+        for handle in array.get("devices", []) or []:
+            if handle not in pv_ids:
+                refuse(f"storage.raid ({array['name']}): member {handle!r} does not "
+                       "resolve to a partition on a declared disk")
+        obj_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"lis:raid:{array['name']}"))
+        pv_ids[array["name"]] = obj_id
+        REST_SIZED.add(obj_id)
+        # The array is handed to archinstall as a disk, and a physical volume in
+        # an archinstall profile is a *partition* (LvmVolumeGroup.pvs is a list
+        # of PartitionModification), so the group lands on a partition table
+        # written across the array rather than on the bare array. ArchWiki's
+        # RAID page documents exactly that arrangement.
+        mods[node] = {
+            "device": node,
+            "wipe": True,
+            "partitions": [{
+                "status": "create",
+                "type": "primary",
+                "obj_id": obj_id,
+                "fs_type": "ext4",
+                "start": {"unit": "MiB", "value": 1, "sector_size": SECTOR},
+                "size": {"unit": "B", "value": 0, "sector_size": SECTOR},
+                "mountpoint": None,
+                "mount_options": [],
+                "flags": [],
+                "wipe": True,
+                "dev_path": None,
+            }],
+        }
+
+    config = {"config_type": "manual_partitioning",
+              "device_modifications": list(mods.values())}
+    if lvm := lvm_config(storage, pv_ids):
+        config["lvm_config"] = lvm
+    return config
+
+
+def raid_commands(storage: dict) -> list[str]:
+    """What the installed system needs in order to find its array at boot.
+
+    archinstall writes the HOOKS line itself (Installer.mkinitcpio) and the only
+    storage hook it ever adds is 'lvm2' (minimal_installation) — it has no mdadm
+    hook, which is what archinstall#3914 asks for. Without mdadm_udev and an
+    /etc/mdadm.conf the array is never assembled in early userspace, so the
+    volume group on it never appears and the root filesystem is not found.
+    """
+    if not storage.get("raid"):
+        return []
+    return [
+        "mdadm --detail --scan >> /etc/mdadm.conf",
+        # Assemble the array before LVM goes looking for physical volumes; when
+        # there is no volume group, fall back to right after udev.
+        "sed -i '/^HOOKS=/ { s/\\blvm2\\b/mdadm_udev lvm2/; t; "
+        "s/\\budev\\b/udev mdadm_udev/ }' /etc/mkinitcpio.conf",
+        # archinstall already built an initramfs, before mdadm existed in the
+        # target and with its own HOOKS line.
+        "mkinitcpio -P",
+    ]
+
+
 def lvm_config(storage: dict, pv_ids: dict[str, str]) -> dict | None:
     """LIS storage.lvm[] → archinstall's LVM volume groups.
 
@@ -290,6 +494,10 @@ def translate(doc: dict) -> tuple[dict, dict]:
                 pkgs.append(name)
             if app.get("flatpak"):
                 pkgs.append("flatpak")
+    if storage.get("raid"):
+        # The live ISO carries mdadm; the target does not get it from anywhere
+        # else, and without it the array is not assembled at boot.
+        pkgs.append("mdadm")
 
     loader = boot.get("loader", "auto")
     bootloader = BOOTLOADER_MAP.get(loader, "Systemd-boot" if loader == "auto" else None)
@@ -322,24 +530,16 @@ def translate(doc: dict) -> tuple[dict, dict]:
     # parameters — so boot.kernel.params has to be written into the installed
     # bootloader instead. Setting an invented key would drop them silently.
     kernel_params = " ".join((boot.get("kernel", {}) or {}).get("params", []))
-    if storage.get("raid"):
-        # archinstall has no mdadm support at all (grep -rniE 'mdadm|raid' over the
-        # package returns nothing), and its pre-mounted layout builds a device
-        # model only from parted partition-table entries
-        # (device_handler.detect_pre_mounted_mods), so neither /dev/md/<name> nor
-        # an LVM volume on it can be seen as the root filesystem. The run dies in
-        # add_bootloader with "Could not detect root at mountpoint" *after*
-        # pacstrap has already written the target. The earlier /boot-only check
-        # cited #3111, which is closed and about the boot partition.
-        refuse(f"storage.raid ({', '.join(a['name'] for a in storage['raid'])}): "
-               "archinstall cannot install onto software RAID — it has no mdadm "
-               "support, and its pre-mounted layout sees only partition-table "
-               "entries, so the array cannot be detected as the root filesystem "
-               "(archlinux/archinstall#2925, #3914). It also never installs mdadm "
-               "into the target. Use a distro whose installer speaks mdadm, or "
-               "declare a layout without storage.raid")
-        config["disk_config"] = {"config_type": "pre_mounted_config",
-                                 "mountpoint": PRE_MOUNT}
+    if arrays := storage.get("raid"):
+        names = ", ".join(a["name"] for a in arrays)
+        warn(f"storage.raid ({names}): archinstall has no mdadm vocabulary, so the "
+             "array is assembled by this applier out of partitions archinstall "
+             "itself created, between two archinstall runs — every filesystem is "
+             "still made by archinstall")
+        warn(f"storage.raid ({names}): the volume group lands on a partition "
+             "written across the array rather than on the bare array — an "
+             "archinstall physical volume is a partition, never a whole device")
+        config["disk_config"] = raid_disk_config(doc)
     elif dc := disk_config(doc):
         # Schema read from archinstall itself (models/device.py DiskEncryption):
         # disk_config carries disk_encryption {encryption_type, partitions:
@@ -450,6 +650,7 @@ def translate(doc: dict) -> tuple[dict, dict]:
     commands += system_commands(doc, "arch")
     commands += boot_timeout_commands(
         doc, "arch", "systemd-boot" if bootloader == "Systemd-boot" else "grub")
+    commands += raid_commands(storage)
 
     for stage in ("post_install", "post", "pre_reboot", "on_success"):
         for item in scripts.get(stage, []):
@@ -529,110 +730,134 @@ def _kb_layout(system: dict) -> str:
     return layout or console or "us"
 
 
-def build_pre_mounted(doc: dict) -> int:
-    """Assemble the arrays this document declares and mount the result.
+def first_pass_profile(config: dict, arrays: set[str]) -> dict:
+    """The disk-only profile for `archinstall --script only_hd`.
 
-    archinstall cannot create an mdadm array, but it can install into one that
-    already exists — that is what its Pre_mount layout is for.
+    Nothing is mounted by this pass and no volume group is named: it exists so
+    that the partitions the array is built out of are made by archinstall, with
+    the same geometry the real profile describes. only_hd runs
+    FilesystemHandler.perform_filesystem_operations and stops before pacstrap.
+    """
+    import copy
+
+    disks = copy.deepcopy(config["disk_config"])
+    disks["device_modifications"] = [mod for mod in disks["device_modifications"]
+                                     if mod["device"] not in arrays]
+    for mod in disks["device_modifications"]:
+        mod["wipe"] = FIRST_PASS_WIPE
+        for part in mod["partitions"]:
+            part["status"] = "create"
+            part["dev_path"] = None
+            # A mountpoint here would leave the first pass's mounts under /mnt
+            # for the second one to trip over.
+            part["mountpoint"] = None
+    disks.pop("lvm_config", None)
+    disks.pop("disk_encryption", None)
+    return {"archinstall_language": "English", "disk_config": disks}
+
+
+def assemble_arrays(doc: dict) -> dict[str, str] | None:
+    """Create the declared arrays and expose each one as a whole disk.
+
+    This is the single storage step archinstall cannot take — it has no mdadm
+    vocabulary at all. Assembling an array out of partitions the installer has
+    already created is not partitioning: no partition table is written here and
+    no filesystem is made. The partition table that goes *onto* the array, the
+    physical volume, the volume group, the volumes and their filesystems are all
+    created by the second archinstall run.
+
+    The loop alias is what makes that second run possible. archinstall's
+    load_devices() keeps a device only if its path is a top-level entry of
+    `lsblk --json` (find_lsblk_info scans that flat list), and an assembled
+    array is always listed as a child of its members, so /dev/md0 is never in
+    device_handler.devices — verified on archinstall 4.4. A loop device over the
+    array has no holders, so it is top-level, and it is the same bytes at the
+    same offsets: what archinstall writes through /dev/loop<N> is what the array
+    carries, and the kernel finds it again as /dev/md0p1 at boot.
+
+    Returns {array device path: path archinstall should be given}.
     """
     import subprocess
 
     storage = doc.get("storage", {}) or {}
     disks = {d["id"]: (d.get("match", {}) or {}).get("path")
              for d in (doc.get("target", {}) or {}).get("disks", [])}
-    index: dict[str, int] = {}
+    numbers: dict[str, int] = {}
     node_of: dict[str, str] = {}
     for part in storage.get("partitions", []) or []:
-        disk = part.get("disk")
-        index[disk] = index.get(disk, 0) + 1
-        node_of[part.get("id")] = f"{disks.get(disk, '')}{index[disk]}"
-
-    steps: list[str] = []
-    # Pre_mount hands archinstall a finished layout, so nothing else partitions
-    # these disks — mdadm would otherwise be given member nodes that do not exist.
-    # Lay them out here, per disk, before assembling anything.
-    if storage.get("raid"):
-        by_disk: dict[str, list] = {}
-        for part in storage.get("partitions", []) or []:
-            by_disk.setdefault(part.get("disk"), []).append(part)
-        for handle, parts in by_disk.items():
-            device = disks.get(handle)
-            if not device:
-                continue
-            steps.append(f"parted -s {device} mklabel gpt")
-            start_mib = 1
-            for number, part in enumerate(parts, start=1):
-                size = part.get("size", "rest")
-                if size == "rest":
-                    end = "100%"
-                else:
-                    end_mib = start_mib + (parse_size(size) >> 20)
-                    end = f"{end_mib}MiB"
-                steps.append(f"parted -s -a optimal {device} -- mkpart primary "
-                             f"{start_mib}MiB {end}")
-                if part.get("role") in ("esp", "boot"):
-                    steps.append(f"parted -s {device} set {number} boot on")
-                if end != "100%":
-                    start_mib = end_mib
-            steps.append(f"partprobe {device} || true")
-        steps.append("udevadm settle || sleep 2")
-    for array in storage.get("raid", []) or []:
-        members = " ".join(node_of.get(d, "") for d in array.get("devices", []))
-        node = f"/dev/md/{array['name']}"
-        steps.append(f"mdadm --create {node} --run --level={array['level']} "
-                     f"--raid-devices={len(array.get('devices', []))} {members}")
-        # An array almost always feeds a volume group (check_raid_consumers
-        # requires a consumer). Build it here too, or the filesystem would land on
-        # the array itself and the declared logical volumes would vanish silently.
-        group = next((g for g in (storage.get("lvm", []) or [])
-                      if array["name"] in (g.get("devices") or [])), None)
-        if group:
-            steps += [f"pvcreate -ff -y {node}",
-                      f"vgcreate {group['name']} {node}"]
-            root_lv = None
-            for volume in group.get("volumes", []) or []:
-                size = volume.get("size", "rest")
-                extent = ("-l 100%FREE" if size == "rest"
-                          else f"-L {size.replace('iB', '')}")
-                lv = f"/dev/{group['name']}/{volume['name']}"
-                steps.append(f"lvcreate -y {extent} -n {volume['name']} "
-                             f"{group['name']}")
-                vfs = volume.get("fs")
-                if vfs == "swap":
-                    steps += [f"mkswap {lv}", f"swapon {lv}"]
-                elif vfs:
-                    steps.append(f"mkfs.{vfs} -f {lv}" if vfs in ("btrfs", "xfs")
-                                 else f"mkfs.{vfs} -F {lv}")
-                if volume.get("mountpoint") == "/":
-                    root_lv = lv
-            if root_lv:
-                steps += [f"mkdir -p {PRE_MOUNT}", f"mount {root_lv} {PRE_MOUNT}"]
-                # archinstall detects the bootloader target by looking under the
-                # pre-mount root, so /boot has to be a real mount there, not just
-                # a declared partition (archlinux/archinstall#3111).
-                for part in storage.get("partitions", []) or []:
-                    if part.get("mountpoint") == "/boot":
-                        node = node_of.get(part.get("id"))
-                        fs = role_fs(part) or "ext4"
-                        steps += [f"mkfs.{fs} -F {node}",
-                                  f"mkdir -p {PRE_MOUNT}/boot",
-                                  f"mount {node} {PRE_MOUNT}/boot"]
-                        break
+        device = disks.get(part.get("disk"))
+        if not device:
             continue
-        target = next((p for p in storage.get("partitions", [])
-                       if p.get("id") == array["name"]), {})
-        fs = role_fs(target) or "ext4"
-        steps.append(f"mkfs.{fs} -f {node}" if fs in ("btrfs", "xfs")
-                     else f"mkfs.{fs} -F {node}")
-        if role_mountpoint(target) == "/" or not role_mountpoint(target):
-            steps += [f"mkdir -p {PRE_MOUNT}", f"mount {node} {PRE_MOUNT}"]
-    for step in steps:
-        print(f"pre-mount: {step}")
-        result = subprocess.run(step, shell=True)
-        if result.returncode:
-            print(f"error: pre-mount step failed: {step}")
-            return result.returncode
-    return 0
+        numbers[device] = numbers.get(device, 0) + 1
+        node_of[part.get("id")] = part_node(device, numbers[device])
+
+    def run(step: str) -> int:
+        print(f"raid: {step}")
+        return subprocess.run(step, shell=True).returncode
+
+    aliases: dict[str, str] = {}
+    for array in storage.get("raid", []) or []:
+        node = array_node(array["name"])
+        members = [node_of.get(handle, "") for handle in array.get("devices", [])]
+        if not all(members):
+            print(f"error: array '{array['name']}' names a member with no partition")
+            return None
+        level = str(array.get("level", "")).removeprefix("raid")
+        # The first pass put a filesystem in every partition it created (an
+        # archinstall partition must declare one); mdadm stops to ask about that
+        # signature, and nothing is there to answer it.
+        if run(f"wipefs -a {' '.join(members)}"):
+            return None
+        if run(f"mdadm --create {node} --run --level={level} "
+               f"--raid-devices={len(members)} {' '.join(members)}"):
+            return None
+        run("udevadm settle || sleep 2")
+        # -P so the kernel offers the partitions archinstall is about to create
+        # on the array as /dev/loop<N>p<M>.
+        result = subprocess.run(f"losetup -P --show -f {node}", shell=True,
+                                capture_output=True, text=True)
+        alias = result.stdout.strip()
+        if result.returncode or not alias:
+            print(f"error: could not expose {node} as a disk: {result.stderr.strip()}")
+            return None
+        print(f"raid: {node} is addressable as {alias}")
+        aliases[node] = alias
+    run("udevadm settle || sleep 2")
+    return aliases
+
+
+def apply_raid(doc: dict, config: dict, creds_file: pathlib.Path,
+               out: pathlib.Path) -> int:
+    """Run archinstall twice with the array built in between."""
+    import subprocess
+
+    arrays = {array_node(a["name"])
+              for a in (doc.get("storage", {}) or {})["raid"]}
+    first = first_pass_profile(config, arrays)
+    resolve_rest_sizes(first)
+    first_file = out / DISKS_PROFILE
+    first_file.write_text(json.dumps(first, indent=2) + "\n")
+    print(f"executing native installer (partitioning pass): archinstall --script "
+          f"only_hd --config {first_file} --silent")
+    status = subprocess.run(["archinstall", "--script", "only_hd", "--config",
+                             str(first_file), "--silent", "--offline"]).returncode
+    if status:
+        return status
+
+    aliases = assemble_arrays(doc)
+    if aliases is None:
+        return 1
+    for mod in config["disk_config"]["device_modifications"]:
+        if alias := aliases.get(mod["device"]):
+            mod["device"] = alias
+    # Only knowable now: the array does not exist until it is assembled.
+    resolve_rest_sizes(config)
+    apply_file = out / APPLY_PROFILE
+    apply_file.write_text(json.dumps(config, indent=2) + "\n")
+    cmd = ["archinstall", "--config", str(apply_file), "--creds", str(creds_file),
+           "--silent"]
+    print(f"executing native installer: {' '.join(cmd)}")
+    return subprocess.run(cmd).returncode
 
 
 def resolve_rest_sizes(config: dict) -> None:
@@ -664,7 +889,13 @@ def resolve_rest_sizes(config: dict) -> None:
                 continue
             start = part.get("start", {})
             start_bytes = start.get("value", 1) * UNIT_BYTES.get(start.get("unit"), 1 << 20)
-            length = end - start_bytes
+            # archinstall rejects a partition whose length is not a whole number
+            # of mebibytes — DiskLayoutConfiguration.parse_arg compares it with
+            # Size.align(), which truncates to 1 MiB, and raises 'Partition is
+            # misaligned'. A disk is normally a round number of mebibytes and
+            # this changes nothing; an mdadm array, whose capacity is whatever
+            # is left after the metadata, is not.
+            length = (end - start_bytes) & ~((1 << 20) - 1)
             if length <= 0:
                 sys.exit(f"error: no space left on {device} for the 'rest' partition")
             part["size"] = {"unit": "B", "value": length, "sector_size": SECTOR}
@@ -769,14 +1000,11 @@ def main() -> int:
         if not shutil.which("archinstall"):
             sys.exit("error: --apply requested, but 'archinstall' is not on PATH "
                      "(are you running on the Arch live ISO?)")
-        resolve_rest_sizes(config)
         if (doc.get("storage", {}) or {}).get("raid"):
-            # pre_mounted_config only means anything if something is actually
-            # mounted there; build the array, put the filesystems on it and
-            # mount before archinstall looks.
-            rc = build_pre_mounted(doc)
-            if rc:
-                return rc
+            # An array cannot be sized, or even addressed, before it exists —
+            # apply_raid resolves the profile as it builds it.
+            return apply_raid(doc, config, creds_file, args.out)
+        resolve_rest_sizes(config)
         cfg_file.write_text(json.dumps(config, indent=2) + "\n")
         cmd = ["archinstall", "--config", str(cfg_file), "--creds", str(creds_file), "--silent"]
         print(f"executing native installer: {' '.join(cmd)}")
