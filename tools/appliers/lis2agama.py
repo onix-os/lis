@@ -287,6 +287,10 @@ def agama_drives(doc: dict) -> list[dict]:
     storage = doc.get("storage", {}) or {}
     paths = disk_paths(doc)
     consumed = {d for g in storage.get("lvm", []) or [] for d in g.get("devices", [])}
+    # A group may name the LUKS container rather than the partition under it;
+    # the partition is still what the group consumes.
+    consumed |= {c["over"] for c in (storage.get("encryption", []) or [])
+                 if c["id"] in consumed}
     if storage.get("lvm"):
         warn("storage.lvm: emitted in the AutoYaST profile (is_lvm_vg/lv_name); "
              "the Agama JSON profile carries no volume group")
@@ -418,11 +422,22 @@ def render_autoyast(doc: dict) -> str:
                 ET.SubElement(node, "size").text = size
             else:
                 ET.SubElement(node, "size").text = "max"
-            if fs not in (None, "none"):
+            container = crypt_over.get(part.get("id"))
+            # A volume group may name either the partition itself or the LUKS
+            # container wrapping it (LVM inside LUKS). Either way the partition
+            # is the group's physical volume, so it carries lvm_group and *no*
+            # filesystem/mount: a PV holds no filesystem, and role "root" would
+            # otherwise synthesise btrfs on / here and collide with the logical
+            # volume that declares the same mountpoint — AutoYaST then finds no
+            # suitable physical volume for the group and stops.
+            group = lvm_member.get(part.get("id"))
+            if group is None and container:
+                group = lvm_member.get(container["id"])
+            if group is None and fs not in (None, "none"):
                 filesystem = ET.SubElement(node, "filesystem")
                 filesystem.set(f"{{{CONFIG_NS}}}type", "symbol")
                 filesystem.text = FS_MAP.get(fs, fs)
-            mountpoint = role_mountpoint(part)
+            mountpoint = None if group else role_mountpoint(part)
             # role_mountpoint() synthesises /boot from role: "boot", so a mirrored
             # boot partition that declares no mountpoint would claim it too and
             # AutoYaST stops on a duplicate fstab entry. The document declared one;
@@ -431,7 +446,9 @@ def render_autoyast(doc: dict) -> str:
                 mountpoint = None
             elif mountpoint:
                 claimed_mounts.add(mountpoint)
-            if fs == "swap":
+            if group:
+                pass
+            elif fs == "swap":
                 ET.SubElement(node, "mount").text = "swap"
             elif mountpoint:
                 ET.SubElement(node, "mount").text = mountpoint
@@ -445,9 +462,9 @@ def render_autoyast(doc: dict) -> str:
                 pid.set(f"{{{CONFIG_NS}}}type", "integer")
                 pid.text = "253"
                 ET.SubElement(node, "raid_name").text = f"/dev/md/{array['name']}"
-            if group := lvm_member.get(part.get("id")):
+            if group:
                 ET.SubElement(node, "lvm_group").text = group["name"]
-            if container := crypt_over.get(part.get("id")):
+            if container:
                 boolean(node, "crypt_fs", True)
                 method = ET.SubElement(node, "crypt_method")
                 method.set(f"{{{CONFIG_NS}}}type", "symbol")

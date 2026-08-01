@@ -140,9 +140,25 @@ def render_alpine(doc: dict) -> tuple[str, str, str]:
         if fs not in (None, "none", "ext2", "ext3", "ext4", "btrfs", "xfs", "vfat", "swap"):
             refuse(f"partition {i}: setup-disk cannot format {fs!r}")
 
-    root = next((p for p in partitions if role_mountpoint(p) == "/"), None)
+    # A partition can be a physical volume or an array member instead of a
+    # filesystem of its own — either directly, or through a LUKS container
+    # declared over it. Such a partition holds no filesystem, and the role
+    # default (role 'root' implies btrfs) must not be allowed to lay one over
+    # the member and discard the volume group stacked above it.
+    crypt_over = {c["over"]: c for c in (storage.get("encryption", []) or [])}
+    claimed = ({d for g in (storage.get("lvm", []) or [])
+                for d in g.get("devices", []) or []}
+               | {d for a in (storage.get("raid", []) or [])
+                  for d in a.get("devices", []) or []})
+    consumed = {p["id"] for p in partitions if p.get("id")
+                and (p["id"] in claimed
+                     or (crypt_over.get(p["id"]) or {}).get("id") in claimed)}
+
+    root = next((p for p in partitions if role_mountpoint(p) == "/"
+                 and p.get("id") not in consumed), None)
     boot_part = next((p for p in partitions
-                      if role_mountpoint(p) in ("/boot", "/boot/efi")), None)
+                      if role_mountpoint(p) in ("/boot", "/boot/efi")
+                      and p.get("id") not in consumed), None)
     # setup-disk can only lay out a plain single disk. Anything it cannot
     # express — subvolumes, an array, a volume group — means this applier
     # prepares the disk itself and hands setup-disk the mounted result.
@@ -361,10 +377,9 @@ def render_alpine(doc: dict) -> tuple[str, str, str]:
     post.append(f'echo {birth} | base64 -d > "$target/var/lib/lis/system.lis.json"')
     post.append('chmod 600 "$target/var/lib/lis/system.lis.json"')
 
-    crypt_over = {c["over"]: c for c in (storage.get("encryption", []) or [])}
     prepare = (prepare_script(disk, partitions, root, boot_part, env,
                               (doc.get("boot") or {}).get("timeout"),
-                              crypt_over=crypt_over,
+                              crypt_over=crypt_over, consumed=consumed,
                               wipe=bool(storage.get("wipe", False)),
                               raid=storage.get("raid"), lvm=storage.get("lvm"),
                               disk_paths={d["id"]: (d.get("match", {}) or {}).get("path")
@@ -379,8 +394,8 @@ MOUNT = "/mnt/lis"
 
 
 def prepare_script(disk, partitions, root, boot_part, env, timeout=None,
-                   crypt_over=None, wipe=True, raid=None, lvm=None,
-                   disk_paths=None) -> str:
+                   crypt_over=None, consumed=None, wipe=True, raid=None,
+                   lvm=None, disk_paths=None) -> str:
     """Lay out the disk, then hand the mounted root to setup-disk.
 
     Alpine's answerfile has no vocabulary for a partition table — `DISKOPTS`
@@ -401,7 +416,8 @@ def prepare_script(disk, partitions, root, boot_part, env, timeout=None,
              # raid member carries none), and mount fails with EINVAL if the module
              # for the fs actually being mounted was never loaded.
              "for m in " + " ".join(sorted(
-                 ({role_fs(p) for p in partitions} |
+                 ({role_fs(p) for p in partitions
+                   if p.get("id") not in (consumed or set())} |
                   {v.get("fs") for g in (lvm or []) for v in (g.get("volumes") or [])})
                  - {None, "none", "swap"}))
              + "; do modprobe \"$m\" 2>/dev/null || true; done",
@@ -432,23 +448,86 @@ def prepare_script(disk, partitions, root, boot_part, env, timeout=None,
             start = end
             numbered.append((shquote(f"{device}{index}"), part))
         steps.append(f'partprobe {shquote(device)} || true')
+    if crypt_over:
+        # cryptsetup is the first thing to touch a partition node here, and the
+        # kernel has only just been told the table changed.
+        steps.append("sleep 2")
+
+    # Encryption is set up before any array or volume group: a container can be
+    # the device of either, and mdadm/pvcreate need its mapper node to exist by
+    # then — the same ordering the array already has against the volume group.
+    crypt_dev: dict = {}
+    for dev, part in numbered:
+        container = (crypt_over or {}).get(part.get("id"))
+        if not container:
+            continue
+        # luksFormat then open: everything below writes to the mapper node, so
+        # what the document stacks on the container lands inside it rather than
+        # beside it.
+        name = container["id"]
+        key = luks_key_path({"storage": {"encryption": [container]}}, name)
+        steps += [f'cryptsetup luksFormat --batch-mode --type luks2 '
+                  f'--key-file {key} {dev}',
+                  f'cryptsetup open --key-file {key} {dev} {name}',
+                  # busybox blkid ignores -s/-o and prints the whole line;
+                  # split it into tokens so PARTUUID="..." is never mistaken
+                  # for UUID="...".
+                  f'cryptuuid=$(blkid {dev} | tr " " "\\n" | '
+                  + SED_UUID + ' | head -n1)',
+                  f'cryptdm={name}']
+        crypt_dev[part.get("id")] = shquote(f"/dev/mapper/{name}")
+
+    def resolve(handle):
+        """Device path for a handle named in a raid or lvm `devices` list.
+
+        A group's device is a partition, an array, or an encryption container;
+        a partition that carries a container resolves to the mapper node, so
+        the volume group is built inside the LUKS device and not beside it.
+        """
+        for dev, part in numbered:
+            if part.get("id") == handle:
+                return crypt_dev.get(handle, dev)
+        for array in raid or []:
+            if array["name"] == handle:
+                return f'/dev/md/{array["name"]}'
+        for container in (crypt_over or {}).values():
+            if container["id"] == handle:
+                return shquote(f'/dev/mapper/{container["id"]}')
+        return None
+
+    def members_of(kind, name, handles):
+        """Resolve every declared member, or refuse rather than build a stub.
+
+        An unresolved handle used to silently collapse to an empty argument
+        list (`pvcreate -ff -y`), which builds nothing and leaves whatever the
+        document stacked on the group undone.
+        """
+        resolved = [resolve(h) for h in handles or []]
+        if not resolved or None in resolved:
+            missing = [h for h, r in zip(handles or [], resolved) if r is None]
+            refuse(f"storage.{kind} ({name}): devices "
+                   f"{missing or handles!r} name no partition, array or "
+                   "encryption container this applier lays out")
+            return None
+        return resolved
+
     for array in raid or []:
         # setup-disk has no array vocabulary, so the array is built here and the
         # filesystem then lands on /dev/md/<name> like any other device.
-        members = " ".join(dev for dev, part in numbered
-                           if part.get("id") in array.get("devices", []))
+        members = members_of("raid", array["name"], array.get("devices"))
+        if members is None:
+            continue
         steps += ["apk add --no-progress mdadm",
                   f'mdadm --create /dev/md/{array["name"]} --run --level={array["level"]} '
-                  f'--raid-devices={len(array.get("devices", []))} {members}']
+                  f'--raid-devices={len(members)} {" ".join(members)}']
     for group in lvm or []:
-        members = " ".join(
-            [dev for dev, part in numbered
-             if part.get("id") in group.get("devices", [])]
-            + [f'/dev/md/{a["name"]}' for a in (raid or [])
-               if a["name"] in group.get("devices", [])])
+        members = members_of("lvm", group["name"], group.get("devices"))
+        if members is None:
+            continue
+        joined = " ".join(members)
         steps += ["apk add --no-progress lvm2",
-                  f"pvcreate -ff -y {members}",
-                  f'vgcreate {group["name"]} {members}']
+                  f"pvcreate -ff -y {joined}",
+                  f'vgcreate {group["name"]} {joined}']
         for volume in group.get("volumes", []) or []:
             size = volume.get("size", "rest")
             extent = "-l 100%FREE" if size == "rest" else f"-L {size.replace('iB', '')}"
@@ -472,21 +551,12 @@ def prepare_script(disk, partitions, root, boot_part, env, timeout=None,
     steps.append("sleep 2")
 
     for dev, part in numbered:
-        if container := (crypt_over or {}).get(part.get("id")):
-            # luksFormat then open: everything below writes to the mapper node,
-            # so the filesystem lands inside the container rather than beside it.
-            name = container["id"]
-            key = luks_key_path({"storage": {"encryption": [container]}}, name)
-            steps += [f'cryptsetup luksFormat --batch-mode --type luks2 '
-                      f'--key-file {key} {dev}',
-                      f'cryptsetup open --key-file {key} {dev} {name}',
-                      # busybox blkid ignores -s/-o and prints the whole
-                      # line; split it into tokens so PARTUUID="..." is
-                      # never mistaken for UUID="...".
-                      f'cryptuuid=$(blkid {dev} | tr " " "\\n" | '
-                      + SED_UUID + ' | head -n1)']
-            dev = f'"/dev/mapper/{name}"'
-            steps.append(f'cryptdm={name}')
+        if part.get("id") in (consumed or set()):
+            # A physical volume or an array member: the group stacked on it owns
+            # the device, so no filesystem — least of all a role default — goes
+            # on the member itself.
+            continue
+        dev = crypt_dev.get(part.get("id"), dev)
         fs = role_fs(part)
         if fs == "swap":
             steps.append(f"mkswap {dev}")

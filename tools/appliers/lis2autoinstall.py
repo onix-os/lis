@@ -63,6 +63,16 @@ class StorageBuilder:
 
     LIS layers (partition → dm_crypt → raid → lvm) reference each other by
     handle; curtin references by action id. `self.handles` is the bridge.
+
+    A LIS handle is only unique *within* its layer: a document may name both a
+    partition and a logical volume 'root' (the usual shape of LVM-inside-LUKS,
+    where the partition is what the container covers and the volume is what
+    holds /). So the bridge is keyed by a layer-qualified handle — 'part:root'
+    versus 'lv:vgcrypt/root' — and never by the bare name. Likewise, "does a
+    higher layer own this volume?" is answered with the curtin action id, which
+    is unique by construction; answering it with the bare name made an
+    encryption `over: root` swallow the logical volume of the same name, which
+    then silently lost its format and mount.
     """
 
     def __init__(self, doc: dict):
@@ -71,26 +81,38 @@ class StorageBuilder:
         self.target = doc.get("target", {}) or {}
         self.firmware = self.target.get("firmware", "uefi")
         self.actions: list[dict] = []
-        self.handles: dict[str, str] = {}     # LIS handle → curtin action id
+        self.handles: dict[str, str] = {}     # qualified LIS handle → curtin action id
+        self.by_name: dict[str, list[str]] = {}   # bare name → qualified handles, in build order
+        self.consumed: set[str] = set()       # curtin action ids owned by a higher layer
+        self.crypt_specs: list[dict] = []     # containers awaiting the consumption verdict
         self.fs_specs: list[dict] = []        # deferred format/mount work
         self.late: list[list[str]] = []        # storage fix-ups for late-commands
         self.late_last: list[list[str]] = []   # fix-ups that must run after everything
         self.disk_paths: dict[str, str] = {}
         self.keys = {k["id"]: k for k in doc.get("keys", []) or []}
 
-    # ── helpers ──
-    def consumed_handles(self) -> set[str]:
-        """Handles owned by a higher layer, so they must not be formatted directly."""
-        used: set[str] = set()
-        for c in self.storage.get("encryption", []) or []:
-            if c.get("over"):
-                used.add(c["over"])
-        for group in self.storage.get("lvm", []) or []:
-            used.update(group.get("devices", []))
-        for array in self.storage.get("raid", []) or []:
-            used.update(array.get("devices", []))
-            used.update(array.get("spares", []))
-        return used
+    # ── handle table ──
+    def register(self, layer: str, name: str, action_id: str) -> None:
+        """Publish a volume under its layer-qualified handle."""
+        key = f"{layer}:{name}"
+        self.handles[key] = action_id
+        self.by_name.setdefault(name, []).append(key)
+
+    def lookup(self, name: str) -> str | None:
+        """Resolve a bare LIS reference to a curtin action id.
+
+        Layers are built bottom-up, so at the moment a reference is resolved the
+        only candidates registered are the layers below it. Where a name still
+        matches more than one, the most recently built layer wins — the same
+        answer the old flat table gave by overwriting, minus the collateral
+        damage to the layer it overwrote.
+        """
+        keys = self.by_name.get(name)
+        return self.handles[keys[-1]] if keys else None
+
+    def consume(self, action_id: str) -> None:
+        """Mark a volume as owned by a higher layer: it must not be formatted."""
+        self.consumed.add(action_id)
 
     def defer_fs(self, volume_id: str, spec: dict, what: str) -> None:
         fs = spec.get("fs")
@@ -141,7 +163,6 @@ class StorageBuilder:
             match = disk.get("match", {}) or {}
             path = match.get("path")
             action_id = f"disk-{handle}"
-            self.handles[handle] = action_id
             action = {
                 "type": "disk",
                 "id": action_id,
@@ -157,11 +178,11 @@ class StorageBuilder:
             else:
                 refuse(f"disk '{handle}': match rules {sorted(match)} cannot be "
                        "expressed as a subiquity disk matcher")
-                del self.handles[handle]
                 continue
             # BIOS boot needs grub in the MBR gap plus a bios_grub partition on GPT.
             if self.firmware == "bios":
                 action["grub_device"] = True
+            self.register("disk", handle, action_id)
             self.actions.append(action)
             if self.firmware == "bios":
                 self.actions.append({
@@ -171,10 +192,9 @@ class StorageBuilder:
                 })
 
     def build_partitions(self) -> None:
-        consumed = self.consumed_handles()
         for i, part in enumerate(self.storage.get("partitions", [])):
             disk_handle = part.get("disk")
-            disk_action = self.handles.get(disk_handle)
+            disk_action = self.handles.get(f"disk:{disk_handle}")
             if not disk_action:
                 if disk_handle not in self.disk_paths:
                     refuse(f"partition {i}: references unknown disk handle {disk_handle!r}")
@@ -186,7 +206,7 @@ class StorageBuilder:
             role = part.get("role")
             handle = part.get("id") or f"auto-{i}"
             action_id = f"part-{handle}"
-            self.handles[handle] = action_id
+            self.register("part", handle, action_id)
             action = {
                 "type": "partition",
                 "id": action_id,
@@ -202,15 +222,15 @@ class StorageBuilder:
                 action["flag"] = "swap"
             self.actions.append(action)
 
-            if handle in consumed:
-                continue  # a crypt/raid/lvm layer owns this device
+            # Deferred unconditionally: whether a crypt/raid/lvm layer owns this
+            # partition is only known once those layers have been built, and the
+            # verdict is applied in finalize().
             spec = part.copy()
             spec["fs"] = role_fs(part)
             spec["mountpoint"] = role_mountpoint(part)
             self.defer_fs(action_id, spec, f"partition '{handle}'")
 
     def build_raid(self) -> None:
-        consumed = self.consumed_handles()
         for array in self.storage.get("raid", []) or []:
             name = array["name"]
             devices, missing = self.resolve(array.get("devices", []))
@@ -225,18 +245,16 @@ class StorageBuilder:
                 "raidlevel": array["level"], "devices": devices,
                 "spare_devices": spares, "preserve": False,
             })
-            self.handles[name] = raid_id
-            if name not in consumed:
-                self.defer_fs(raid_id, array, f"raid '{name}'")
+            self.register("raid", name, raid_id)
+            self.defer_fs(raid_id, array, f"raid '{name}'")
 
     def build_encryption(self) -> None:
-        consumed = self.consumed_handles()
         parts_by_handle = {p.get("id"): p for p in self.storage.get("partitions", [])
                            if p.get("id")}
         for container in self.storage.get("encryption", []) or []:
             cid = container["id"]
             over = container["over"]
-            volume = self.handles.get(over)
+            volume = self.lookup(over)
             if not volume:
                 refuse(f"encryption '{cid}': device {over!r} does not resolve to a volume")
                 continue
@@ -260,24 +278,21 @@ class StorageBuilder:
                        f"{SEED_MOUNT}/secrets/luks-{cid}.key; curtin cannot prompt "
                        "during an unattended autoinstall")
             self.actions.append(action)
-            self.handles[cid] = crypt_id
+            self.consume(volume)
+            self.register("crypt", cid, crypt_id)
 
             self.enroll_unlock(container)
-            if cid in consumed:
-                continue
             # The container has no fs of its own in LIS; it inherits the covered
-            # partition's filesystem intent.
+            # partition's filesystem intent — but only if no higher layer (an LVM
+            # volume group, say) claims the container instead. That is not known
+            # until every layer is built, so record the intent and judge it in
+            # finalize().
             covered = parts_by_handle.get(over, {})
             spec = dict(covered)
             spec["fs"] = covered.get("fs") or ("btrfs" if covered.get("role") == "root" else None)
             spec["mountpoint"] = covered.get("mountpoint") or (
                 "/" if covered.get("role") == "root" else None)
-            if spec["fs"] in (None, "none"):
-                refuse(f"encryption '{cid}': nothing consumes the container and the "
-                       f"covered volume '{over}' declares no filesystem — the LUKS "
-                       "device would be created and then left unused")
-                continue
-            self.defer_fs(crypt_id, spec, f"encryption '{cid}'")
+            self.crypt_specs.append({"id": crypt_id, "cid": cid, "over": over, "spec": spec})
 
     def luks_keyfile(self, container: dict) -> str | None:
         """The staged path curtin reads; see stage_key_commands for why /run."""
@@ -322,7 +337,6 @@ class StorageBuilder:
                        "autoinstall cannot perform it unattended")
 
     def build_lvm(self) -> None:
-        consumed = self.consumed_handles()
         for group in self.storage.get("lvm", []) or []:
             name = group["name"]
             devices, missing = self.resolve(group.get("devices", []))
@@ -333,7 +347,7 @@ class StorageBuilder:
             vg_id = f"vg-{name}"
             self.actions.append({"type": "lvm_volgroup", "id": vg_id, "name": name,
                                  "devices": devices, "preserve": False})
-            self.handles[name] = vg_id
+            self.register("vg", name, vg_id)
             for vol in group.get("volumes", []):
                 lv_handle = vol["name"]
                 lv_id = f"lv-{name}-{lv_handle}"
@@ -344,14 +358,33 @@ class StorageBuilder:
                                        f"lvm '{name}' volume '{lv_handle}'"),
                     "preserve": False,
                 })
-                self.handles[lv_handle] = lv_id
-                if lv_handle not in consumed:
-                    self.defer_fs(lv_id, vol, f"lvm '{name}' volume '{lv_handle}'")
+                self.register("lv", f"{name}/{lv_handle}", lv_id)
+                self.defer_fs(lv_id, vol, f"lvm '{name}' volume '{lv_handle}'")
 
     def resolve(self, handles: list[str]) -> tuple[list[str], list[str]]:
-        found = [self.handles[h] for h in handles if h in self.handles]
-        missing = [h for h in handles if h not in self.handles]
+        """Resolve member references, marking each resolved volume consumed."""
+        found, missing = [], []
+        for h in handles:
+            if action_id := self.lookup(h):
+                found.append(action_id)
+                self.consume(action_id)
+            else:
+                missing.append(h)
         return found, missing
+
+    def finalize(self) -> None:
+        """Apply the consumption verdict once every layer has been built."""
+        for entry in self.crypt_specs:
+            if entry["id"] in self.consumed:
+                continue        # an LVM/RAID layer owns the container
+            if entry["spec"]["fs"] in (None, "none"):
+                refuse(f"encryption '{entry['cid']}': nothing consumes the container "
+                       f"and the covered volume '{entry['over']}' declares no "
+                       "filesystem — the LUKS device would be created and then "
+                       "left unused")
+                continue
+            self.defer_fs(entry["id"], entry["spec"], f"encryption '{entry['cid']}'")
+        self.fs_specs = [s for s in self.fs_specs if s["volume"] not in self.consumed]
 
     # ── formats & mounts ──
     def build_formats(self) -> None:
@@ -390,6 +423,7 @@ class StorageBuilder:
         self.build_raid()
         self.build_encryption()
         self.build_lvm()
+        self.finalize()
         self.build_formats()
         return self.actions
 

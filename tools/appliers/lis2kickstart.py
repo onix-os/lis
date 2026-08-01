@@ -97,14 +97,26 @@ def render_storage(doc: dict, lines: list[str]) -> None:
                "unaccounted existing layout in an unattended run (schema.md §20.8)")
 
     encryption = {c["over"]: c for c in storage.get("encryption", []) or []}
+    crypt_by_id = {c["id"]: c for c in storage.get("encryption", []) or []}
     deferred_crypt = DEFERRED_CRYPT
-    consumed: dict[str, tuple[str, str]] = {}
+
+    def backing(dev: str) -> str:
+        """The block device a consumer names, resolved to the thing kickstart
+        can declare. A LUKS container has no `part` line of its own: Anaconda
+        builds it by putting --encrypted on the partition underneath, and the
+        resulting mapped device is what the volume group/array gets. So a
+        consumer that names the container is really consuming that partition."""
+        crypt = crypt_by_id.get(dev)
+        return crypt["over"] if crypt else dev
+
+    # handle -> (kind, owner name, name this device is referred to by)
+    consumed: dict[str, tuple[str, str, str]] = {}
     for group in storage.get("lvm", []) or []:
         for dev in group.get("devices", []):
-            consumed[dev] = ("pv", group["name"])
+            consumed[backing(dev)] = ("pv", group["name"], dev)
     for array in storage.get("raid", []) or []:
         for dev in array.get("devices", []) + (array.get("spares", []) or []):
-            consumed[dev] = ("raid", array["name"])
+            consumed[backing(dev)] = ("raid", array["name"], dev)
 
     btrfs_volumes: list[tuple[str, str | None, list]] = []
     for i, part in enumerate(storage.get("partitions", [])):
@@ -124,9 +136,9 @@ def render_storage(doc: dict, lines: list[str]) -> None:
         owner = consumed.get(handle)
 
         if owner and owner[0] == "pv":
-            target_name = f"pv.{handle}"
+            target_name = f"pv.{owner[2]}"
         elif owner and owner[0] == "raid":
-            target_name = f"raid.{handle}"
+            target_name = f"raid.{owner[2]}"
         elif role == "swap":
             target_name = "swap"
         else:

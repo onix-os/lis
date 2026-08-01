@@ -20,7 +20,7 @@ import json
 import pathlib
 import sys
 
-from lis_common import (track, check_unread, check_raid_consumers, registration_commands, enrollment_commands, resolve_disk_paths, check_snapshots, match_selectors, consume, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, luks_key_path, check_raid_consumers, registration_commands, enrollment_commands, resolve_disk_paths, check_snapshots, match_selectors, consume, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, check_mirror, check_kernel_variant, check_user_sudo,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, warn)
@@ -94,8 +94,11 @@ class Topology:
     Everything else gets a real filesystem.
     """
 
-    def __init__(self, storage: dict):
+    def __init__(self, storage: dict, doc: dict | None = None):
         self.storage = storage
+        # Only needed to resolve where a container's key material lives, which
+        # `keys[]` can override at the document level.
+        self.doc = doc if doc is not None else {"storage": storage}
         self.encryption = storage.get("encryption", []) or []
         self.lvm = storage.get("lvm", []) or []
         self.raid = storage.get("raid", []) or []
@@ -146,8 +149,26 @@ class Topology:
                       f"{pad}  type = \"luks\";",
                       f"{pad}  name = {nix_str(crypt['id'])};",
                       f"{pad}  settings.allowDiscards = true;"]
+            fmt = (crypt.get("type") or "luks2").lower()
+            lines.append(f"{pad}  extraFormatArgs = [ \"--type\" {nix_str(fmt)} ];")
             if keyfile := (crypt.get("key", {}) or {}).get("keyfile"):
                 lines.append(f"{pad}  settings.keyFile = {nix_str(keyfile)};")
+            elif key_path := luks_key_path(self.doc, crypt["id"]):
+                # Without one of keyFile/passwordFile/settings.keyFile, disko's
+                # askPassword defaults to true and the create script blocks on a
+                # console prompt (disko lib/types/luks.nix:118-127, :202-231) —
+                # an unattended install then hangs forever. passwordFile is the
+                # right half of that pair here: disko reads it only while
+                # formatting and opening (luks.nix:19-23) and never copies it
+                # into the installed system, whereas settings.keyFile is passed
+                # straight through to boot.initrd.luks.devices (luks.nix:338-357)
+                # and would point the booted machine at a seed volume that is no
+                # longer attached. The passphrase itself stays on the seed.
+                lines.append(f"{pad}  passwordFile = {nix_str(key_path)};")
+            else:
+                warn(f"encryption '{crypt['id']}': no key material declared — disko "
+                     "will prompt for the passphrase on the console, which no "
+                     "unattended install can answer")
             for method in crypt.get("unlock", []) or []:
                 if method not in ("passphrase", "keyfile"):
                     warn(f"encryption '{crypt['id']}': unlock method {method!r} must be "
@@ -253,7 +274,7 @@ def render_disko(doc: dict) -> str:
         raise SystemExit("error: document has no storage section — nothing to generate")
     partitions = storage.get("partitions", [])
     lvm = storage.get("lvm", []) or []
-    topology = Topology(storage)
+    topology = Topology(storage, doc)
 
     if not storage.get("wipe", False):
         # --apply runs `disko --mode destroy,format,mount`; disko recreates the
@@ -391,6 +412,12 @@ def render_hardware(doc: dict) -> str:
     if swaps:
         joined = " ".join(f"{{ device = {nix_str(d)}; }}" for d in swaps)
         out.append(f"  swapDevices = [ {joined} ];")
+    for name, backing, keyfile in luks_initrd_devices(doc):
+        entry = (f"  boot.initrd.luks.devices.{nix_str(name)} = "
+                 f"{{ device = {nix_str(backing)}; allowDiscards = true;")
+        if keyfile:
+            entry += f" keyFile = {nix_str(keyfile)};"
+        out.append(entry + " };")
     if any(fstype == "zfs" for _, _, fstype, _ in mounts):
         out.append("  boot.supportedFilesystems = [ \"zfs\" ];")
         out.append(f"  networking.hostId = {nix_str(host_id(doc))};")
@@ -399,6 +426,50 @@ def render_hardware(doc: dict) -> str:
 
     out.append("}")
     return "\n".join(out) + "\n"
+
+
+def luks_initrd_devices(doc: dict) -> list[tuple[str, str, str | None]]:
+    """Each LUKS container, paired with the device disko will have put it on.
+
+    Stage 1 opens only the containers it was told about: luksroot.nix builds its
+    unlock units from `boot.initrd.luks.devices`, and it is also what pulls
+    dm_crypt and the cipher modules into the initrd. Without an entry the root
+    filesystem — or, with LVM inside the container, the whole volume group —
+    never appears and the boot stalls in stage 1. disko would emit these from
+    its own NixOS module, but this translator generates plain NixOS options
+    only, so it states them itself.
+
+    The passphrase is not named here: `unlock: passphrase` means the operator
+    types it at boot, and the seed that holds it is not attached by then.
+    """
+    storage = doc.get("storage", {}) or {}
+    topology = Topology(storage, doc)
+    if not topology.encryption:
+        return []
+    disks = storage.get("disks", []) or (doc.get("target", {}) or {}).get("disks", [])
+    disk_ids = [d["id"] for d in disks]
+
+    # Same naming as mount_table: disko labels a partition `disk-<disk>-<id>`.
+    backing: dict[str, str] = {}
+    index: dict[str, int] = {}
+    for part in storage.get("partitions", []) or []:
+        disk_id = part.get("disk") or (disk_ids[0] if disk_ids else "main")
+        index[disk_id] = index.get(disk_id, 0) + 1
+        name = part.get("id") or f"{part.get('role', 'part')}{index[disk_id]}"
+        backing[part.get("id") or name] = f"/dev/disk/by-partlabel/disk-{disk_id}-{name}"
+    for array in storage.get("raid", []) or []:
+        backing[array["name"]] = f"/dev/md/{array['name']}"
+
+    devices = []
+    for crypt in topology.encryption:
+        device = backing.get(crypt["over"])
+        if not device:
+            warn(f"encryption '{crypt['id']}': over {crypt['over']!r} does not resolve "
+                 "to a partition or array; the booted system will not unlock it")
+            continue
+        devices.append((crypt["id"], device,
+                        (crypt.get("key", {}) or {}).get("keyfile")))
+    return devices
 
 
 def host_id(doc: dict) -> str:
@@ -416,7 +487,7 @@ def mount_table(doc: dict) -> tuple[list[tuple[str, str, str, list[str]]], list[
     `/dev/<vg>/<lv>` — so the mount table can be derived rather than guessed.
     """
     storage = doc.get("storage", {}) or {}
-    topology = Topology(storage)
+    topology = Topology(storage, doc)
     disks = storage.get("disks", []) or (doc.get("target", {}) or {}).get("disks", [])
     disk_of = {}
     for disk in disks:
