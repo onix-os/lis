@@ -231,11 +231,21 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
     # never runs and method{ crypto } in the recipe is ignored — the container
     # comes out as a plain ext4 partition (seen in partman/choose_partition).
     encrypted_vg = bool(storage.get("encryption"))
-    # Bare LUKS (no LVM inside the container) is emitted again: every earlier
-    # observation of it failing was made while the passphrase mechanism was
-    # broken — debconf-communicate does not exist in d-i, so the `seen` flag
-    # was never set and partman-crypto had no key. That is fixed, so this
-    # shape needs re-testing rather than refusing on stale evidence.
+    # Re-tested with the passphrase mechanism working, and it still fails — the
+    # cause is structural, not key material. partman-auto-crypto is a thin
+    # wrapper over the LVM autopartitioner (bin/autopartition-crypto:3 sources
+    # lib/auto-lvm.sh, :13 calls auto_lvm_prepare), and auto-lvm.sh:187-190 does
+    #     if ! echo "$scheme" | grep -q lvmok; then bail_out unusable_recipe; fi
+    # which raises partman-auto-lvm/unusable_recipe: "Failed to partition the
+    # selected disk ... the selected recipe does not contain any partition that
+    # can be created on LVM volumes". It bails before touching the partition
+    # table, which is why no partitions are ever created.
+    if storage.get("encryption") and not (storage.get("lvm") or []):
+        refuse("storage.encryption: partman-auto-crypto runs through the LVM "
+               "autopartitioner, which refuses a recipe with no $lvmok volumes "
+               "(auto-lvm.sh:187) — a LUKS container with the filesystem directly "
+               "inside it cannot be preseeded. Have a storage.lvm group consume "
+               "the container")
     # Not "crypto": that makes partman-auto-lvm put our method{ crypto } line
     # into pvscheme (auto-lvm.sh:245), where the VG map compares the raw disk
     # against /dev/mapper/<part>_crypt and bails out no_such_pv (:97,:106).
