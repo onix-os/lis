@@ -53,10 +53,6 @@ def size_mib(size: str, what: str) -> str:
 # Containers whose `part` line must be written by %pre, as (id, key path).
 DEFERRED_CRYPT: list[tuple[str, str]] = []
 
-# btrfs logical volumes whose subvolumes %post must create:
-# (device, mountpoint, subvolumes).
-LV_SUBVOLS: list = []
-
 # btrfs logical volumes: (label, blivet member name, mountpoint, subvolumes).
 LV_BTRFS: list = []
 
@@ -228,49 +224,43 @@ def render_storage(doc: dict, lines: list[str]) -> None:
             if not mountpoint:
                 refuse(f"lvm volume '{vol['name']}': no mountpoint")
                 continue
-            # pykickstart lists btrfs as a valid logvol --fstype, but Anaconda
-            # does not actually complete it: the install stalls at "Creating
-            # btrfs on /dev/mapper/<vg>-<lv>" and never returns (observed in a
-            # VM, twice). The schema accepting the value is not the same as the
-            # installer honoring it, so this is refused rather than emitted.
-            if fs == "btrfs":
-                # A logvol alone never gets a filesystem: blivet's BTRFS format
-                # create() is a no-op (blivet/formats/fs.py:1067 — "creation is
-                # done in blockdev.btrfs.create_volume"), and _execute_logvol only
-                # attaches the format. The `btrfs` command is what actually makes
-                # the volume, and _execute_btrfs runs after _execute_logvol, so it
-                # can take the logical volume as its member by blivet name.
-                label = f"{group['name']}{vol['name']}"
-                member = f"{group['name']}-{vol['name']}"
-                LV_BTRFS.append((label, member, mountpoint,
-                                 vol.get("subvolumes") or []))
-            if False:
-                refuse(f"lvm volume '{vol['name']}': Anaconda stalls creating "
-                       "btrfs on a logical volume — use ext4/xfs there, or put "
-                       "btrfs on a plain partition (see also Red Hat bug 1470524 "
-                       "for subvolumes on a logvol)")
-            lv_mount = mountpoint
-            if fs == "btrfs":
-                # A btrfs LV cannot be expressed: giving the logvol the mountpoint
-                # makes anaconda try to remove the LV to hand it to the subvolume
-                # ("Cannot remove non-leaf device 'vg0-root'"), and "none" is not
-                # accepted either — the btrfs handler normalises that sentinel
-                # (custom_partitioning.py:1169) but the logvol handler does not,
-                # so _check_mount_point raises 'The mount point "none" is not
-                # valid. It must start with a /.'
-                refuse(f"lvm volume '{vol['name']}': Anaconda cannot put btrfs on "
-                       "a logical volume — the volume must own the mountpoint, but "
-                       "then the subvolume cannot take it, and an unmounted logvol "
-                       "is rejected. Use ext4/xfs on the logical volume, or put "
-                       "btrfs on a plain partition")
-            lines.append(f"logvol {lv_mount} --vgname={group['name']} "
+            lines.append(f"logvol {mountpoint} --vgname={group['name']} "
                          f"--name={vol['name']} --fstype={FS_MAP.get(fs, fs)} {size}")
-            if subs := vol.get("subvolumes"):
-                # Anaconda itself cannot carve subvolumes off a logical volume
-                # (Red Hat bug 1470524), so they are built after the install from
-                # a %post --nochroot block, where /mnt/sysimage and the raw
-                # device are both reachable.
-                pass   # handled by the btrfs command emitted below
+            if fs != "btrfs":
+                continue
+            # btrfs on a logical volume takes two logvol lines and a btrfs one.
+            #
+            # A logvol alone never gets a filesystem: blivet's BTRFS format
+            # create() is a no-op (blivet/formats/fs.py:1075 — "filesystem
+            # creation is done in blockdev.btrfs.create_volume") and
+            # _execute_logvol only attaches the format, so the volume must be
+            # made by the `btrfs` command, which runs last
+            # (custom_partitioning.py:90-94) and resolves the LV by its blivet
+            # name `<vg>-<lv>` (devicetree.resolve_device -> get_device_by_name).
+            #
+            # But the `btrfs` command hands a mount point over by destroying
+            # whatever holds it (custom_partitioning.py:1175-1180), and by then
+            # the volume is already the LV's child, so that destroy fails with
+            # "Cannot remove non-leaf device". The LV therefore has to give the
+            # mount point up first. `logvol none` cannot: unlike the partition
+            # and btrfs handlers, the logvol handler normalises no sentinel and
+            # _check_mount_point rejects anything not starting with a /
+            # (custom_partitioning.py:1211-1215).
+            #
+            # The way through is a second logvol line. `--thinpool` blanks the
+            # mount point unconditionally (custom_partitioning.py:855-857) and
+            # `--noformat` then takes the branch that only re-points an existing
+            # device (custom_partitioning.py:889-923) — it assigns
+            # `dev.format.mountpoint = ""` and returns before any thin pool is
+            # built, leaving the btrfs LV intact and the mount point free. The
+            # swap sentinel blanks the mount point too, but would also register
+            # the volume as fstab swap (line 921), so it is not usable here.
+            lines.append(f"logvol none --noformat --thinpool "
+                         f"--vgname={group['name']} --name={vol['name']}")
+            label = f"{group['name']}{vol['name']}"
+            member = f"{group['name']}-{vol['name']}"
+            LV_BTRFS.append((label, member, mountpoint,
+                             vol.get("subvolumes") or []))
 
     for label, member, mountpoint, subs in LV_BTRFS:
         lines.append(f"btrfs none --label={label} {member}")
@@ -495,38 +485,6 @@ def render_kickstart(doc: dict) -> str:
     late.append("chmod 600 /var/lib/lis/system.lis.json")
 
     lines += ["", "%post --erroronfail", *late, "%end"]
-
-    for device, mountpoint, subs in LV_SUBVOLS:
-        # Anaconda installed straight onto the volume (subvolid 5). Snapshot that
-        # tree into the subvolume the document names for this mountpoint, make it
-        # the default so a plain mount lands there, create the rest, and rewrite
-        # fstab. Runs --nochroot: /mnt/sysimage and the device are both needed.
-        root_sub = next((v["name"] for v in subs
-                         if v.get("mountpoint") == mountpoint), None)
-        steps = ["set -eu",
-                 "top=/mnt/lis-btrfs-top",
-                 "mkdir -p $top",
-                 f"mount -o subvolid=5 {device} $top"]
-        if root_sub:
-            steps += [f"btrfs subvolume snapshot /mnt/sysimage $top/{root_sub}",
-                      f'id=$(btrfs subvolume list $top | '
-                      f'awk \'$NF=="{root_sub}" {{print $2}}\' | head -n1)',
-                      "btrfs subvolume set-default $id $top",
-                      # the plain-mount entry now resolves to the snapshot
-                      f"sed -i 's#\\(btrfs[[:space:]]\\+\\)#\\1subvol={root_sub},#' "
-                      "/mnt/sysimage/etc/fstab"]
-        for vol in subs:
-            name = vol["name"]
-            if name == root_sub:
-                continue
-            steps.append(f"btrfs subvolume create $top/{name}")
-            if mnt := vol.get("mountpoint"):
-                steps += [f"[ -d /mnt/sysimage{mnt} ] && "
-                          f"cp -a /mnt/sysimage{mnt}/. $top/{name}/ || true",
-                          f"echo '{device} {mnt} btrfs subvol={name},defaults 0 0' "
-                          ">> /mnt/sysimage/etc/fstab"]
-        steps.append("umount $top")
-        lines += ["", "%post --nochroot --erroronfail", *steps, "%end"]
 
     firstboot = [s["content"] for s in scripts.get("firstboot", []) if s.get("content")]
     for user in users:
