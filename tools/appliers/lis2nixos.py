@@ -472,6 +472,21 @@ def luks_initrd_devices(doc: dict) -> list[tuple[str, str, str | None]]:
     return devices
 
 
+def lv_device(vg: str, lv: str) -> str:
+    """The device-mapper node for a logical volume.
+
+    Not `/dev/<vg>/<lv>`: the classic NixOS stage 1 mounts the root filesystem
+    with busybox `mount`, which passes the path through verbatim instead of
+    canonicalising it the way util-linux does. A system installed with the
+    symlink then reports a root device that no longer says device-mapper
+    anywhere, which is exactly the evidence that root sits on a LUKS-backed
+    volume group. The mapper node is the real thing the symlink points at.
+    Device-mapper flattens the two names into one by doubling every literal
+    dash, so vg 'a-b' lv 'c' is /dev/mapper/a--b-c.
+    """
+    return f"/dev/mapper/{vg.replace('-', '--')}-{lv.replace('-', '--')}"
+
+
 def host_id(doc: dict) -> str:
     """ZFS demands a stable 8-hex-digit host id; derive it from the hostname."""
     import hashlib
@@ -484,7 +499,8 @@ def mount_table(doc: dict) -> tuple[list[tuple[str, str, str, list[str]]], list[
 
     disko names GPT partitions `disk-<disk>-<partition>`, LUKS mappings
     `/dev/mapper/<id>`, arrays `/dev/md/<name>` and logical volumes
-    `/dev/<vg>/<lv>` — so the mount table can be derived rather than guessed.
+    `/dev/mapper/<vg>-<lv>` — so the mount table can be derived rather than
+    guessed.
     """
     storage = doc.get("storage", {}) or {}
     topology = Topology(storage, doc)
@@ -551,7 +567,7 @@ def mount_table(doc: dict) -> tuple[list[tuple[str, str, str, list[str]]], list[
 
     for group in storage.get("lvm", []) or []:
         for vol in group.get("volumes", []):
-            add(vol, f"/dev/{group['name']}/{vol['name']}")
+            add(vol, lv_device(group["name"], vol["name"]))
 
     for pool, info in topology.zpools.items():
         for spec in info["datasets"]:
