@@ -2310,7 +2310,12 @@ def render_users(doc: dict) -> list[str]:
     """users[] → users.users.<name>, per-user sudo rules and login shells."""
     out: list[str] = []
     nopasswd: list[str] = []
-    ssh = ((doc.get("network", {}) or {}).get("ssh", {}) or {})
+    # An authorized_keys file on a machine with no sshd authorises nothing.
+    # Both spellings count: network.ssh.enabled and software.services.enable
+    # reach the same services.openssh.enable (see render_software).
+    sshd = bool(((doc.get("network", {}) or {}).get("ssh", {}) or {}).get("enabled")) \
+        or bool({"sshd", "ssh"} & set(((doc.get("software", {}) or {})
+                                       .get("services", {}) or {}).get("enable", []) or []))
     for user in doc.get("users", []) or []:
         name = user["name"]
         out.append(f"  users.users.{name} = {{")
@@ -2348,10 +2353,11 @@ def render_users(doc: dict) -> list[str]:
             out.append(f"    hashedPassword = {nix_str(password_field(user) or '!')};")
         if keys := user.get("ssh_authorized_keys"):
             out.append(f"    openssh.authorizedKeys.keys = {nix_list(keys)};")
-            if not ssh.get("enabled"):
-                warn(f"user '{name}': ssh_authorized_keys is installed, but the "
-                     "document does not set network.ssh.enabled, so no sshd runs "
-                     "and the keys authorise nothing")
+            if not sshd:
+                warn(f"user '{name}': ssh_authorized_keys is installed into "
+                     "openssh.authorizedKeys.keys, but nothing in the document "
+                     "starts an sshd (network.ssh.enabled, or sshd in "
+                     "software.services.enable), so the keys authorise nothing")
         shell = user.get("shell")
         if shell in ("zsh", "fish"):
             out.append(f"    shell = pkgs.{shell};")
