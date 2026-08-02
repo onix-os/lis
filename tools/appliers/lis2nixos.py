@@ -1083,9 +1083,14 @@ def render_script_hooks(doc: dict, file_cmds: list[str] | None = None) -> list[s
     # NixOS only prints a one-line "snippet failed". Give hooks a real PATH.
     if activation:
         out += ["  system.activationScripts.lis-hooks = {",
-                # Hooks may reference the accounts the document declares, so they
-                # must not run before the snippet that creates them.
-                "    deps = [ \"users\" ];",
+                # Hooks may reference the accounts the document declares, so
+                # they must not run before the snippet that creates them — and
+                # a post_install hook, or a files[] entry this applier writes
+                # by hand, routinely edits something under /etc, which is not
+                # populated until the `etc` snippet has run. `etc` is itself
+                # stringAfter [ "users" "groups" ] (system/etc/etc-activation.
+                # nix:15-19), so naming both is an ordering, not a cycle.
+                "    deps = [ \"users\" \"etc\" ];",
                 "    text ="
                 f"      \"export PATH=\\\"${{lib.makeBinPath {HOOK_PATH}}}:$PATH\\\"\\n\" +",
                 "      " + nix_script(AS_USER_FN + "\n" + "\n".join(activation)) + ";",
@@ -1518,14 +1523,21 @@ def render_wifi(wifi: list, manager: str, out: list[str]) -> None:
         for net in wifi:
             consume(net)
         return
-    if any(net.get("psk_hash") for net in wifi):
+    # Only an entry with a PSK causes the secrets file to be written, and both
+    # back-ends treat a named-but-missing secrets file as a hard error: naming
+    # it for an open-network-only document would take the radio down instead of
+    # bringing it up.
+    secrets = any(net.get("psk_hash") for net in wifi)
+    if secrets:
         warn(f"network.wifi[].psk_hash is read at boot from {WIRELESS_SECRETS}, "
              "not written into configuration.nix, which the Nix store publishes "
              "world-readable; --apply installs that file, a translate-only run "
              "must provision it")
     if manager == "systemd-networkd":
-        out += ["  networking.wireless.enable = true;",
-                f"  networking.wireless.secretsFile = {nix_str(WIRELESS_SECRETS)};"]
+        out.append("  networking.wireless.enable = true;")
+        if secrets:
+            out.append("  networking.wireless.secretsFile = "
+                       f"{nix_str(WIRELESS_SECRETS)};")
         for index, net in enumerate(wifi):
             ssid = net["ssid"]
             psk = net.get("psk_hash")
@@ -1545,8 +1557,9 @@ def render_wifi(wifi: list, manager: str, out: list[str]) -> None:
                 out.append(f"  networking.wireless.networks.{nix_str(ssid)}.hidden = true;")
         return
     # networkmanager, and `auto` — which the manager block resolved to NM.
-    out.append("  networking.networkmanager.ensureProfiles.environmentFiles = "
-               f"[ {nix_str(WIRELESS_SECRETS)} ];")
+    if secrets:
+        out.append("  networking.networkmanager.ensureProfiles.environmentFiles = "
+                   f"[ {nix_str(WIRELESS_SECRETS)} ];")
     for index, net in enumerate(wifi):
         ssid = net["ssid"]
         out += [f"  networking.networkmanager.ensureProfiles.profiles.\"lis-wifi-{index}\" = {{",
@@ -1761,7 +1774,7 @@ def resolve_app(app: dict) -> tuple[str | None, str | None]:
             available[source] = value
 
     name = app.get("name") or app.get("package") or "?"
-    order = [s for s in (app.get("preference") or [])] or ["native", "flatpak"]
+    order = list(app.get("preference") or []) or ["native", "flatpak"]
     skipped: list[str] = []
     for source in order:
         if source not in APP_SOURCES:
@@ -2098,18 +2111,17 @@ def render_drivers(doc: dict, opts: NixOptions) -> None:
     elif gpu not in (None, "auto", "none"):
         refuse(f"drivers.gpu {gpu!r} has no NixOS mapping")
 
+    # `auto` and `none` are already answered in hardware.nix, which writes
+    # hardware.enableRedistributableFirmware for every document. Only "all"
+    # was being dropped: it is a strictly larger set than the redistributable
+    # one and has its own option (MATRIX §2.11 fn 10).
     firmware = drivers.get("firmware")
     if firmware == "all":
         opts.set("hardware.enableAllFirmware", "true")
-        # hardware.enableAllFirmware asserts on allowUnfree
-        # (nixos/modules/hardware/all-firmware.nix): the non-redistributable
-        # blobs cannot be built without it.
+        # all-firmware.nix asserts on allowUnfree — the non-redistributable
+        # blobs cannot even be evaluated without it.
         opts.set("nixpkgs.config.allowUnfree", "true")
-    elif firmware == "auto":
-        opts.set("hardware.enableRedistributableFirmware", "true")
-    elif firmware == "none":
-        opts.set("hardware.enableRedistributableFirmware", "false")
-    elif firmware is not None:
+    elif firmware not in (None, "auto", "none"):
         refuse(f"drivers.firmware {firmware!r} has no NixOS mapping")
 
 
