@@ -59,7 +59,80 @@ def role_fs(part: dict) -> str | None:
 
 
 def role_mountpoint(part: dict) -> str | None:
+    """The mountpoint one partition asks for, role default included.
+
+    Correct for a single partition, but blind to its neighbours: two partitions
+    with `role: boot` both resolve to /boot. Anything rendering a whole layout
+    wants resolve_mountpoints() below, which arbitrates between them.
+    """
     return part.get("mountpoint") or ROLE_MOUNT.get(part.get("role"))
+
+
+def resolve_mountpoints(parts, *,
+                        claimed: set[str] | None = None) -> dict[int, str | None]:
+    """Give each mountpoint to exactly one partition, declarations winning.
+
+    ROLE_MOUNT exists so a document can write `role: boot` without repeating
+    `/boot`, and that shorthand is right far more often than it is wrong — the
+    fallback stays. What it must not do is *invent a second claimant*: a
+    mirrored boot partition (docs/examples/test-raid.lis.json 'boot2') carries
+    `role: boot` for the redundancy and deliberately omits the mountpoint,
+    because only one of the pair can be mounted at /boot. Handing it the role
+    default too produces two /boot entries, which AutoYaST, Anaconda and
+    nixos-generate-config each reject in their own words. So the bug was never
+    the fallback; it was resolving one partition at a time.
+
+    Arbitration, evaluated over the whole list rather than in encounter order:
+
+    1. An explicit `mountpoint` is the document speaking, so it outranks every
+       role default no matter where it sits in the list.
+    2. Two explicit declarations of the same path are contradictory intent, not
+       something to quietly halve: that refuses, naming both.
+    3. A role default whose path is already claimed is dropped *silently*. The
+       document asked for nothing there, so there is nothing to report — the
+       partition is still created and formatted, it simply is not mounted.
+
+    Returns {index into `parts`: mountpoint or None}, so a caller pairs it with
+    `enumerate()`. Pass the *whole* `storage.partitions` list even when
+    rendering one disk at a time, or the indices will not line up and each disk
+    will arbitrate in ignorance of the others.
+
+    `claimed` is an optional set of paths already spoken for, updated in place.
+    Seed it with the mountpoints of `storage.lvm[].volumes` (or hand the same
+    set to two render passes) so a logical volume at / and a partition at / are
+    caught by rule 2 rather than both being emitted.
+
+    Swap is not a mountpoint and never appears here: ROLE_MOUNT has no `swap`
+    entry, so a swap partition resolves to None and stays the caller's business.
+    """
+    parts = list(parts or [])
+    claims: set[str] = claimed if claimed is not None else set()
+    out: dict[int, str | None] = {}
+
+    for i, part in enumerate(parts):
+        out[i] = None
+        declared = part.get("mountpoint")
+        if not declared:
+            continue
+        if declared in claims:
+            refuse(f"partition '{part.get('id') or i}' declares mountpoint "
+                   f"{declared!r}, which another declaration in this document "
+                   "already claims — two devices cannot occupy one path, and "
+                   "picking a winner here would silently drop the other")
+            continue
+        claims.add(declared)
+        out[i] = declared
+
+    for i, part in enumerate(parts):
+        if out[i] is not None or part.get("mountpoint"):
+            continue   # declared (or refused) above; a default cannot override it
+        default = ROLE_MOUNT.get(part.get("role"))
+        if not default or default in claims:
+            continue
+        claims.add(default)
+        out[i] = default
+
+    return out
 
 
 def check_firmware(doc: dict) -> None:
@@ -785,6 +858,121 @@ def luks_key_path(doc: dict, cid: str) -> str | None:
         # `passphrase: true` declares *how* it unlocks, not the secret itself.
         return f"{SEED_MOUNT}/secrets/luks-{cid}.key"
     return None
+
+
+# ── encryption emission guard ────────────────────────────────────────
+#
+# The failure this exists to stop: a document declares storage.encryption, the
+# applier reports success, and the machine comes up with a plaintext disk. It
+# has happened three separate ways — an encryption branch the RAID code path
+# never reaches (lis2archinstall), a partition loop that honours --encrypted
+# beside a RAID loop that does not (lis2kickstart), a renderer that emits no
+# LUKS element at all (lis2agama) — and in every case the applier's own
+# "handling" existed, just not on the line that ran. Checking intent cannot
+# catch that. Checking the bytes about to be written can, which is why
+# lis2debian.py:1064 already refuses a preseed with no `method{ crypto }` in it;
+# that guard caught a fix silently building an unencrypted PV. This is the same
+# idea, generalised over the formats the other appliers emit.
+
+DEFAULT_ENCRYPTION_MARKERS = (
+    "luks",            # cryptsetup, disko, archinstall, Agama, AutoYaST
+    "dm_crypt",        # AutoYaST <crypt_method>
+    "dm-crypt",
+    "crypt_fs",        # AutoYaST <loop_fs>/<crypt_fs>
+    "--encrypted",     # kickstart part/logvol/raid
+    "method{ crypto }",  # partman recipe
+    "crypto_",         # partman-crypto templates, crypttab TYPE=crypto_LUKS
+    "encryption_type",  # archinstall DiskEncryption
+    "cryptsetup",      # any applier that formats the container from a script
+)
+
+
+def _as_text(generated) -> str:
+    """Whatever an applier is about to write, as one searchable string."""
+    if isinstance(generated, str):
+        return generated
+    if isinstance(generated, (bytes, bytearray)):
+        return bytes(generated).decode("utf-8", "replace")
+    if isinstance(generated, (list, tuple)) and all(isinstance(v, str) for v in generated):
+        return "\n".join(generated)   # a list of lines, joined rather than escaped
+    try:
+        return json.dumps(generated, default=str)
+    except (TypeError, ValueError):
+        return str(generated)
+
+
+def check_encryption_emitted(doc, generated: str | dict | list, *,
+                             marker=None,
+                             label: str = "generated configuration") -> None:
+    """Refuse when a declared LUKS container left no trace in the output.
+
+    Call it on the *rendered* artifact, immediately before writing it. What
+    counts as one artifact is the thing that has to express the layout on its
+    own, which is not the same as one file:
+
+    * An applier writing several files that jointly describe the install passes
+      them together — `[disko_nix, configuration_nix]`, `[answers, prepare_sh]`.
+      Checking a single file of such a set refuses honest output, because the
+      encryption legitimately lives in a sibling.
+    * An applier writing two *alternative* complete profiles checks each on its
+      own. lis2agama emits profile.json for the Agama engine and autoyast.xml
+      for AutoYaST; only one of them installs the machine, so encryption
+      reaching one says nothing about the other and a joint check would let a
+      plaintext profile through on the strength of its sibling.
+
+    Getting that grouping wrong is the realistic way to earn a false refusal,
+    so decide it once, deliberately, per applier.
+
+    `generated` may be the artifact in whatever shape the applier holds it:
+    text, bytes, a list of lines, or the dict/list it is about to serialise
+    (json.dumps'd here before searching — so a marker containing a quote or a
+    backslash will not match through JSON escaping; prefer plain markers).
+
+    `marker` is what counts as evidence, and the caller should supply it:
+
+        str                 one substring, e.g. "--encrypted"
+        iterable of str     any one of them is enough
+        callable            marker(container) -> str | iterable of str, for
+                            per-container evidence such as the mapper name;
+                            this is the only form that can tell two containers
+                            apart, so a document with several LUKS devices is
+                            checked properly rather than as a group
+        None                DEFAULT_ENCRYPTION_MARKERS, plus the container's own
+                            id, are accepted
+
+    Supplying `marker` makes it the whole definition of evidence: the id is not
+    accepted as a fallback, because a caller that knows its own dialect has
+    said what encryption looks like there. Leaving it None is the lenient mode
+    — it must be, since the default list cannot know every applier's spelling,
+    and a false refusal blocks a valid document.
+
+    Matching is case-insensitive substring matching. This is deliberately a
+    smoke alarm, not a proof: it cannot tell a real LUKS block from the word
+    "luks" in a comment. It is calibrated for the failure that actually occurs,
+    which is *nothing at all* being emitted.
+    """
+    containers = (doc.get("storage", {}) or {}).get("encryption", []) or []
+    if not containers:
+        return
+    text = _as_text(generated).casefold()
+
+    for i, container in enumerate(containers):
+        cid = container.get("id") or f"#{i}"
+        wanted = marker(container) if callable(marker) else marker
+        explicit = wanted is not None
+        if wanted is None:
+            wanted = DEFAULT_ENCRYPTION_MARKERS
+        if isinstance(wanted, str):
+            wanted = (wanted,)
+        wanted = [str(m) for m in wanted if m]
+        if any(m.casefold() in text for m in wanted):
+            continue
+        if not explicit and str(cid).casefold() in text:
+            continue
+        refuse(f"storage.encryption '{cid}' is declared but the {label} carries "
+               f"no trace of it (looked for {', '.join(repr(m) for m in wanted)})"
+               " — applying it would install an unencrypted system and report "
+               "success")
 
 
 def enrollment_commands(doc: dict) -> list[str]:
