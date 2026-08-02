@@ -18,9 +18,11 @@ import argparse
 import base64
 import json
 import pathlib
+import re
 import sys
 
 from lis_common import (track, check_unread, luks_key_path, check_raid_consumers, registration_commands, enrollment_commands, resolve_disk_paths, check_snapshots, match_selectors, consume, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
+                        check_encryption_emitted, resolve_mountpoints,
                         check_unhandled, check_section_fields, check_mirror, check_kernel_variant, check_user_sudo,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, warn)
@@ -51,6 +53,94 @@ def disko_size(size: str) -> str:
 
 DEFAULT_ZPOOL = "rpool"
 
+# ZFS gives three characters a structural meaning inside a dataset name — '@'
+# separates a snapshot, '#' a bookmark, '/' a child dataset — and reserves '%'
+# for its own internal datasets (zfs(8), "Naming Requirements"). A btrfs
+# subvolume called '@home' is perfectly legal, so a document that declares one
+# and asks for zfs is asking for something ZFS cannot name.
+ZFS_RESERVED = re.compile(r"[@#/%]")
+
+_ZFS_REFUSED: set[str] = set()
+
+
+def zfs_child(base: str, name: str) -> str:
+    """The dataset a `subvolumes[]` entry becomes under a zfs filesystem.
+
+    The declared name is used verbatim. It used to be run through
+    `lstrip("@")`, which put '@home' on disk as 'home' — the same document
+    creates '@home' on every applier that does not mangle it, so one
+    declaration landed under two conventions depending on the target. Since
+    ZFS genuinely cannot carry the character, the honest answer is to refuse
+    rather than to rename: the operator asked for a name, and quietly
+    installing a different one is the silent drift the spec forbids (SPEC
+    §2.3).
+    """
+    if ZFS_RESERVED.search(name):
+        if name not in _ZFS_REFUSED:
+            _ZFS_REFUSED.add(name)
+            refuse(f"subvolume {name!r} on a zfs filesystem: ZFS reserves @ (snapshot), "
+                   "# (bookmark), / (child dataset) and % in dataset names "
+                   "(zfs(8), Naming Requirements), so this name cannot be created "
+                   "as written — rename the subvolume, or declare fs: btrfs where "
+                   "the name is legal")
+    return f"{base}-{name}"
+
+
+# The mountpoint arbitration below is per-storage-section, not per-partition:
+# resolve_mountpoints() has to see the whole layout to notice that two
+# partitions are asking for one path. This translator walks the layout three
+# times (disko, the mount table, the initrd luks list) and refuse() is not
+# idempotent, so the verdict is reached once and reused. The storage object
+# itself is kept in the cache, which stops its id() from being recycled by a
+# second document translated in the same process.
+_ARBITRATED: dict[int, tuple[dict, dict[int, str | None]]] = {}
+
+
+def partition_mountpoints(storage: dict) -> dict[int, str | None]:
+    """Every declared partition's mountpoint, arbitrated, keyed by identity.
+
+    Role defaults are shorthand, not a second declaration: test-raid's 'boot2'
+    carries `role: boot` for the mirroring and deliberately omits the
+    mountpoint, because only one of the pair can be mounted at /boot. Handing
+    it the default too would put two `mountpoint = "/boot"` entries in one
+    disko config. Explicit mountpoints win wherever they sit in the list, and a
+    role default whose path is already spoken for is dropped.
+    """
+    cached = _ARBITRATED.get(id(storage))
+    if cached is not None and cached[0] is storage:
+        return cached[1]
+
+    parts = list(storage.get("partitions", []) or [])
+    # A logical volume or an array at / is as much a claimant as a partition
+    # is, and it is rendered by a different pass, so seed it here.
+    claimed = {vol.get("mountpoint") for group in (storage.get("lvm") or [])
+               for vol in (group.get("volumes") or []) if vol.get("mountpoint")}
+    claimed |= {array.get("mountpoint") for array in (storage.get("raid") or [])
+                if array.get("mountpoint")}
+
+    # NixOS puts the ESP at /boot, not at the shared ROLE_MOUNT default of
+    # /boot/efi: boot.loader.efi.efiSysMountPoint defaults to "/boot" and both
+    # loaders this translator emits write their entries beneath it. Since it
+    # never sets efiSysMountPoint, an ESP arbitrated onto /boot/efi would leave
+    # the bootloader with no ESP under it. Only the copy handed to the arbiter
+    # is relabelled — it reads nothing but mountpoint, role and id.
+    view = [dict(part, role="boot")
+            if part.get("role") == "esp" and not part.get("mountpoint") else part
+            for part in parts]
+    resolved = resolve_mountpoints(view, claimed=claimed)
+
+    for i, part in enumerate(parts):
+        if part.get("role") == "esp" and resolved[i] is None and not part.get("mountpoint"):
+            refuse(f"partition '{part.get('id') or i}' declares role 'esp' but /boot is "
+                   "already claimed by another partition — NixOS mounts the EFI system "
+                   "partition at boot.loader.efi.efiSysMountPoint, whose default is "
+                   "/boot, and this translator does not emit that option; leaving the "
+                   "ESP unmounted would install a system with no bootloader on it")
+
+    out = {id(part): resolved[i] for i, part in enumerate(parts)}
+    _ARBITRATED[id(storage)] = (storage, out)
+    return out
+
 
 def fs_content(lines, pad, fs, mountpoint, mount_options, subvolumes):
     """Emit the `content = { … }` block for a plain filesystem or swap area."""
@@ -66,9 +156,14 @@ def fs_content(lines, pad, fs, mountpoint, mount_options, subvolumes):
                   f"{pad}  subvolumes = {{"]
         covered = any(s["mountpoint"] == mountpoint for s in subvolumes)
         if mountpoint and not covered:
+            # Not a rename: nothing in the document covers this mount, and a
+            # btrfs mount needs some subvolume, so one is invented for it.
             lines.append(f"{pad}    \"@\" = {{ mountpoint = {nix_str(mountpoint)}; }};")
         for sub in subvolumes:
-            name = sub["name"] if sub["name"].startswith("@") else "@" + sub["name"]
+            # Verbatim. Prefixing an absent '@' created 'home' as '@home' while
+            # debian, ubuntu, arch and alpine created it as 'home' — one
+            # declaration, two conventions, decided by the target.
+            name = sub["name"]
             entry = f"{pad}    {nix_str(name)} = {{ mountpoint = {nix_str(sub['mountpoint'])};"
             if sub.get("mount_options"):
                 entry += f" mountOptions = {nix_list(sub['mount_options'])};"
@@ -106,6 +201,7 @@ class Topology:
         self.consumer: dict[str, tuple[str, str]] = {}
         self.zpools: dict[str, dict] = {}
         self.specs: dict[str, dict] = {}   # handle -> the LIS object declaring it
+        self.part_mounts = partition_mountpoints(storage)
 
         for group in self.lvm:
             for dev in group.get("devices", []):
@@ -133,6 +229,16 @@ class Topology:
                 if vol.get("fs") == "zfs":
                     warn(f"lvm volume '{vol['name']}': fs zfs on a logical volume is "
                          "unusual; a zpool over the physical volumes is preferred")
+
+    def mountpoint_of(self, spec: dict) -> str | None:
+        """Where this spec's filesystem goes, after the whole layout arbitrated.
+
+        Partitions get the arbitrated answer; an array or a logical volume is
+        not a partition, was not in that list, and keeps what it declares.
+        """
+        if id(spec) in self.part_mounts:
+            return self.part_mounts[id(spec)]
+        return spec.get("mountpoint") or ("/" if spec.get("role") == "root" else None)
 
     def owner_of(self, handle: str) -> tuple[str, str] | None:
         """The consumer of a handle, following an encryption container if present."""
@@ -196,7 +302,7 @@ class Topology:
                       f"{pad}  pool = {nix_str(owner[1])};",
                       f"{pad}}};"]
         else:
-            mp = spec.get("mountpoint") or ("/" if spec.get("role") == "root" else None)
+            mp = self.mountpoint_of(spec)
             fs = spec.get("fs") or ("swap" if spec.get("role") == "swap" else None)
             fs_content(lines, pad, fs, mp, spec.get("mount_options", []),
                        spec.get("subvolumes", []))
@@ -249,8 +355,14 @@ def render_zpools(topology: Topology, doc: dict, out: list) -> None:
                 "        options.ashift = \"12\";",
                 "        datasets = {"]
         for spec in info["datasets"]:
-            mp = spec.get("mountpoint") or ("/" if spec.get("role") == "root" else None)
+            mp = topology.mountpoint_of(spec)
             base = (spec.get("id") or spec.get("name") or "root")
+            if any(s["mountpoint"] == mp for s in spec.get("subvolumes", []) or []):
+                # One of the declared children already occupies that path, the
+                # same rule fs_content() applies to btrfs. Mounting the parent
+                # there too defines fileSystems."/" twice, which is an
+                # evaluation error rather than the last one winning.
+                mp = None
             if mp:
                 out += [f"          {nix_str(base)} = {{",
                         "            type = \"zfs_fs\";",
@@ -259,7 +371,7 @@ def render_zpools(topology: Topology, doc: dict, out: list) -> None:
                     out.append(f"            options.mountpoint = \"legacy\";")
                 out.append("          };")
             for sub in spec.get("subvolumes", []) or []:
-                name = f"{base}-{sub['name'].lstrip('@')}"
+                name = zfs_child(base, sub["name"])
                 out += [f"          {nix_str(name)} = {{",
                         "            type = \"zfs_fs\";",
                         f"            mountpoint = {nix_str(sub['mountpoint'])};",
@@ -333,13 +445,16 @@ def render_disko(doc: dict) -> str:
             if part.get("size"):
                 out.append(f"              size = {nix_str(disko_size(part['size']))};")
             if part.get("role") == "esp":
-                mp = part.get("mountpoint", "/boot")
+                mp = topology.mountpoint_of(part)
                 out += ["              type = \"EF00\";",
                         "              content = {",
                         "                type = \"filesystem\";",
-                        "                format = \"vfat\";",
-                        f"                mountpoint = {nix_str(mp)};",
-                        "                mountOptions = [ \"umask=0077\" ];",
+                        "                format = \"vfat\";"]
+                if mp:
+                    # An ESP nothing mounts is a refusal above, not a partial
+                    # attribute set: disko's filesystem type wants a real path.
+                    out.append(f"                mountpoint = {nix_str(mp)};")
+                out += ["                mountOptions = [ \"umask=0077\" ];",
                         "              };"]
             else:
                 topology.emit_content(out, "              ",
@@ -514,10 +629,12 @@ def mount_table(doc: dict) -> tuple[list[tuple[str, str, str, list[str]]], list[
     mounts: list[tuple[str, str, str, list[str]]] = []
     swaps: list[str] = []
 
-    def add(spec: dict, device: str, default_mp: str | None = None) -> None:
+    def add(spec: dict, device: str, mountpoint: str | None) -> None:
+        # The mountpoint is decided by the caller, not rediscovered here: the
+        # partitions come from one arbitration over the whole layout, so the
+        # fstab this builds cannot disagree with the disko config that made it.
         role = spec.get("role")
         fs = spec.get("fs") or {"esp": "vfat", "swap": "swap", "root": "btrfs"}.get(role)
-        mountpoint = spec.get("mountpoint") or default_mp
         if fs == "swap":
             swaps.append(device)
             return
@@ -530,7 +647,7 @@ def mount_table(doc: dict) -> tuple[list[tuple[str, str, str, list[str]]], list[
             if mountpoint and not covered:
                 mounts.append((mountpoint, device, fs, options + ["subvol=@"]))
             for sub in subvolumes:
-                name = sub["name"] if sub["name"].startswith("@") else "@" + sub["name"]
+                name = sub["name"]   # verbatim; see fs_content()
                 mounts.append((sub["mountpoint"], device, fs,
                                list(sub.get("mount_options", []) or options)
                                + [f"subvol={name}"]))
@@ -553,7 +670,7 @@ def mount_table(doc: dict) -> tuple[list[tuple[str, str, str, list[str]]], list[
             continue  # a raid or volume group owns it; its mounts come from there
         if owner:
             continue  # zpool datasets are emitted from the pool pass below
-        add(part, device, "/boot" if part.get("role") == "esp" else None)
+        add(part, device, topology.mountpoint_of(part))
 
     for array in storage.get("raid", []) or []:
         handle = array["name"]
@@ -563,21 +680,24 @@ def mount_table(doc: dict) -> tuple[list[tuple[str, str, str, list[str]]], list[
             handle = crypt["id"]
         if topology.consumer.get(handle):
             continue
-        add(array, device)
+        add(array, device, topology.mountpoint_of(array))
 
     for group in storage.get("lvm", []) or []:
         for vol in group.get("volumes", []):
-            add(vol, lv_device(group["name"], vol["name"]))
+            add(vol, lv_device(group["name"], vol["name"]), vol.get("mountpoint"))
 
     for pool, info in topology.zpools.items():
         for spec in info["datasets"]:
             base = spec.get("id") or spec.get("name") or "root"
-            mountpoint = spec.get("mountpoint") or ("/" if spec.get("role") == "root" else None)
+            mountpoint = topology.mountpoint_of(spec)
+            if any(s["mountpoint"] == mountpoint
+                   for s in spec.get("subvolumes", []) or []):
+                mountpoint = None   # a declared child holds it; see render_zpools
             if mountpoint:
                 mounts.append((mountpoint, f"{pool}/{base}", "zfs",
                                list(spec.get("mount_options", []))))
             for sub in spec.get("subvolumes", []) or []:
-                mounts.append((sub["mountpoint"], f"{pool}/{base}-{sub['name'].lstrip('@')}",
+                mounts.append((sub["mountpoint"], f"{pool}/{zfs_child(base, sub['name'])}",
                                "zfs", list(sub.get("mount_options", []))))
 
     mounts.sort(key=lambda m: (m[0].count("/"), m[0]))
@@ -1027,7 +1147,18 @@ def main() -> int:
     hw_file = args.out / "hardware.nix"
     config_file = args.out / "configuration.nix"
 
-    disko_file.write_text(render_disko(doc))
+    # disko.nix is checked on its own rather than together with its two
+    # siblings. The trio does describe one install, but only disko.nix creates
+    # the container: hardware.nix and configuration.nix describe the system
+    # once it exists, so a joint check would let a plaintext disko.nix pass on
+    # the strength of a `boot.initrd.luks.devices` entry that unlocks nothing.
+    # The marker is the mapper name as emit_content() writes it, so several
+    # containers are checked one by one instead of as a group.
+    disko_nix = render_disko(doc)
+    check_encryption_emitted(doc, disko_nix,
+                             marker=lambda c: f"name = {nix_str(c['id'])}",
+                             label="generated disko.nix")
+    disko_file.write_text(disko_nix)
     hw_file.write_text(render_hardware(doc))
     config_file.write_text(render_configuration(doc))
     report(disko_file, hw_file, config_file)
