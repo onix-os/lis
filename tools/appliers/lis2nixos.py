@@ -2144,6 +2144,10 @@ def check_keys(doc: dict) -> None:
         kid = entry.get("id") or f"#{index}"
         ktype = entry.get("type")
         purposes = list(entry.get("purpose", []) or [])
+        # Read before any branch returns, so that a refusal on one leaf does
+        # not leave a sibling looking like intent nobody ever consulted.
+        source = secret_ref(entry.get("source"))
+        consume(entry.get("match", {}) or {})
 
         if ktype is None:
             refuse(f"keys['{kid}']: no type — SPEC §17.1 makes it the field that "
