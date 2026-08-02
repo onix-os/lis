@@ -1230,6 +1230,16 @@ def render_boot(doc: dict) -> list[str]:
         devices = [d for d in devices if d]
         out.append("  boot.loader.grub.enable = true;")
         if firmware == "bios":
+            if not devices:
+                # The same assertion the EFI branch answers with "nodev", except
+                # a BIOS GRUB really does need a disk to embed itself in, and an
+                # empty list is not one. Refused here rather than left to the
+                # assertion, which fires only after disko has wiped the disks.
+                refuse("boot.loader grub on BIOS firmware has no disk to install to: "
+                       "no target.disks[] entry resolved to a device path, and "
+                       "boot.loader.grub.devices = [ ] fails the NixOS assertion "
+                       "'You must set the option boot.loader.grub.devices … to make "
+                       "the system bootable' (grub.nix:852)")
             out.append(f"  boot.loader.grub.devices = {nix_list(devices)};")
         else:
             # efiSupport alone does not build: grub.nix asserts that devices or
