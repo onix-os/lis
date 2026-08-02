@@ -23,7 +23,8 @@ import xml.etree.ElementTree as ET
 from lis_common import (track, check_unread, check_raid_consumers, chroot_intents, registration_commands, enrollment_commands, luks_key_path, seed_mount_commands, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, kernel_params_commands, check_kernel_variant, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
-                        load_doc, refuse, report, role_fs, role_mountpoint, warn)
+                        check_encryption_emitted, resolve_mountpoints,
+                        load_doc, refuse, report, role_fs, warn)
 
 NS = "http://www.suse.com/1.0/yast2ns"
 CONFIG_NS = "http://www.suse.com/1.0/configns"
@@ -70,6 +71,16 @@ def check_unsupported(doc: dict) -> None:
             if method not in ("passphrase", "keyfile"):
                 warn(f"storage.encryption ({container['id']}): unlock method "
                      f"{method!r} must be enrolled after installation")
+    if storage.get("encryption"):
+        # Neither profile carries the secret (delivery.md §6): both hold the
+        # placeholder and pick the key up from the seed at apply time — the
+        # AutoYaST pre-script rewrites modified.xml, `--apply` rewrites a
+        # private copy of profile.json. Stated because handing the generated
+        # profile.json straight to `agama config load` would encrypt the disk
+        # with the literal placeholder text.
+        warn("storage.encryption: both profiles carry the placeholder "
+             "'@@LIS_CRYPT_<id>@@' instead of the passphrase; apply profile.json "
+             "with this applier's --apply, which substitutes it from the seed")
     if network.get("wifi"):
         refuse("network.wifi is not expressible in a generated openSUSE profile")
     if network.get("firewall"):
@@ -271,6 +282,14 @@ def render_agama(doc: dict) -> dict:
     elif storage:
         refuse("storage section could not be translated into Agama drives")
 
+    # profile.json and autoyast.xml are alternative *complete* profiles: only
+    # one of them installs the machine, so encryption reaching the AutoYaST
+    # side says nothing about this one. Checked against the storage section
+    # alone, so nothing outside it can vouch for a container.
+    check_encryption_emitted(doc, profile.get("storage") or {},
+                             marker=lambda c: crypt_placeholder(c["id"]),
+                             label="Agama profile.json storage section")
+
     if pre:
         profile["scripts"]["pre"] = [{"name": f"lis-pre-{i}", "body": body}
                                      for i, body in enumerate(pre)]
@@ -283,6 +302,18 @@ def render_agama(doc: dict) -> dict:
     return profile
 
 
+def agama_encryption(container: dict) -> dict:
+    """The Agama `encryption` block for one LUKS container.
+
+    Agama's storage schema names the variant as the key (`luks1`/`luks2`) and
+    takes the passphrase inline. LIS never writes a secret into a generated
+    file, so the placeholder goes here and `--apply` substitutes it from the
+    seed into a private copy that never touches --out.
+    """
+    variant = "luks1" if container.get("type") == "luks1" else "luks2"
+    return {variant: {"password": crypt_placeholder(container["id"])}}
+
+
 def agama_drives(doc: dict) -> list[dict]:
     storage = doc.get("storage", {}) or {}
     paths = disk_paths(doc)
@@ -291,15 +322,23 @@ def agama_drives(doc: dict) -> list[dict]:
     # the partition is still what the group consumes.
     consumed |= {c["over"] for c in (storage.get("encryption", []) or [])
                  if c["id"] in consumed}
+    crypt_over = {c["over"]: c for c in (storage.get("encryption", []) or [])}
     if storage.get("lvm"):
         warn("storage.lvm: emitted in the AutoYaST profile (is_lvm_vg/lv_name); "
              "the Agama JSON profile carries no volume group")
+    # One arbitration over the whole list, not one per disk: a mirrored boot
+    # partition carrying `role: boot` on the second disk must not be handed
+    # /boot behind the back of the partition that declared it.
+    parts = list(storage.get("partitions", []) or [])
+    claimed = {v["mountpoint"] for g in storage.get("lvm", []) or []
+               for v in (g.get("volumes") or []) if v.get("mountpoint")}
+    mounts = resolve_mountpoints(parts, claimed=claimed)
     drives = []
     for handle, path in paths.items():
         partitions: list[dict] = []
         if storage.get("wipe"):
             partitions.append({"search": "*", "delete": True})
-        for i, part in enumerate(storage.get("partitions", [])):
+        for i, part in enumerate(parts):
             if part.get("disk") != handle:
                 continue
             if part.get("existing"):
@@ -312,6 +351,11 @@ def agama_drives(doc: dict) -> list[dict]:
             entry: dict = {}
             if size := size_str(part.get("size", "rest"), f"partition '{name}'"):
                 entry["size"] = size
+            # Before every early `continue`: a LUKS container over a partition
+            # that is also an LVM physical volume, or that carries no
+            # filesystem of its own, is still encryption the document declared.
+            if container := crypt_over.get(part.get("id")):
+                entry["encryption"] = agama_encryption(container)
             if name in consumed:
                 entry["id"] = "lvm"
                 partitions.append(entry)
@@ -319,7 +363,7 @@ def agama_drives(doc: dict) -> list[dict]:
             if fs in (None, "none"):
                 partitions.append(entry)
                 continue
-            mountpoint = role_mountpoint(part)
+            mountpoint = mounts[i]
             filesystem: dict = {"type": FS_MAP.get(fs, fs)}
             if fs == "swap":
                 filesystem["path"] = "swap"
@@ -329,9 +373,13 @@ def agama_drives(doc: dict) -> list[dict]:
                 if fs != "btrfs":
                     refuse(f"partition '{name}': subvolumes on a {fs} filesystem")
                 else:
+                    # The declared name, verbatim: Agama carries a mount path
+                    # per subvolume, so "@home" needs no rewriting to land at
+                    # /home and rewriting it would create a subvolume the
+                    # document never asked for.
                     filesystem["type"] = {"btrfs": {
                         "snapshots": bool((storage.get("snapshots", {}) or {}).get("enabled")),
-                        "subvolumes": [{"path": s["name"].lstrip("@") or "@",
+                        "subvolumes": [{"path": s["name"],
                                         "mountPath": s["mountpoint"]} for s in subs],
                     }}
             entry["filesystem"] = filesystem
@@ -349,8 +397,87 @@ def crypt_placeholder(cid: str) -> str:
     return f"@@LIS_CRYPT_{cid.replace('-', '_')}@@"
 
 
+def norm_path(path: str) -> str:
+    """'/', '/home', '/home/' → '/', '/home', '/home'."""
+    return "/" + (path or "/").strip("/")
+
+
+def autoyast_subvolumes(base: str | None, subs: list[dict],
+                        what: str) -> tuple[str, list[str]]:
+    """Map declared subvolumes onto AutoYaST's prefix model.
+
+    storage-ng AutoYaST does not take a subvolume name and a mount point. It
+    takes one *prefix* subvolume — the one the filesystem itself is mounted
+    from, `@` by default — and nests every listed `<path>` under it, deriving
+    that subvolume's mount point from the same path: `<path>home</path>`
+    creates `@/home` and mounts it at `<fs mount>/home`. There is no element
+    for a subvolume's mount point (which is why the old `<path>home</path>`
+    happened to work) and no way to declare a flat sibling of the prefix.
+
+    So the path is derived from the declared *mountpoint*, and the prefix from
+    whichever subvolume claims the filesystem's own mount point. `@home` at
+    /home is therefore created as `@/home`, and that is warned about rather
+    than passed off as the declared name — the previous `lstrip("@")` produced
+    the same on-disk layout while silently claiming the document had been
+    honored, and additionally emitted the prefix subvolume as a child of
+    itself (`@` → `<path>@</path>` → `@/@`).
+
+    Returns (prefix, [path, …]).
+    """
+    base_n = norm_path(base or "/")
+    root = base_n if base_n == "/" else base_n + "/"
+    prefix = ""
+    rest = []
+    for sub in subs:
+        if sub.get("mountpoint") and norm_path(sub["mountpoint"]) == base_n:
+            if prefix:
+                refuse(f"{what}: subvolumes {prefix!r} and {sub['name']!r} both claim "
+                       f"the filesystem's own mount point {base_n} — only one "
+                       "subvolume can carry it")
+                continue
+            prefix = sub["name"]
+        else:
+            rest.append(sub)
+
+    paths = []
+    for sub in rest:
+        name = sub["name"]
+        if mountpoint := sub.get("mountpoint"):
+            target = norm_path(mountpoint)
+            if not target.startswith(root):
+                refuse(f"{what}: subvolume {name!r} declares mountpoint "
+                       f"{mountpoint!r}, which is outside the filesystem mounted at "
+                       f"{base_n} — AutoYaST derives a subvolume's mount point from "
+                       "its path and cannot mount it anywhere else")
+                continue
+            path = target[len(root):]
+        else:
+            # Nothing to derive from, so nothing is invented: the name is used
+            # as written and AutoYaST will mount it at <fs mount>/<name>.
+            path = name
+        created = f"{prefix}/{path}" if prefix else path
+        if created != name:
+            warn(f"{what}: subvolume {name!r} is created as {created!r} — AutoYaST "
+                 f"nests every subvolume under the prefix {prefix or '(none)'!r} and "
+                 "has no element for a subvolume mount point, so a flat sibling of "
+                 "the prefix is not expressible in this profile")
+        paths.append(path)
+    return prefix, paths
+
+
+def add_subvolumes(node, base: str | None, subs: list[dict], what: str) -> None:
+    """<subvolumes_prefix> + <subvolumes> under one partition/volume element."""
+    prefix, paths = autoyast_subvolumes(base, subs, what)
+    # Stated rather than left to the product default, which decides whether the
+    # paths below land under `@` or at the top level of the filesystem.
+    ET.SubElement(node, "subvolumes_prefix").text = prefix
+    sub_list = ET.SubElement(node, "subvolumes")
+    sub_list.set(f"{{{CONFIG_NS}}}type", "list")
+    for path in paths:
+        ET.SubElement(ET.SubElement(sub_list, "subvolume"), "path").text = path
+
+
 def render_autoyast(doc: dict) -> str:
-    claimed_mounts: set = set()
     system = doc.get("system", {}) or {}
     storage = doc.get("storage", {}) or {}
     installer = doc.get("installer", {}) or {}
@@ -403,6 +530,14 @@ def render_autoyast(doc: dict) -> str:
                    for d in a.get("devices", [])}
     lvm_member = {d: g for g in (storage.get("lvm", []) or [])
                   for d in g.get("devices", [])}
+    # One arbitration over every partition on every disk, seeded with the paths
+    # the logical volumes already claim: role_mountpoint() alone synthesises
+    # /boot for the *mirror* of a boot partition as readily as for the original,
+    # and AutoYaST stops on the duplicate fstab entry.
+    parts = list(storage.get("partitions", []) or [])
+    claimed = {v["mountpoint"] for g in storage.get("lvm", []) or []
+               for v in (g.get("volumes") or []) if v.get("mountpoint")}
+    mounts = resolve_mountpoints(parts, claimed=claimed)
     partitioning = ET.SubElement(profile, "partitioning")
     partitioning.set(f"{{{CONFIG_NS}}}type", "list")
     for handle, path in disk_paths(doc).items():
@@ -412,7 +547,7 @@ def render_autoyast(doc: dict) -> str:
         ET.SubElement(drive, "use").text = "all"
         plist = ET.SubElement(drive, "partitions")
         plist.set(f"{{{CONFIG_NS}}}type", "list")
-        for i, part in enumerate(storage.get("partitions", [])):
+        for i, part in enumerate(parts):
             if part.get("disk") != handle:
                 continue
             role = part.get("role")
@@ -437,15 +572,9 @@ def render_autoyast(doc: dict) -> str:
                 filesystem = ET.SubElement(node, "filesystem")
                 filesystem.set(f"{{{CONFIG_NS}}}type", "symbol")
                 filesystem.text = FS_MAP.get(fs, fs)
-            mountpoint = None if group else role_mountpoint(part)
-            # role_mountpoint() synthesises /boot from role: "boot", so a mirrored
-            # boot partition that declares no mountpoint would claim it too and
-            # AutoYaST stops on a duplicate fstab entry. The document declared one;
-            # the first claimant keeps it.
-            if mountpoint and mountpoint in claimed_mounts:
-                mountpoint = None
-            elif mountpoint:
-                claimed_mounts.add(mountpoint)
+            # A physical volume holds no filesystem, so it is never mounted;
+            # everything else takes whatever the arbitration above gave it.
+            mountpoint = None if group else mounts[i]
             if group:
                 pass
             elif fs == "swap":
@@ -471,11 +600,8 @@ def render_autoyast(doc: dict) -> str:
                 method.text = "luks2" if container.get("type") != "luks1" else "luks1"
                 ET.SubElement(node, "crypt_key").text = crypt_placeholder(container["id"])
             if subs := part.get("subvolumes"):
-                sub_list = ET.SubElement(node, "subvolumes")
-                sub_list.set(f"{{{CONFIG_NS}}}type", "list")
-                for sub in subs:
-                    entry = ET.SubElement(sub_list, "subvolume")
-                    ET.SubElement(entry, "path").text = sub["name"].lstrip("@") or "@"
+                add_subvolumes(node, mountpoint, subs,
+                               f"partition '{part.get('id', i)}'")
 
     software = ET.SubElement(profile, "software")
     # AutoYaST needs a base product or it stops on "None or wrong base product"
@@ -558,8 +684,12 @@ def render_autoyast(doc: dict) -> str:
         plist = ET.SubElement(drive, "partitions")
         plist.set(f"{{{CONFIG_NS}}}type", "list")
         node = ET.SubElement(plist, "partition")
-        target = next((q for q in storage.get("partitions", [])
-                       if q.get("id") == array["name"]), {})
+        # The array's own filesystem/mount is declared by a partitions[] entry
+        # whose id is the array name; it took part in the arbitration above, so
+        # its mountpoint comes from there rather than from a second lookup.
+        target_at = next((j for j, q in enumerate(parts)
+                          if q.get("id") == array["name"]), None)
+        target = parts[target_at] if target_at is not None else {}
         opts = ET.SubElement(node, "raid_options")
         ET.SubElement(opts, "raid_type").text = f"raid{array['level']}"
         # If a volume group consumes the array, the array *is* its physical
@@ -572,12 +702,14 @@ def render_autoyast(doc: dict) -> str:
             # array is used whole, not partitioned. Setting it segfaults YaST in
             # "Preparing disks".
             ET.SubElement(node, "lvm_group").text = owner["name"]
-        if mount := role_mountpoint(target):
+        if mount := (mounts[target_at] if target_at is not None else None):
             ET.SubElement(node, "mount").text = mount
         if fs := role_fs(target):
             filesystem = ET.SubElement(node, "filesystem")
             filesystem.set(f"{{{CONFIG_NS}}}type", "symbol")
             filesystem.text = FS_MAP.get(fs, fs)
+        if subs := target.get("subvolumes"):
+            add_subvolumes(node, mount, subs, f"array '{array['name']}'")
 
     for group in storage.get("lvm", []) or []:
         drive = ET.SubElement(partitioning, "drive")
@@ -601,6 +733,26 @@ def render_autoyast(doc: dict) -> str:
                 filesystem = ET.SubElement(node, "filesystem")
                 filesystem.set(f"{{{CONFIG_NS}}}type", "symbol")
                 filesystem.text = FS_MAP.get(fs, fs)
+            # Subvolumes on a logical volume were read and then dropped on the
+            # floor here; AutoYaST's partition section is the same schema for a
+            # logical volume, so they belong in the profile like any other.
+            if subs := volume.get("subvolumes"):
+                if fs != "btrfs":
+                    refuse(f"volume '{volume['name']}': subvolumes on a {fs} filesystem")
+                else:
+                    add_subvolumes(node, volume.get("mountpoint"), subs,
+                                   f"volume '{volume['name']}'")
+
+    # X1: a document that declares LUKS and renders to a profile with no trace
+    # of it installs a plaintext disk and reports success. Only <partitioning>
+    # can express encryption, so only <partitioning> is allowed to vouch for
+    # it — the pre-script below carries the same placeholder and would
+    # otherwise answer for a container that no partition ever encrypted. The
+    # two output files are alternative complete profiles, so each is checked
+    # alone; encryption in the sibling is no defence.
+    check_encryption_emitted(doc, ET.tostring(partitioning, encoding="unicode"),
+                             marker=lambda c: crypt_placeholder(c["id"]),
+                             label="AutoYaST <partitioning> section")
 
     scripts = ET.SubElement(profile, "scripts")
     add_script_list(scripts, "pre-scripts", pre)
@@ -703,13 +855,59 @@ def main() -> int:
                      "For AutoYaST media, boot the installer with "
                      "`autoyast=<url-to-autoyast.xml>` instead; this applier will not "
                      "partition disks itself.")
+        load_file, scratch = keyed_profile(doc, profile_file)
         print(f"applying profile to Agama: {profile_file}")
-        res = subprocess.run(["agama", "config", "load", str(profile_file)])
+        try:
+            res = subprocess.run(["agama", "config", "load", str(load_file)])
+        finally:
+            if scratch is not None:
+                shutil.rmtree(scratch, ignore_errors=True)
         if res.returncode != 0:
             return res.returncode
         print("starting Agama installation...")
         return subprocess.run(["agama", "install"]).returncode
     return 0
+
+
+def keyed_profile(doc: dict, profile_file: pathlib.Path):
+    """(profile to hand Agama, scratch dir to delete afterwards).
+
+    The generated profile.json holds `@@LIS_CRYPT_<id>@@` where the passphrase
+    goes, because delivery.md §6 keeps the secret on the seed and out of any
+    file this applier writes. Agama's `luks2.password` takes a value and
+    nothing else, so the substitution happens here, into a 0700 scratch
+    directory that exists for the length of `agama config load` — the same
+    trick the AutoYaST side plays with modified.xml.
+    """
+    import tempfile
+    containers = [c["id"] for c in
+                  ((doc.get("storage", {}) or {}).get("encryption") or [])]
+    if not containers:
+        return profile_file, None
+    body = profile_file.read_text()
+    for cid in containers:
+        key_path = luks_key_path(doc, cid)
+        if not key_path:
+            # Only reachable under --lenient, which downgraded the refusal
+            # check_unsupported() already raised for this container.
+            sys.exit(f"error: LUKS container {cid!r} has no key material to "
+                     "substitute; --lenient cannot conjure a passphrase.")
+        try:
+            secret = pathlib.Path(key_path).read_text().rstrip("\n")
+        except OSError as err:
+            sys.exit(f"error: no key material for LUKS container {cid!r} at "
+                     f"{key_path}: {err}\nThe LIS seed must be mounted at "
+                     f"{SEED_MOUNT} before --apply; this applier will not install "
+                     "an unencrypted disk in place of an encrypted one.")
+        # json.dumps of the value, minus its quotes: the placeholder sits
+        # inside a JSON string, so a quote or backslash in the passphrase has
+        # to be escaped or the profile stops parsing.
+        body = body.replace(crypt_placeholder(cid), json.dumps(secret)[1:-1])
+    scratch = pathlib.Path(tempfile.mkdtemp(prefix="lis-agama-"))
+    keyed = scratch / "profile.json"
+    keyed.touch(mode=0o600)
+    keyed.write_text(body)
+    return keyed, scratch
 
 
 if __name__ == "__main__":
