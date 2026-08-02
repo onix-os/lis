@@ -227,7 +227,20 @@ DRIVER_PACKAGES: dict[str, dict] = {
                 "amdgpu": "xf86-video-amdgpu", "intel": "xf86-video-intel"},
         "firmware": "kernel-firmware",
     },
+    # Gentoo carries the GPU choice in VIDEO_CARDS rather than in a package name
+    # — lis2gentoo emits that too — but the X drivers are still separate packages
+    # and AMD's microcode ships inside linux-firmware, not on its own.
+    "gentoo": {
+        "microcode": {"intel": "sys-firmware/intel-microcode",
+                      "amd": "sys-kernel/linux-firmware"},
+        "gpu": {"nvidia": "x11-drivers/nvidia-drivers",
+                "nvidia-open": "x11-drivers/nvidia-drivers",
+                "amdgpu": "x11-drivers/xf86-video-amdgpu",
+                "intel": "media-libs/mesa"},
+        "firmware": "sys-kernel/linux-firmware",
+    },
 }
+DRIVER_PACKAGES["gentoo-systemd"] = DRIVER_PACKAGES["gentoo"]
 
 
 def driver_packages(doc: dict, family: str,
@@ -278,6 +291,8 @@ GRUB_REFRESH = {
     "ubuntu": "update-grub",
     "fedora": "grub2-mkconfig -o /boot/grub2/grub.cfg",
     "suse": "grub2-mkconfig -o /boot/grub2/grub.cfg",
+    "gentoo": "grub-mkconfig -o /boot/grub/grub.cfg",
+    "gentoo-systemd": "grub-mkconfig -o /boot/grub/grub.cfg",
 }
 
 
@@ -671,14 +686,20 @@ LOCALE_GEN = {
     "fedora": None,   # glibc-langpack-* supplies locales; no locale-gen
     "suse": None,     # locales ship with glibc-locale
     "alpine": None,   # musl: no locale generation at all
+    "gentoo": "locale-gen", "gentoo-systemd": "locale-gen",
 }
 
 LSM_PACKAGES = {
     "apparmor": {"debian": "apparmor", "ubuntu": "apparmor", "arch": "apparmor",
-                 "suse": "apparmor-parser", "fedora": None, "alpine": None},
+                 "suse": "apparmor-parser", "fedora": None, "alpine": None,
+                 "gentoo": "sys-apps/apparmor", "gentoo-systemd": "sys-apps/apparmor"},
     "selinux": {"fedora": "selinux-policy-targeted", "debian": "selinux-basics",
                 "ubuntu": "selinux-basics", "suse": "selinux-policy",
-                "arch": None, "alpine": None},
+                "arch": None, "alpine": None,
+                # SELinux on Gentoo is a whole profile subtree plus a policy
+                # rebuild of @world, not a package: naming one would install
+                # something that does nothing.
+                "gentoo": None, "gentoo-systemd": None},
 }
 
 
@@ -1058,6 +1079,10 @@ PKG = {
     "suse": ("zypper --non-interactive in", "zypper --non-interactive rm", "systemctl enable"),
     "arch": ("pacman -S --noconfirm", "pacman -Rns --noconfirm", "systemctl enable"),
     "alpine": ("apk add --no-progress", "apk del", "rc-update add"),
+    # Two Gentoo families, because the service verb follows system.init and a
+    # single entry could only be right for one of them.
+    "gentoo": ("emerge --getbinpkg", "emerge --unmerge", "rc-update add"),
+    "gentoo-systemd": ("emerge --getbinpkg", "emerge --unmerge", "systemctl enable"),
 }
 
 DISPLAY_MANAGERS = {"gdm": "gdm", "sddm": "sddm", "lightdm": "lightdm",
@@ -1066,7 +1091,9 @@ DISPLAY_MANAGERS = {"gdm": "gdm", "sddm": "sddm", "lightdm": "lightdm",
 NETWORK_MANAGERS = {
     "networkmanager": {"debian": "network-manager", "ubuntu": "network-manager",
                        "fedora": "NetworkManager", "suse": "NetworkManager",
-                       "arch": "networkmanager", "alpine": "networkmanager"},
+                       "arch": "networkmanager", "alpine": "networkmanager",
+                       "gentoo": "net-misc/networkmanager",
+                       "gentoo-systemd": "net-misc/networkmanager"},
     "systemd-networkd": {f: None for f in PKG},   # part of systemd everywhere
     "connman": {f: "connman" for f in PKG},
 }
@@ -1089,7 +1116,7 @@ def chroot_intents(doc: dict, family: str) -> list[str]:
         out.append(f"{remove} {' '.join(excluded)} || true")
 
     for snap in software.get("snap", []) or []:
-        if family in ("alpine", "arch"):
+        if family in ("alpine", "arch", "gentoo", "gentoo-systemd"):
             refuse(f"software.snap {snap!r}: snapd is not part of this distro")
             break
         out.append(f"{install} snapd && {enable} --now snapd.socket || true")
@@ -1118,6 +1145,10 @@ def chroot_intents(doc: dict, family: str) -> list[str]:
     if firewall := network.get("firewall"):
         if family == "alpine":
             warn("network.firewall: no firewall is configured on Alpine by this applier")
+        elif family in ("gentoo", "gentoo-systemd"):
+            warn("network.firewall: no firewall is configured on Gentoo by this "
+                 "applier — net-firewall/iptables is on the binary host, but "
+                 "nothing here writes a ruleset")
         else:
             svc = "firewalld" if family in ("fedora", "suse") else "ufw"
             out.append(f"{install} {svc}")

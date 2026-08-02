@@ -34,7 +34,33 @@ DISTRO_ISOS = {
         "url": "https://download.opensuse.org/distribution/leap/15.6/iso/openSUSE-Leap-15.6-NET-x86_64-Media.iso",
         "file": "openSUSE-Leap-15.6-NET-x86_64-Media.iso",
     },
+    # The only entry whose URL is computed. Gentoo's minimal ISO is date-stamped
+    # and its autobuilds directory rotates every few weeks, so a literal filename
+    # here 404s without warning; `resolve` reads the pointer file Gentoo publishes
+    # for exactly this purpose (the same one the Handbook sends a human to).
+    "gentoo": {
+        "resolve": ("https://distfiles.gentoo.org/releases/amd64/autobuilds/"
+                    "latest-install-amd64-minimal.txt"),
+        "base": "https://distfiles.gentoo.org/releases/amd64/autobuilds/",
+    },
 }
+
+
+def resolve_pointer(url: str, base: str) -> tuple[str, str]:
+    """Read a Gentoo autobuilds pointer file: (absolute URL, bare file name).
+
+    The file is a clearsigned list of `<path> <size>` lines; the first
+    non-comment line naming an image is the current release.
+    """
+    with urllib.request.urlopen(url, timeout=60) as response:
+        text = response.read().decode()
+    for line in text.splitlines():
+        if line.startswith("#") or line.startswith("-----") or not line.strip():
+            continue
+        path = line.split()[0]
+        if path.endswith((".iso", ".tar.xz")):
+            return base + path, path.rsplit("/", 1)[-1]
+    sys.exit(f"{RED}error: {url} named no image{RESET}")
 
 
 def download_iso_if_missing(distro: str) -> pathlib.Path:
@@ -43,12 +69,17 @@ def download_iso_if_missing(distro: str) -> pathlib.Path:
     if not meta:
         sys.exit(f"{RED}error: unknown distro '{distro}'{RESET}")
 
-    tmp_iso = pathlib.Path("/tmp") / meta["file"]
+    if "resolve" in meta:
+        url, name = resolve_pointer(meta["resolve"], meta["base"])
+        print(f"  [{TICK}] Resolved current {distro} image: {BOLD}{name}{RESET}")
+    else:
+        url, name = meta["url"], meta["file"]
+
+    tmp_iso = pathlib.Path("/tmp") / name
     if tmp_iso.exists() and tmp_iso.stat().st_size > 10 * 1024 * 1024:
         print(f"  [{TICK}] Found cached ISO in /tmp: {BOLD}{tmp_iso}{RESET}")
         return tmp_iso
 
-    url = meta["url"]
     print(f"  [{TICK}] Downloading ISO from {CYAN}{url}{RESET} -> {BOLD}{tmp_iso}{RESET}...")
     
     def _progress(block_num, block_size, total_size):

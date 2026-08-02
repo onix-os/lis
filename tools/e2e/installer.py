@@ -340,9 +340,19 @@ def install_suse(target_disk, seed_disk, iso, ram, recipe, work):
 
 def install_from_live_shell(distro, target_disk, seed_disk, iso, ram, work,
                             *, applier, boot_hint, login=None, timeout=2400,
-                            bootstrap=None, become_root=False):
-    """Boot a live ISO, mount the LIS seed, and let the applier drive the install."""
-    child = qemu(target_disk, ram, iso=iso, extra_drives=[seed_disk], boot="order=d",
+                            bootstrap=None, become_root=False,
+                            kernel=None, initrd=None, append=None):
+    """Boot a live ISO, mount the LIS seed, and let the applier drive the install.
+
+    `kernel`/`initrd`/`append` boot the medium's own kernel directly instead of
+    going through its bootloader. Some live ISOs (Gentoo's minimal CD) build
+    their GRUB menu with `terminal_output gfxterm` and no serial entry, so
+    editing the menu blind over a serial line is guesswork; handing QEMU the
+    kernel and the command line is exact.
+    """
+    child = qemu(target_disk, ram, iso=iso, extra_drives=[seed_disk],
+                 kernel=kernel, initrd=initrd, append=append,
+                 boot=None if kernel else "order=d",
                  timeout=timeout, log=work / "serial.log")
     boot_hint(child)
     prompts = [r"root@archiso", r"root@nixos", r"nixos@nixos", r"localhost",
@@ -448,5 +458,23 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path,
                                 bootstrap="ip link set eth0 up; udhcpc -i eth0 -q; "
                                           "setup-apkrepos -1; apk update; "
                                           "apk add python3")
+    elif distro == "gentoo":
+        # The minimal CD autologins root on ttyS0 once `console=` is on the
+        # command line, and ships python3, parted, every mkfs, tar, gemato,
+        # genfstab and arch-chroot — so no bootstrap step is needed. Its own
+        # GRUB menu passes `nodhcp`; booting the kernel directly instead means
+        # NetworkManager brings the link up, which the stage3 download needs.
+        vmlinuz, initrd = work / "gentoo-vmlinuz", work / "gentoo-initrd"
+        extract(iso_path, {"/boot/gentoo": vmlinuz, "/boot/gentoo.igz": initrd})
+        install_from_live_shell(distro, target_disk, seed_disk, iso_path, ram, work,
+                                applier="lis2gentoo.py", boot_hint=lambda c: None,
+                                kernel=vmlinuz, initrd=initrd,
+                                append=f"{SERIAL} root=live:CDLABEL={iso_label(iso_path)} "
+                                       "rd.live.dir=/ rd.live.squashimg=image.squashfs "
+                                       "cdroot",
+                                # Downloading a 500MB stage3, an ebuild snapshot
+                                # and the binary packages takes longer than any
+                                # answer-file installer here.
+                                timeout=5400)
     else:
         raise InstallFailed(f"no installer driver for distro {distro!r}")
