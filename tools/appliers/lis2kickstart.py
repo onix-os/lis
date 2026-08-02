@@ -21,7 +21,8 @@ import sys
 from lis_common import (track, check_unread, check_raid_consumers, chroot_intents, registration_commands, enrollment_commands, luks_key_path, seed_mount_commands, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
                         check_unhandled, check_section_fields, sudoers_commands, check_mirror, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
-                        load_doc, refuse, report, role_fs, role_mountpoint, warn)
+                        check_encryption_emitted, resolve_mountpoints,
+                        load_doc, refuse, report, role_fs, warn)
 
 FS_MAP = {"vfat": "vfat", "ext4": "ext4", "xfs": "xfs", "btrfs": "btrfs", "swap": "swap"}
 
@@ -50,8 +51,18 @@ def size_mib(size: str, what: str) -> str:
     return "--size=4096"
 
 
-# Containers whose `part` line must be written by %pre, as (id, key path).
+# Containers whose `part`/`raid` line must be written by %pre, as (id, key path).
 DEFERRED_CRYPT: list[tuple[str, str]] = []
+
+# Stands in for `--passphrase=…` until %pre fills it in. The container id is
+# appended (…:<id>@@) so a document declaring two containers does not get one
+# container's key substituted into the other's line.
+PASSPHRASE = "@@LIS_PASSPHRASE:"
+
+
+def pass_var(cid: str) -> str:
+    """The %pre shell variable holding one container's passphrase."""
+    return "LIS_PASS_" + "".join(c if c.isalnum() else "_" for c in cid)
 
 # btrfs logical volumes: (label, blivet member name, mountpoint, subvolumes).
 LV_BTRFS: list = []
@@ -114,8 +125,40 @@ def render_storage(doc: dict, lines: list[str]) -> None:
         for dev in array.get("devices", []) + (array.get("spares", []) or []):
             consumed[backing(dev)] = ("raid", array["name"], dev)
 
+    def crypt_flags(crypt: dict) -> list[str]:
+        """The flags that turn a `part`/`raid` line into a LUKS container.
+
+        Anaconda wants the passphrase inline, so the line carrying it is
+        written by a %pre script that reads the seed and %include'd: the served
+        kickstart never carries the secret. The placeholder names its container
+        because a document may declare several, and each has its own key.
+        """
+        if key_path := luks_key_path(doc, crypt["id"]):
+            deferred_crypt.append((crypt["id"], key_path))
+            return ["--encrypted", f"{PASSPHRASE}{crypt['id']}@@"]
+        refuse(f"encryption '{crypt['id']}': no key material — declare a "
+               "keys[] entry with a seed: source, or place the passphrase "
+               f"at {SEED_MOUNT}/secrets/luks-{crypt['id']}.key")
+        # Non-passphrase methods are enrolled from %post with
+        # systemd-cryptenroll (see enrollment_commands), so they are honored
+        # rather than refused — Anaconda simply is not the thing doing it.
+        return ["--encrypted"]
+
+    # One mountpoint, one claimant. A logical volume's mountpoint is spoken for
+    # before any partition's role default is considered, and the whole
+    # partition list is arbitrated at once so a mirrored `role: boot` with no
+    # mountpoint of its own (docs/examples/test-raid.lis.json 'boot2') does not
+    # become a second /boot that destroys the first (custom_partitioning.py:
+    # 370-375 hands the mount point over by destroying the earlier device).
+    claimed = {vol["mountpoint"]
+               for group in storage.get("lvm", []) or []
+               for vol in group.get("volumes", []) or []
+               if vol.get("mountpoint")}
+    partitions = storage.get("partitions", []) or []
+    mounts = resolve_mountpoints(partitions, claimed=claimed)
+
     btrfs_volumes: list[tuple[str, str | None, list]] = []
-    for i, part in enumerate(storage.get("partitions", [])):
+    for i, part in enumerate(partitions):
         ondisk = disks.get(part.get("disk"))
         if not ondisk:
             if part.get("disk") not in disks:
@@ -137,12 +180,21 @@ def render_storage(doc: dict, lines: list[str]) -> None:
             target_name = f"raid.{owner[2]}"
         elif role == "swap":
             target_name = "swap"
+        elif mounts[i]:
+            target_name = mounts[i]
+        elif fs:
+            # Nothing mounts it and nothing consumes it, but it is still a
+            # declared partition: `None` is Anaconda's spelling for create and
+            # format without a mount point ("if people want to specify no
+            # mountpoint for some reason, let them" — custom_partitioning.py:
+            # 178-185, which takes the fstype from --fstype).
+            target_name = "None"
         else:
-            target_name = role_mountpoint(part)
-            if not target_name:
-                refuse(f"partition '{handle}': no mountpoint and no consumer — "
-                       "kickstart has no vocabulary for an unused partition")
-                continue
+            refuse(f"partition '{handle}': no mountpoint, no consumer and no "
+                   "filesystem — an unmounted partition is created with "
+                   "--fstype, and Anaconda formats one without it using the "
+                   "default filesystem, which the document did not ask for")
+            continue
 
         flags = [f"part {target_name}"]
         if not owner and role != "swap":
@@ -156,20 +208,7 @@ def render_storage(doc: dict, lines: list[str]) -> None:
         flags.append(size)
         flags.append(f"--ondisk={ondisk}")
         if crypt := encryption.get(handle):
-            flags.append("--encrypted")
-            if key_path := luks_key_path(doc, crypt["id"]):
-                # Anaconda wants the passphrase inline, so this `part` line is
-                # written by a %pre script that reads the seed and %include'd:
-                # the served kickstart never carries the secret.
-                deferred_crypt.append((crypt["id"], key_path))
-                flags.append("@@LIS_PASSPHRASE@@")
-            else:
-                refuse(f"encryption '{crypt['id']}': no key material — declare a "
-                       "keys[] entry with a seed: source, or place the passphrase "
-                       f"at {SEED_MOUNT}/secrets/luks-{crypt['id']}.key")
-            # Non-passphrase methods are enrolled from %post with
-            # systemd-cryptenroll (see enrollment_commands), so they are honored
-            # rather than refused — Anaconda simply is not the thing doing it.
+            flags += crypt_flags(crypt)
         if part.get("label"):
             flags.append(f"--label={part['label']}")
         subvolumes = part.get("subvolumes") or []
@@ -182,13 +221,12 @@ def render_storage(doc: dict, lines: list[str]) -> None:
             # Keep the encryption flags: rebuilding the line from scratch
             # would drop them, creating the volume unencrypted while the
             # document asked for LUKS.
-            crypt_flags = [f for f in flags
-                           if f in ("--encrypted",) or f.startswith(("--escrowcert",
-                                                                     "@@LIS_PASSPHRASE@@"))]
-            flags = [f"part btrfs.{handle}", size, f"--ondisk={ondisk}", *crypt_flags]
+            keep_crypt = [f for f in flags
+                          if f in ("--encrypted",) or f.startswith(("--escrowcert",
+                                                                    PASSPHRASE))]
+            flags = [f"part btrfs.{handle}", size, f"--ondisk={ondisk}", *keep_crypt]
             lines.append(" ".join(flags))
-            btrfs_volumes.append((handle, part.get("mountpoint")
-                                  or ("/" if role == "root" else None), subvolumes))
+            btrfs_volumes.append((handle, mounts[i], subvolumes))
             continue
         lines.append(" ".join(flags))
 
@@ -198,20 +236,48 @@ def render_storage(doc: dict, lines: list[str]) -> None:
         if mountpoint and not covered:
             lines.append(f"btrfs {mountpoint} --subvol --name=root LABEL={handle}")
         for sub in subvolumes:
-            name = sub["name"].lstrip("@") or "root"
-            lines.append(f"btrfs {sub['mountpoint']} --subvol --name={name} LABEL={handle}")
+            # The declared name, verbatim. blivet creates the subvolume with it
+            # (devices/btrfs.py:637 create_subvolume) and mounts it with
+            # subvol=<name> (devices/btrfs.py:572); the only validity rule is
+            # that it contain no NUL (devicelibs/btrfs.py:54-55). Stripping a
+            # leading '@' would put one declaration on disk under two different
+            # conventions depending on which applier ran.
+            lines.append(f"btrfs {sub['mountpoint']} --subvol --name={sub['name']} "
+                         f"LABEL={handle}")
 
     for array in storage.get("raid", []) or []:
+        name = array["name"]
         members = " ".join(f"raid.{d}" for d in array.get("devices", []))
         spares = f" --spares={len(array['spares'])}" if array.get("spares") else ""
-        # check_raid_consumers() has already established that something uses the
-        # array; a volume group makes it a PV, encryption makes it the backing
-        # device. Anaconda spells the PV case `raid pv.<name>`.
-        in_lvm = any(array["name"] in g.get("devices", [])
-                     for g in storage.get("lvm", []) or [])
-        target = f"pv.{array['name']}" if in_lvm else "/"
-        lines.append(f"raid {target} --level=RAID{array['level']} "
-                     f"--device={array['name']}{spares} {members}")
+        # An array carries no filesystem of its own — storage.raid[] is
+        # additionalProperties:false with neither `fs` nor `mountpoint`
+        # (spec/schema.json) — so its destination is whatever consumes it, and
+        # `consumed` is already keyed by the *backing* device. That is what
+        # makes an encrypted array work: the volume group names the container,
+        # backing() resolves it to the array, and the name the group will ask
+        # for (`pv.<container>`) comes back out here. Comparing raw handles
+        # instead used to miss that and fall through to a hardcoded "/".
+        owner = consumed.get(name)
+        if owner and owner[0] == "pv":
+            target = f"pv.{owner[2]}"
+        elif owner and owner[0] == "raid":
+            target = f"raid.{owner[2]}"
+        else:
+            refuse(f"storage.raid '{name}': nothing kickstart can express "
+                   "consumes the array — an array has no filesystem of its "
+                   "own, so it has to become a physical volume, directly or "
+                   "through the LUKS container declared over it")
+            continue
+        flags = [f"raid {target}", f"--level=RAID{array['level']}",
+                 f"--device={name}{spares}"]
+        if crypt := encryption.get(name):
+            # `raid --encrypted` puts the LUKS layer on top of the array and
+            # hands the request name to the mapped device, which is what the
+            # volume group then resolves (custom_partitioning.py:624-681 and
+            # :712-717 — a PV whose format is luks is followed to its child).
+            flags += crypt_flags(crypt)
+        flags.append(members)
+        lines.append(" ".join(flags))
 
     for group in storage.get("lvm", []) or []:
         pvs = " ".join(f"pv.{d}" for d in group.get("devices", []))
@@ -268,8 +334,7 @@ def render_storage(doc: dict, lines: list[str]) -> None:
         if mountpoint and not covered:
             lines.append(f"btrfs {mountpoint} --subvol --name=root LABEL={label}")
         for sub in subs:
-            name = sub["name"].lstrip("@") or "root"
-            lines.append(f"btrfs {sub['mountpoint']} --subvol --name={name} "
+            lines.append(f"btrfs {sub['mountpoint']} --subvol --name={sub['name']} "
                          f"LABEL={label}")
 
     if (storage.get("swap", {}) or {}).get("zram"):
@@ -517,16 +582,16 @@ def render_kickstart(doc: dict) -> str:
         # Anaconda has no keyfile option for --passphrase, so the lines that
         # carry it are generated inside the installer from seed key material
         # and pulled in with %include. The served kickstart stays secret-free.
-        crypt_lines = [l for l in lines if "@@LIS_PASSPHRASE@@" in l]
-        lines = [l for l in lines if "@@LIS_PASSPHRASE@@" not in l]
+        crypt_lines = [l for l in lines if PASSPHRASE in l]
+        lines = [l for l in lines if PASSPHRASE not in l]
         pre = ["", "%pre --erroronfail", *seed_mount_commands()]
         for cid, key_path in DEFERRED_CRYPT:
-            pre.append(f'LIS_PASS_{cid.replace("-", "_")}=$(cat {key_path})')
+            pre.append(f"{pass_var(cid)}=$(cat {key_path})")
         pre.append("cat > /tmp/lis-crypt.ks <<LIS_EOF")
         for line in crypt_lines:
             for cid, _ in DEFERRED_CRYPT:
-                line = line.replace("@@LIS_PASSPHRASE@@",
-                                    f'--passphrase=$LIS_PASS_{cid.replace("-", "_")}')
+                line = line.replace(f"{PASSPHRASE}{cid}@@",
+                                    f"--passphrase=${pass_var(cid)}")
             pre.append(line)
         pre += ["LIS_EOF", "%end", "", "%include /tmp/lis-crypt.ks"]
         lines += pre
@@ -558,6 +623,12 @@ def main() -> int:
     check_keymap(doc, {"console", "layout", "variant"})
 
     ks = render_kickstart(doc)
+    # ks.cfg is the whole install, so the check is over the one file. The
+    # evidence is per container rather than a bare "--encrypted": every
+    # honored container contributes its own %pre passphrase variable, so a
+    # second container silently missing its line cannot hide behind the first.
+    check_encryption_emitted(doc, ks, label="ks.cfg",
+                             marker=lambda c: pass_var(c.get("id") or ""))
     args.out.mkdir(parents=True, exist_ok=True)
     ks_file = args.out / "ks.cfg"
     ks_file.write_text(ks)
