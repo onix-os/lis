@@ -22,7 +22,7 @@ from tools.e2e.verifier import verify_installed_disk, run_stage4_live_guest_veri
 # port, so inserting a name would move every port after it and make two
 # concurrent runs steal each other's server.
 DISTROS = ["alpine", "nixos", "ubuntu", "arch", "fedora", "suse", "debian",
-           "gentoo"]
+           "gentoo", "void"]
 REFUSED = 2  # exit status meaning "the applier refused the document", not "it broke"
 BUILD_DIR = pathlib.Path(__file__).resolve().parent.parent.parent / "build"
 

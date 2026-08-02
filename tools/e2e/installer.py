@@ -338,6 +338,34 @@ def install_suse(target_disk, seed_disk, iso, ram, recipe, work):
     shutdown(child)
 
 
+def install_void(target_disk, seed_disk, iso, ram, recipe, work):
+    """VAI's own path: `auto=1 autourl=…` plus the answer file lis2void generated.
+
+    No pexpect interaction at all — the autoinstaller lives in the live ISO's
+    initramfs, is triggered from the kernel command line, and powers the machine
+    off itself. The ISO still has to be attached: VAI runs from a dracut
+    pre-mount hook, and dracut will not reach its pre-mount hooks until the live
+    root device named on the command line has appeared.
+    """
+    out = run_applier("lis2void.py", recipe, work / "void")
+    # The access log is the only evidence that separates "VAI installed what we
+    # asked for" from "the fetch failed and VAI fell back to its built-in
+    # /etc/autoinstall.default", which produces a bootable but stock system.
+    serve(out, work / "http.log")
+    vmlinuz, initrd = work / "void-vmlinuz", work / "void-initrd"
+    extract(iso, {"/boot/vmlinuz": vmlinuz, "/boot/initrd": initrd})
+    child = qemu(target_disk, ram, iso=iso, extra_drives=[seed_disk],
+                 kernel=vmlinuz, initrd=initrd,
+                 append=f"root=live:CDLABEL={iso_label(iso)} ro init=/sbin/init "
+                        f"rd.luks=0 rd.md=0 rd.dm=0 loglevel=4 {SERIAL} "
+                        f"auto=1 autourl=http://10.0.2.2:{HTTP_PORT}/autoinstall.cfg",
+                 timeout=3600, log=work / "serial.log")
+    wait_for_finish(child, "void",
+                    ["reboot: Power down", "Restarting system", "System halted"],
+                    timeout=3600)
+    shutdown(child)
+
+
 def install_from_live_shell(distro, target_disk, seed_disk, iso, ram, work,
                             *, applier, boot_hint, login=None, timeout=2400,
                             bootstrap=None, become_root=False,
@@ -491,5 +519,7 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path,
                                 # and the binary packages takes longer than any
                                 # answer-file installer here.
                                 timeout=5400)
+    elif distro == "void":
+        install_void(target_disk, seed_disk, iso_path, ram, recipe, work)
     else:
         raise InstallFailed(f"no installer driver for distro {distro!r}")

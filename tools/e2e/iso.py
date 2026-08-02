@@ -43,6 +43,16 @@ DISTRO_ISOS = {
                     "latest-install-amd64-minimal.txt"),
         "base": "https://distfiles.gentoo.org/releases/amd64/autobuilds/",
     },
+    # Pinned to the dated directory, not /live/current/: for Void the ISO
+    # *is* the contract. The autoinstaller lis2void targets lives in this
+    # image's initramfs and is undocumented and unversioned, so a rotated
+    # "current" could change its variable names under us and an answer file is
+    # sourced — an unknown name is silently inert rather than an error.
+    "void": {
+        "url": "https://repo-default.voidlinux.org/live/20250202/"
+               "void-live-x86_64-20250202-base.iso",
+        "file": "void-live-x86_64-20250202-base.iso",
+    },
 }
 
 
