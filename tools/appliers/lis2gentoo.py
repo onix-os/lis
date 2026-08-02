@@ -457,18 +457,34 @@ def prepare_script(doc: dict, *, disk: str, partitions: list, mountpoints: dict,
         s.append(f'swapon "{swap_node}" || die "cannot enable swap"')
 
     # ── stage3 ──
+    pointer = f"$base/latest-stage3-{arch_dir}-{stage3_flavour}.txt"
+    retry = "--retry 5 --retry-all-errors --retry-delay 3 --retry-connrefused"
     s += ["",
+          "# The minimal CD starts NetworkManager but hands over the login shell",
+          "# before a lease exists — it even prints `NetworkManager has started,",
+          "# but is inactive`. Downloading straight away races that, and the",
+          "# failure arrives as an unresolvable host rather than as anything that",
+          "# looks like a timing problem.",
+          'echo "lis2gentoo: waiting for the installer network"',
+          "net_ok=",
+          "for _ in $(seq 1 60); do",
+          f'  if curl -fsS --max-time 10 -o /dev/null "{pointer}"; then net_ok=1; break; fi',
+          "  sleep 5",
+          "done",
+          '[ -n "$net_ok" ] || die "the installer has no working network after five '
+          'minutes; the stage3 and the binary packages both come over it"',
+          "",
           "# The stage3 is a Gentoo release artifact and its verification is a",
           "# first-party procedure: gemato against the release key that ships on",
           "# this very medium. An unverified tarball is not installed.",
-          f'rel=$(curl -fsSL "$base/latest-stage3-{arch_dir}-{stage3_flavour}.txt" '
+          f'rel=$(curl -fsSL {retry} "{pointer}" '
           "| grep -v '^#' | grep -m1 '\\.tar\\.xz' | cut -d' ' -f1) "
           f'|| die "cannot reach the Gentoo autobuilds pointer"',
           '[ -n "$rel" ] || die "the stage3 pointer file named no tarball"',
           'echo "lis2gentoo: stage3 = $rel"',
-          'curl -fL --retry 3 -o "$mnt/stage3.tar.xz" "$base/$rel" '
+          f'curl -fL {retry} -o "$mnt/stage3.tar.xz" "$base/$rel" '
           '|| die "stage3 download failed"',
-          'curl -fL --retry 3 -o "$mnt/stage3.tar.xz.asc" "$base/$rel.asc" '
+          f'curl -fL {retry} -o "$mnt/stage3.tar.xz.asc" "$base/$rel.asc" '
           '|| die "stage3 signature download failed"',
           'gemato openpgp-verify-detached -K /usr/share/openpgp-keys/gentoo-release.asc '
           '"$mnt/stage3.tar.xz.asc" "$mnt/stage3.tar.xz" '
