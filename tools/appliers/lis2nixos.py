@@ -21,7 +21,7 @@ import pathlib
 import re
 import sys
 
-from lis_common import (track, check_unread, luks_key_path, check_raid_consumers, registration_commands, enrollment_commands, resolve_disk_paths, check_snapshots, match_selectors, consume, check_script_fields, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, luks_key_path, check_raid_consumers, registration_commands, enrollment_commands, resolve_disk_paths, check_snapshots, match_selectors, consume, password_field, secret_ref, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
                         check_encryption_emitted, resolve_mountpoints,
                         check_unhandled, check_section_fields, check_mirror, check_kernel_variant, check_user_sudo,
                         check_boot_extras, check_keymap, check_version, enforce,
@@ -29,7 +29,17 @@ from lis_common import (track, check_unread, luks_key_path, check_raid_consumers
 
 
 def nix_str(s: str) -> str:
-    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    """A Nix double-quoted string literal holding exactly `s`.
+
+    `${` has to be escaped as well as `\\` and `"`: inside a double-quoted Nix
+    string `${...}` is antiquotation, so a files[] entry whose content is a
+    shell snippet (`${HOME}`) or a systemd unit (`${prefix}`) either fails to
+    evaluate — after disko has already wiped the disks — or, worse, evaluates
+    an expression the document never wrote. `\\${` is the documented literal
+    (Nix manual, "String literals").
+    """
+    return ('"' + s.replace("\\", "\\\\").replace('"', '\\"')
+            .replace("${", "\\${") + '"')
 
 
 def nix_list(items: list[str]) -> str:
@@ -506,8 +516,9 @@ def render_hardware(doc: dict) -> str:
            f"  boot.kernelModules = {nix_list(kernel.get('modules', []))};"]
     if kernel.get("blacklist"):
         out.append(f"  boot.blacklistedKernelModules = {nix_list(kernel['blacklist'])};")
-    if kernel.get("params"):
-        out.append(f"  boot.kernelParams = {nix_list(kernel['params'])};")
+    # boot.kernelParams belongs to render_boot alone. Stating it here as well
+    # was not a redundancy: list options merge by concatenation, so every
+    # declared parameter reached the kernel command line twice.
     if drivers.get("microcode") in ("intel", "amd"):
         out.append(f"  hardware.cpu.{drivers['microcode']}.updateMicrocode = true;")
     firmware_on = drivers.get("firmware") != "none"
@@ -738,19 +749,163 @@ HOOK_PATH = ("[ pkgs.bash pkgs.coreutils pkgs.shadow pkgs.shadow.su pkgs.util-li
              "pkgs.gnused pkgs.gnugrep pkgs.gawk pkgs.findutils pkgs.systemd ]")
 
 
-def render_script_hooks(doc: dict) -> list[str]:
+# SPEC §13 gives each lifecycle hook a distinct contract, and four of them name
+# the *live installer environment*, not the installed system: `post_storage`
+# runs right after the target is formatted and mounted, `pre_reboot` after it is
+# unmounted, `on_success` on a clean finish, `on_error` when a step fails. None
+# of that is expressible as a NixOS option — activation scripts run inside the
+# target during `nixos-install`, which is a different machine state. On this
+# applier the installer *is* `--apply`, so these four run there, in order,
+# around the disko and nixos-install calls (see main()). A translate-only run
+# emits nothing for them and says so, exactly as it already does for `pre`.
+#
+# Before this, all five of post_storage/post_install/post/pre_reboot/on_success
+# were concatenated into one activation script with no diagnostic at all
+# (AUDIT X7): a `post_storage` hook expecting /mnt to be an empty formatted
+# target instead ran inside the finished system, and an `on_success` hook ran
+# whether or not the install went on to succeed.
+HOST_STAGES = ("post_storage", "pre_reboot", "on_success", "on_error")
+
+HOST_STAGE_CONTRACT = {
+    "post_storage": "on the installer host after disko has formatted and mounted "
+                    "the target at /mnt, before nixos-install",
+    "pre_reboot": "on the installer host after nixos-install returns, before the "
+                  "machine is rebooted",
+    "on_success": "on the installer host only when nixos-install exits zero",
+    "on_error": "on the installer host only when disko or nixos-install fails",
+}
+
+# Which side of the chroot boundary each stage genuinely runs on here. SPEC §13
+# defaults `chroot` to true for post_install and false for the host hooks; a
+# document that asks for the other side is asking for something this applier
+# cannot do, so it refuses rather than running the body on the wrong machine.
+STAGE_IN_TARGET = {
+    "pre": False, "pre_install": False, "post_storage": False,
+    "post": True, "post_install": True,
+    "pre_reboot": False, "on_success": False, "on_error": False,
+    "firstboot": True,
+}
+
+
+def check_stage_chroot(doc: dict) -> None:
+    """Refuse a `chroot` flag that names the side of the boundary we are not on.
+
+    `check_script_fields` is called with honors_chroot=True precisely so this
+    can answer per stage: the shared helper has one default for the whole
+    applier, and this applier straddles the boundary — `pre_install` runs on the
+    live ISO, `post_install` runs inside the target during activation.
+    """
+    def inspect(stage: str, items, label: str) -> None:
+        in_target = STAGE_IN_TARGET[stage]
+        for item in items or []:
+            flag = item.get("chroot")
+            if flag is None or bool(flag) is in_target:
+                continue
+            if in_target:
+                refuse(f"{label}.chroot false: this applier runs {stage} from "
+                       "system.activationScripts, which nixos-install executes "
+                       "inside the target — there is no host-side stage for it")
+            else:
+                refuse(f"{label}.chroot true: this applier runs {stage} "
+                       f"{HOST_STAGE_CONTRACT.get(stage, 'on the installer host')}"
+                       ", where no target root is available to enter")
+
+    scripts = doc.get("scripts", {}) or {}
+    for stage in STAGE_IN_TARGET:
+        inspect(stage, scripts.get(stage), f"scripts.{stage}[]")
+    for user in doc.get("users", []) or []:
+        user_scripts = user.get("scripts", {}) or {}
+        for stage in ("post", "post_install", "firstboot"):
+            inspect(stage, user_scripts.get(stage),
+                    f"users['{user.get('name')}'].scripts.{stage}[]")
+
+
+def host_stage_bodies(doc: dict, stage: str) -> list[str]:
+    """The script bodies `--apply` runs on the installer host for one stage."""
+    scripts = doc.get("scripts", {}) or {}
+    return [s["content"] for s in scripts.get(stage, []) or [] if s.get("content")]
+
+
+def render_files(doc: dict) -> tuple[list[str], list[str]]:
+    """files[] → environment.etc under /etc, activation elsewhere.
+
+    Returns (configuration lines, shell commands for the activation script).
+    Anything outside /etc used to refuse outright; NixOS has no declarative
+    option for an arbitrary path, but activation runs inside the target with a
+    writable root, so the file can still be delivered — as ⚙, not ✅, which the
+    warning says. Content travels base64-encoded in both directions so a shell
+    metacharacter, a newline or a real binary payload cannot change the meaning
+    of what is emitted.
+    """
+    import shlex
+
+    out: list[str] = []
+    cmds: list[str] = []
+    for entry in doc.get("files", []) or []:
+        raw = entry["content"]
+        blob = base64.b64decode(raw) if entry.get("encoding") == "base64" \
+            else raw.encode()
+        mode = entry.get("mode")
+        owner = entry.get("owner")
+        path = entry["path"]
+
+        text: str | None
+        try:
+            text = blob.decode()
+        except UnicodeDecodeError:
+            text = None
+
+        if path.startswith("/etc/") and text is not None:
+            rest = path[len("/etc/"):]
+            out.append(f"  environment.etc.{nix_str(rest)}.text = {nix_str(text)};")
+            # uid/gid and mode only take effect when the entry is *copied*:
+            # etc.nix:49-52 skips them when mode is the "symlink" default, so an
+            # owner with no mode was silently discarded.
+            if owner and not mode:
+                mode = "0644"
+            if mode:
+                out.append(f"  environment.etc.{nix_str(rest)}.mode = {nix_str(mode)};")
+            if owner:
+                user, _, group = owner.partition(":")
+                out.append(f"  environment.etc.{nix_str(rest)}.user = {nix_str(user)};")
+                if group:
+                    out.append(f"  environment.etc.{nix_str(rest)}.group = {nix_str(group)};")
+            continue
+
+        if text is None and path.startswith("/etc/"):
+            warn(f"files[] entry {path!r}: content is not valid UTF-8, so it "
+                 "cannot go through environment.etc (which takes text); it is "
+                 "written by an activation script instead")
+        else:
+            warn(f"files[] entry {path!r} is outside /etc: NixOS has no "
+                 "declarative option for an arbitrary path, so it is written by "
+                 "an activation script on every activation instead of being "
+                 "managed by the store")
+        quoted = shlex.quote(path)
+        b64 = base64.b64encode(blob).decode()
+        cmds.append(f"install -D -m {shlex.quote(mode or '0644')} /dev/null {quoted}")
+        cmds.append(f"printf %s {b64} | base64 -d > {quoted}")
+        if owner:
+            cmds.append(f"chown {shlex.quote(owner)} {quoted}")
+    return out, cmds
+
+
+def render_script_hooks(doc: dict, file_cmds: list[str] | None = None) -> list[str]:
     """LIS script hooks → activation scripts and a first-boot unit.
 
     NixOS has no installer hook vocabulary, but it does have the two things the
-    hooks actually need: something that runs on every activation (which includes
-    the one `nixos-install` performs) and something that runs once at first boot.
+    in-target hooks actually need: something that runs on every activation
+    (which includes the one `nixos-install` performs) and something that runs
+    once at first boot. The stages SPEC §13 places in the live installer
+    environment are not emitted here at all — see HOST_STAGES.
     """
     scripts = doc.get("scripts", {}) or {}
     out: list[str] = []
 
-    activation = [s["content"] for stage in ("post_storage", "post_install", "post",
-                                             "pre_reboot", "on_success")
-                  for s in scripts.get(stage, []) if s.get("content")]
+    # files[] first: a post_install hook may well edit a file the document drops.
+    activation = list(file_cmds or [])
+    activation += [s["content"] for stage in ("post_install", "post")
+                   for s in scripts.get(stage, []) if s.get("content")]
     for user in doc.get("users", []) or []:
         for s in (user.get("scripts", {}) or {}).get("post_install", []):
             if c := s.get("content"):
@@ -770,8 +925,13 @@ def render_script_hooks(doc: dict) -> list[str]:
         if scripts.get(stage):
             warn(f"scripts.{stage} runs on the installer host before disko "
                  "(--apply), not inside the generated configuration")
-    if scripts.get("on_error"):
-        refuse("scripts.on_error has no NixOS equivalent")
+    for stage in HOST_STAGES:
+        if scripts.get(stage):
+            warn(f"scripts.{stage} runs {HOST_STAGE_CONTRACT[stage]} (--apply); "
+                 "SPEC §13 places it in the live installer environment, which no "
+                 "NixOS option can describe, so nothing about it is emitted into "
+                 "the generated configuration")
+    check_stage_chroot(doc)
 
     # Birth certificate (delivery.md §8) — recorded on every activation.
     birth = base64.b64encode(json.dumps(doc, separators=(",", ":")).encode()).decode()
@@ -810,6 +970,169 @@ def render_script_hooks(doc: dict) -> list[str]:
 
 
 
+# A console= parameter names a serial line, so the login prompt has to be
+# asked for by name: getty.nix only instantiates serial-getty@ for the ttys
+# something enables (getty.nix:153), and NixOS itself turns the unit on this
+# way (virtualisation/amazon-image.nix:102, virtualisation/kubevirt.nix:28).
+SERIAL_TTY = re.compile(r"^console=(tty(?:S|USB|AMA)\d+|hvc\d+)\b")
+
+KERNEL_PACKAGES = {
+    # `lts` is nixpkgs' default kernel on 24.11, an LTS series.
+    "lts": "linuxPackages",
+    "hardened": "linuxPackages_hardened",
+    # Dash, not underscore: pkgs.linuxPackages_rt does not exist on 24.11, and
+    # naming it is an evaluation error after disko has already wiped the disks.
+    "realtime": "linuxPackages-rt",
+    "zen": "linuxPackages_zen",
+}
+
+
+def serial_console_ttys(params: list[str]) -> list[str]:
+    """The serial lines named by console= parameters, in document order."""
+    ttys = []
+    for param in params:
+        if (match := SERIAL_TTY.match(param)) and match.group(1) not in ttys:
+            ttys.append(match.group(1))
+    return ttys
+
+
+def grub_serial_config(serial: str) -> list[str] | None:
+    """`serial --unit=N --speed=S` plus the terminal switches, for grub.cfg.
+
+    GRUB speaks to a UART by unit number, not by device node, so only ttyS<N>
+    can be translated; a USB or AMBA console reaches the kernel and the getty
+    but not the boot menu. The lines land verbatim in grub.cfg through
+    boot.loader.grub.extraConfig (install-grub.pl:434 appends it before the
+    menu entries, which is where a terminal switch has to be to take effect).
+    """
+    name, _, rest = serial.partition(",")
+    if not (unit := re.fullmatch(r"ttyS(\d+)", name)):
+        warn(f"boot.console.serial {serial!r}: GRUB addresses serial ports by unit "
+             "number and only ttyS<N> has one, so the boot menu stays on the "
+             "firmware console; the kernel and the getty still use the line")
+        return None
+    speed = match.group(1) if (match := re.match(r"(\d+)", rest)) else "115200"
+    return [f"    serial --unit={unit.group(1)} --speed={speed}",
+            "    terminal_input --append serial",
+            "    terminal_output --append serial"]
+
+
+def render_boot(doc: dict) -> list[str]:
+    """boot.* → bootloader, kernel and console options.
+
+    Every key the schema allows under `boot` is answered here: honored with a
+    real option, or refused with the reason NixOS has none. Nothing in this
+    section is allowed to fall through in silence, because a bootloader that
+    quietly ignores half its instructions still installs — it just installs a
+    machine that is not the one the document described.
+    """
+    boot = doc.get("boot", {}) or {}
+    kernel = boot.get("kernel", {}) or {}
+    target = doc.get("target", {}) or {}
+    firmware = target.get("firmware", "uefi")
+    loader = boot.get("loader", "auto")
+    os_prober = boot.get("os_prober")
+    pwhash = boot.get("password_hash")
+    serial = (boot.get("console", {}) or {}).get("serial")
+    out: list[str] = []
+
+    # `auto` is the translator's choice, so it is made against the rest of the
+    # document: two of these fields exist only in GRUB, and picking
+    # systemd-boot for a document that asks for them would turn an honorable
+    # translation into a refusal for no reason.
+    if loader == "auto" and firmware != "bios" and (pwhash or os_prober):
+        asked = " and ".join(n for n, v in (("boot.password_hash", pwhash),
+                                            ("boot.os_prober", os_prober)) if v)
+        warn(f"boot.loader auto resolves to grub, not systemd-boot: {asked} "
+             "has no systemd-boot equivalent in NixOS")
+        loader = "grub"
+
+    on_systemd_boot = loader in ("auto", "systemd-boot") and firmware != "bios"
+    if on_systemd_boot:
+        out += ["  boot.loader.systemd-boot.enable = true;",
+                "  boot.loader.efi.canTouchEfiVariables = true;"]
+        if os_prober:
+            refuse("boot.os_prober: only GRUB detects other operating systems on "
+                   "NixOS (boot.loader.grub.useOSProber, grub.nix:485); systemd-boot "
+                   "has no equivalent option — set boot.loader to grub")
+        if pwhash:
+            refuse("boot.password_hash: NixOS protects boot entries through "
+                   "boot.loader.grub.users (grub.nix:211), which systemd-boot has no "
+                   "counterpart for — set boot.loader to grub")
+    elif loader in ("auto", "grub", "systemd-boot"):
+        if loader == "systemd-boot":
+            refuse("boot.loader systemd-boot requires UEFI; target.firmware is bios")
+        devices = [(d.get("match", {}) or {}).get("path")
+                   for d in target.get("disks", [])]
+        devices = [d for d in devices if d]
+        out.append("  boot.loader.grub.enable = true;")
+        if firmware == "bios":
+            out.append(f"  boot.loader.grub.devices = {nix_list(devices)};")
+        else:
+            out.append("  boot.loader.grub.efiSupport = true;")
+        if os_prober:
+            out.append("  boot.loader.grub.useOSProber = true;")
+        if pwhash:
+            # A crypt(3) hash here is not a weaker password, it is no password:
+            # GRUB only understands its own PBKDF2 format and rejects the rest,
+            # leaving the menu locked against everyone including the operator.
+            if not pwhash.startswith("grub.pbkdf2."):
+                refuse("boot.password_hash is not a GRUB PBKDF2 hash — it must be the "
+                       "'grub.pbkdf2.sha512.…' string grub-mkpasswd-pbkdf2 prints; GRUB "
+                       "rejects any other format and the menu becomes unenterable")
+            else:
+                warn("boot.password_hash guards the GRUB menu and command line only, "
+                     "not the disk, and the hash is copied into the Nix store and into "
+                     "/boot/grub/grub.cfg, where any local user can read it "
+                     "(grub.nix:218-226)")
+                out.append("  boot.loader.grub.users.root.hashedPassword = "
+                           f"{nix_str(pwhash)};")
+        if serial and (config := grub_serial_config(serial)):
+            out += ["  boot.loader.grub.extraConfig = ''"] + config + ["  '';"]
+    else:
+        refuse(f"boot.loader {loader!r} has no NixOS module in the default translator")
+    if serial and on_systemd_boot:
+        warn("boot.console.serial: systemd-boot has no serial-terminal option in "
+             "NixOS, so the boot menu stays on the firmware console; the kernel "
+             "and the getty do use the serial line")
+
+    if boot.get("timeout") is not None:
+        out.append(f"  boot.loader.timeout = {boot['timeout']};")
+
+    # boot.console.serial is the intent "give me a serial console"; the console=
+    # parameter is one of the two halves the spec says it expands to (§7).
+    params = list(kernel.get("params", []) or [])
+    if serial and f"console={serial}" not in params:
+        params.append(f"console={serial}")
+    if params:
+        out.append(f"  boot.kernelParams = {nix_list(params)};")
+    for tty in serial_console_ttys(params):
+        out.append(f"  systemd.services.\"serial-getty@{tty}\".enable = true;")
+
+    if kernel_set := check_kernel_variant(doc, KERNEL_PACKAGES, "NixOS"):
+        # Dashes are legal in a Nix identifier, so linuxPackages-rt needs no
+        # quoting; it is still an attribute name, not an option path.
+        out.append(f"  boot.kernelPackages = pkgs.{kernel_set};")
+
+    if boot.get("uki"):
+        refuse("boot.uki: NixOS 24.11 can build a UKI (system.build.uki, "
+               "modules/system/boot/uki.nix:108) but no bootloader module installs one "
+               "— the single in-tree consumer is the disk-image builder "
+               "modules/image/repart-verity-store.nix:169, and there is no "
+               "boot.uki.enable; a UKI install needs the out-of-tree lanzaboote module")
+    if boot.get("secure_boot") is True:
+        refuse("boot.secure_boot: NixOS 24.11 signs nothing — no module in "
+               "nixos/modules installs a shim or a signed loader (the tree's only "
+               "'secureBoot' is virtualisation.useSecureBoot, a guest-firmware switch "
+               "for test VMs); Secure Boot needs the out-of-tree lanzaboote module")
+    generator = (boot.get("initramfs", {}) or {}).get("generator")
+    if generator not in (None, "auto"):
+        refuse(f"boot.initramfs.generator {generator!r}: NixOS builds its own initrd "
+               "(optionally the systemd one via boot.initrd.systemd.enable); dracut, "
+               "mkinitcpio and booster appear nowhere in nixos/modules")
+    return out
+
+
 def render_configuration(doc: dict) -> str:
     system = doc.get("system", {}) or {}
     boot = doc.get("boot", {}) or {}
@@ -823,34 +1146,7 @@ def render_configuration(doc: dict) -> str:
            "{ config, lib, pkgs, ... }:", "", "{",
            "  imports = [ ./hardware.nix ];", ""]
 
-    target = doc.get("target", {}) or {}
-    firmware = target.get("firmware", "uefi")
-    loader = boot.get("loader", "auto")
-    if loader in ("auto", "systemd-boot") and firmware != "bios":
-        out += ["  boot.loader.systemd-boot.enable = true;",
-                "  boot.loader.efi.canTouchEfiVariables = true;"]
-    elif loader in ("auto", "grub", "systemd-boot"):
-        if loader == "systemd-boot":
-            refuse("boot.loader systemd-boot requires UEFI; target.firmware is bios")
-        devices = [(d.get("match", {}) or {}).get("path")
-                   for d in target.get("disks", [])]
-        devices = [d for d in devices if d]
-        out.append("  boot.loader.grub.enable = true;")
-        if firmware == "bios":
-            out.append(f"  boot.loader.grub.devices = {nix_list(devices)};")
-        else:
-            out.append("  boot.loader.grub.efiSupport = true;")
-        if boot.get("os_prober"):
-            out.append("  boot.loader.grub.useOSProber = true;")
-    else:
-        refuse(f"boot.loader {loader!r} has no NixOS module in the default translator")
-    if boot.get("timeout") is not None:
-        out.append(f"  boot.loader.timeout = {boot['timeout']};")
-    if params := (boot.get("kernel", {}) or {}).get("params"):
-        out.append(f"  boot.kernelParams = {nix_list(params)};")
-        if any(p.startswith("console=ttyS") for p in params):
-            # A serial console in the document implies a getty on it.
-            out.append("  systemd.services.\"serial-getty@ttyS0\".enable = true;")
+    out += render_boot(doc)
     out.append("")
 
     if system.get("hostname"):
@@ -919,10 +1215,6 @@ def render_configuration(doc: dict) -> str:
             out.append(f"  services.openssh.settings.PasswordAuthentication = {str(ssh['password_auth']).lower()};")
         if ssh.get("permit_root"):
             out.append(f"  services.openssh.settings.PermitRootLogin = {nix_str(ssh['permit_root'])};")
-    if kernel_set := check_kernel_variant(
-            doc, {"lts": "linuxPackages", "hardened": "linuxPackages_hardened",
-                  "realtime": "linuxPackages_rt"}, "NixOS"):
-        out.append(f"  boot.kernelPackages = pkgs.{kernel_set};")
     module = ((system.get("security") or {}).get("module"))
     if module == "apparmor":
         out.append("  security.apparmor.enable = true;")
@@ -1081,25 +1373,10 @@ def render_configuration(doc: dict) -> str:
         out += ["  services.xserver.videoDrivers = [ \"nvidia\" ];",
                 f"  hardware.nvidia.open = {str(drivers['gpu'] == 'nvidia-open').lower()};"]
 
-    for entry in doc.get("files", []):
-        content = entry["content"]
-        if entry.get("encoding") == "base64":
-            content = base64.b64decode(content).decode()
-        if entry["path"].startswith("/etc/"):
-            rest = entry["path"][len("/etc/"):]
-            out.append(f"  environment.etc.{nix_str(rest)}.text = {nix_str(content)};")
-            if entry.get("mode"):
-                out.append(f"  environment.etc.{nix_str(rest)}.mode = {nix_str(entry['mode'])};")
-            if owner := entry.get("owner"):
-                user, _, group = owner.partition(":")
-                out.append(f"  environment.etc.{nix_str(rest)}.user = {nix_str(user)};")
-                if group:
-                    out.append(f"  environment.etc.{nix_str(rest)}.group = {nix_str(group)};")
-        else:
-            refuse(f"files[] entry {entry['path']!r} is outside /etc; the default "
-                   "translator writes files through environment.etc")
+    file_lines, file_cmds = render_files(doc)
+    out += file_lines
 
-    out += render_script_hooks(doc)
+    out += render_script_hooks(doc, file_cmds)
 
     # Keys matrix
     if doc.get("keys"):
@@ -1141,7 +1418,13 @@ def main() -> int:
     check_version(doc, args.file)
     check_firmware(doc)
     check_unhandled(doc, ALL_SECTIONS)
-    check_boot_extras(doc, {"kernel", "loader", "params", "timeout", "variant"})
+    # Every key the schema allows under boot is answered in render_boot, either
+    # with an option or with a refusal carrying its reason. Leaving them out of
+    # this set produced a warning saying applied fields were not applied, which
+    # is how a warning channel stops being read.
+    check_boot_extras(doc, {"kernel", "variant", "params", "modules", "blacklist",
+                            "loader", "timeout", "os_prober", "password_hash",
+                            "console", "secure_boot", "uki", "initramfs"})
     check_mirror(doc, {"url"})
     check_section_fields(doc, "desktop", {"audio", "autologin", "bluetooth", "printing"})
     check_section_fields(doc, "installer", set())
@@ -1171,21 +1454,33 @@ def main() -> int:
     # Fail closed *before* touching the machine, not after.
     check_raid_consumers(doc)
     check_snapshots(doc, tools={"snapper"}, boot_menu=False)
-    check_script_fields(doc)
-    check_unread(doc, ignore=APPLY_TIME_PATHS)
+    # honors_chroot: the shared helper carries one boundary default per applier
+    # and this applier straddles the boundary — pre_install runs on the live
+    # ISO, post_install runs inside the target during activation — so the flag
+    # is answered per stage by check_stage_chroot() instead.
+    check_script_fields(doc, honors_chroot=True)
+    check_unread(doc, ignore=APPLY_TIME_PATHS
+                 | {f"scripts.{stage}[].content" for stage in HOST_STAGES})
 
     if status := enforce(args.strict):
         return status
 
     if args.apply:
         import subprocess
-        # The translation warns that pre-install hooks run here; run them, or
-        # that warning is a promise the applier does not keep.
+
+        def run_stage(stage: str) -> None:
+            """Run one live-installer-environment stage on this host.
+
+            The translation warns that these run here rather than reaching the
+            generated configuration; running them is what keeps that warning a
+            statement of fact instead of a promise.
+            """
+            for content in host_stage_bodies(doc, stage):
+                print(f"running scripts.{stage} on the installer host")
+                subprocess.run(content, shell=True, check=False)
+
         for stage in ("pre_install", "pre"):
-            for item in (doc.get("scripts", {}) or {}).get(stage, []) or []:
-                if content := item.get("content"):
-                    print(f"running scripts.{stage} on the installer host")
-                    subprocess.run(content, shell=True, check=False)
+            run_stage(stage)
         print(f"partitioning disks via disko: {disko_file}")
         disko = ("nix --extra-experimental-features 'nix-command flakes' "
                  f"run github:nix-community/disko/latest -- --mode disko {disko_file}")
@@ -1194,7 +1489,13 @@ def main() -> int:
             res = subprocess.run(
                 f"nix-shell -p disko --run 'disko --mode disko {disko_file}'", shell=True)
             if res.returncode != 0:
+                run_stage("on_error")
                 return res.returncode
+
+        # SPEC §13.2: the live installer environment, right after the target is
+        # formatted and mounted — which on this applier is disko's default root
+        # mount point, /mnt, not the /target the spec's example names.
+        run_stage("post_storage")
 
         print("installing NixOS via nixos-install...")
         subprocess.run(f"mkdir -p /mnt/etc/nixos && cp -f {config_file} {hw_file} "
@@ -1206,6 +1507,10 @@ def main() -> int:
                 "'nixos-install --no-root-passwd --root /mnt'", shell=True)
         if res.returncode == 0:
             write_birth_certificate(doc)
+            run_stage("on_success")
+            run_stage("pre_reboot")
+        else:
+            run_stage("on_error")
         return res.returncode
     return 0
 
