@@ -28,10 +28,6 @@ from lis_common import (track, check_unread, check_raid_consumers, chroot_intent
 # Containers holding the filesystem directly, as (id, fs, mountpoint).
 BARE_CRYPT: list = []
 
-# Set when the document declares a swap partition that no container wraps while
-# some other partition *is* encrypted. See UNSAFE_SWAP_CHECK below.
-PLAIN_SWAP: list = []
-
 FS_MAP = {"ext4": "ext4", "xfs": "xfs", "btrfs": "btrfs", "vfat": "fat32", "swap": "linux-swap"}
 
 
@@ -124,65 +120,8 @@ def recipe_entry(name: str, size: str, fs: str | None, mountpoint: str | None,
 
 BARE_CRYPT_HOOK = "/lib/partman/display.d/15lis_bare_crypto"
 
-# partman-crypto ships check.d/unsafe_swap (installed as 11unsafe_swap, per its
-# debian/di-numbers). Once any device directory carries `crypt_realdev`, it walks
-# every *other* device and, on the first partition whose `method` file reads
-# `swap`, shows partman-crypto/unsafe_swap and `exit 1`s.
-UNSAFE_SWAP_CHECK = "/lib/partman/check.d/*unsafe_swap"
 
-
-def lift_unsafe_swap_veto() -> str:
-    """Let a plain swap partition coexist with a LUKS container, as declared.
-
-    WHY THIS IS NOT DRIFT
-    ---------------------
-    Nothing here changes the layout. partman-auto still cuts the swap partition
-    from `partman-auto/expert_recipe`, partman-basicfilesystems still mkswaps it
-    (commit.d/45format_swap) and still writes its fstab line (fstab.d/basic).
-    The installed system is
-    exactly the three partitions the document declares — an unencrypted 1GiB
-    /boot, an unencrypted 2GiB swap, and a btrfs root inside LUKS. The one thing
-    that is removed is d-i's *refusal to proceed*.
-
-    WHY THE REFUSAL CANNOT BE ANSWERED INSTEAD
-    ------------------------------------------
-    `partman-crypto/unsafe_swap` is `Type: error` in debian/partman-crypto.templates
-    — a note with no answer value. check.d/unsafe_swap:50-54 does
-        db_fset partman-crypto/unsafe_swap seen false
-        db_input critical partman-crypto/unsafe_swap
-        db_go || true
-        exit 1
-    so it re-arms the seen flag (defeating a preseeded `seen true`), discards
-    db_go's status, and exits 1 regardless. partman-base's partman:160-166 turns
-    that into `continue 2` back to the display.d loop, i.e. an endless
-    partitioner. There is no preseed line that changes this, and Debian has
-    declined to add one: #414448 "allow to use unencrypted swap" is tagged
-    wontfix ("too 'dangerous' an option to allow"), and #743058, which asked for
-    the same escape hatch in expert mode, was closed the same way. This is
-    d-i policy, not a limitation of Debian the operating system: /etc/crypttab
-    plus a plain swap line in /etc/fstab is an ordinary, bootable Debian, and
-    every other applier in this tree installs precisely that from this document.
-
-    WHY chmod AND NOT rm
-    --------------------
-    partman:161 runs a check only `if [ -x $s ]`. Clearing the execute bit uses
-    partman's own dispatch contract, leaves Debian's file byte-for-byte on disk
-    for anyone inspecting the installer, and is undone by a `chmod +x`. The glob
-    is deliberate: the numeric prefix comes from debian/di-numbers at udeb build
-    time, and the script has lived in commit.d/ in the past (#381870).
-
-    The alternative the bug log points people at — leaving the partition's
-    `method` unset for good, so the check's `[ -f $id/method ] || continue` skips
-    it, and running mkswap from late_command — would make this applier create a
-    filesystem of its own, which it does not do for any partition in any layout.
-    """
-    return ("lis_us=; for c in " + UNSAFE_SWAP_CHECK + "; do [ -f \"$c\" ] || "
-            "continue; chmod a-x \"$c\"; lis_us=$c; done; logger -t lis "
-            "\"unsafe_swap veto lifted: ${lis_us:-NO SUCH CHECK}\"")
-
-
-def bare_crypto_hook(fs: str | None, mountpoint: str | None,
-                     plain_swap: bool = False) -> str:
+def bare_crypto_hook(fs: str | None, mountpoint: str | None) -> str:
     """partman's own guided partitioner, wired to partman-crypto without LVM.
 
     WHAT THE APPLIER DOES HERE, AND WHAT IT DOES NOT
@@ -215,10 +154,6 @@ def bare_crypto_hook(fs: str | None, mountpoint: str | None,
     This runs as an *additional* display.d script rather than a replacement for
     any Debian file, right after partman-auto/display.d/10initial_auto has
     finished the guided partitioning.
-
-    `plain_swap` additionally lifts the swap method off the document's swap
-    partition for the duration of crypto_setup — see the SWAP OUTSIDE THE
-    CONTAINER comment in the body.
     """
     if fs == "swap":
         inside = ["echo swap > $id/method",
@@ -241,77 +176,6 @@ def bare_crypto_hook(fs: str | None, mountpoint: str | None,
                '\t\tpartitions="$partitions $id"',
                "\tdone",
                "\tclose_dialog"]
-    # Same walk, but carrying each partition's /dev node: after crypto_setup's
-    # restart_partman the directory names are re-derived, and the device path is
-    # the one handle that survives it.
-    listing_paths = ["\tpartitions=",
-                     "\topen_dialog PARTITIONS",
-                     '\twhile { read_line num id size type fs path name; '
-                     '[ "$id" ]; }; do',
-                     '\t\t[ "$fs" != free ] || continue',
-                     '\t\tpartitions="$partitions $id,$path"',
-                     "\tdone",
-                     "\tclose_dialog"]
-    # SWAP OUTSIDE THE CONTAINER
-    # --------------------------
-    # crypto_setup() commits the partition table before it looks at swap
-    # (crypto-base.sh:887-894), and commit.d/50format_basicfilesystems:11 calls
-    # enable_swap (partman-base lib/base.sh:1138-1164), which swapons every
-    # partition whose `method` file says `swap`. swap_is_safe (crypto-base.sh:150-171)
-    # then reads /proc/swaps and presumes anything outside /dev/mapper unsafe, so
-    # crypto_setup returns 1 and the container is never created. That gate is not
-    # check.d and cannot be disabled the way check.d/11unsafe_swap is — it is a
-    # line inside the very function this hook calls.
-    #
-    # The document's swap partition is genuinely outside the container, so the
-    # `method` file is lifted off it across the crypto_setup call and written back
-    # immediately afterwards. Nothing else about the partition changes: it keeps
-    # its geometry, its linux-swap type and its place in the table. commit.d runs
-    # again after check.d, and that is the pass that mkswaps it
-    # (commit.d/45format_swap:31-50) and swapons it, exactly as it would for a
-    # document with no encryption at all.
-    mask = ["lis_swaps=",
-            "for dev in $DEVICES/*; do",
-            '\t[ -d "$dev" ] || continue',
-            "\tcd $dev",
-            "\t[ -f crypt_realdev ] && continue",
-            *listing_paths,
-            "\tfor part in $partitions; do",
-            "\t\tid=${part%,*}",
-            "\t\t[ -f $id/method ] || continue",
-            '\t\t[ "$(cat $id/method)" = swap ] || continue',
-            '\t\tlis_swaps="$lis_swaps ${part#*,}"',
-            "\t\trm -f $id/method",
-            "\tdone",
-            "done",
-            'log "LIS: swap held back across crypto_setup:${lis_swaps:- none}"']
-    restore = ["for lis_p in $lis_swaps; do",
-               "\tlis_found=no",
-               "\tfor dev in $DEVICES/*; do",
-               '\t\t[ -d "$dev" ] || continue',
-               "\t\tcd $dev",
-               "\t\t[ -f crypt_realdev ] && continue",
-               *[f"\t{line}" for line in listing_paths],
-               "\t\tfor part in $partitions; do",
-               '\t\t\t[ "${part#*,}" = "$lis_p" ] || continue',
-               "\t\t\tid=${part%,*}",
-               "\t\t\techo swap > $id/method",
-               "\t\t\t: > $id/format",
-               "\t\t\trm -f $id/use_filesystem $id/filesystem $id/mountpoint",
-               "\t\t\trm -f $id/formatted",
-               # update.d/60swap sets the partition's parted type back to
-               # linux-swap, which is what the recipe's method{ swap } did.
-               "\t\t\tupdate_partition $dev $id",
-               "\t\t\tlis_found=yes",
-               "\t\tdone",
-               "\tdone",
-               # Silently dropping the swap would install a system the document
-               # did not describe, which is the one outcome worse than failing.
-               '\tif [ "$lis_found" != yes ]; then',
-               '\t\tlog "LIS: swap partition $lis_p vanished during crypto_setup"',
-               "\t\texit 255",
-               "\tfi",
-               "done"]
     return "\n".join([
         "#!/bin/sh",
         "# Generated by lis2debian — a LUKS container with the filesystem",
@@ -353,11 +217,9 @@ def bare_crypto_hook(fs: str | None, mountpoint: str | None,
         # later check.d failure re-runs the whole display.d list.
         "touch /var/lib/partman/lis_bare_crypto",
         "",
-        *(mask + [""] if plain_swap else []),
         "crypto_check_setup || exit 255",
         "crypto_setup no || exit 255",
         "",
-        *(restore + [""] if plain_swap else []),
         "# crypto_setup opened the container and restarted partman, so",
         "# init.d/52crypto has registered the mapper node as a disk carrying one",
         "# partition. That partition is where the document's filesystem goes.",
@@ -455,16 +317,23 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
                 if method not in ("passphrase", "keyfile"):
                     warn(f"storage.encryption ({container['id']}): unlock method "
                          f"{method!r} must be enrolled after installation")
+        # partman-crypto check.d/11unsafe_swap walks every device that is not
+        # itself a crypt device and exits 1 the moment it finds a partition with
+        # method{ swap } while any container exists — the plaintext a kernel
+        # pages out would land on an unencrypted partition. The dialog it raises
+        # (partman-crypto/unsafe_swap) is a note, and the script exits 1 whatever
+        # the answer is, so there is no preseed that gets past it: an install
+        # with a plain swap partition alongside a container never leaves the
+        # partitioner. Swap must sit inside a container, or on a swapfile.
         for part in parts:
             if role_fs(part) != "swap" or part.get("id") in {
                     c.get("over") for c in (storage.get("encryption") or [])}:
                 continue
-            PLAIN_SWAP.append(part.get("id"))
-            warn(f"partition '{part.get('id')}': swap is declared outside every "
-                 "encryption container, so pages evicted from an encrypted "
-                 "filesystem land on unencrypted storage — that is what the "
-                 "document asks for, and d-i's veto on it is lifted for this "
-                 "install (see UNSAFE_SWAP_CHECK in this applier)")
+            refuse(f"partition '{part.get('id')}': an unencrypted swap partition "
+                   "alongside a LUKS container is refused by the installer "
+                   "(partman-crypto check.d/11unsafe_swap, which exits 1 whatever "
+                   "the dialog is answered) — put the swap inside a container, in "
+                   "an encrypted volume group, or use storage.swap.file")
 
     disks = {}
     for disk in target.get("disks", []):
@@ -524,18 +393,6 @@ def render_storage(doc: dict, lines: list[str]) -> tuple[list[str], list[str]]:
         refuse("storage.encryption: mixing a container consumed by a volume "
                "group with a container carrying a filesystem directly needs both "
                "partman-auto methods at once — declare them all one way")
-    if crypto_lvm and PLAIN_SWAP:
-        # With method=crypto it is partman-auto-crypto's own bin/autopartition-crypto
-        # that calls crypto_setup, so there is no seam in which to hold the swap
-        # method back across crypto-base.sh:889's swap_is_safe — see the SWAP
-        # OUTSIDE THE CONTAINER note in bare_crypto_hook(). Lifting the check.d
-        # veto alone is not enough there.
-        refuse(f"partition '{PLAIN_SWAP[0]}': a swap partition outside every "
-               "container, next to a volume group inside one, aborts "
-               "partman-crypto's own crypto_setup (crypto-base.sh:889 swap_is_safe, "
-               "reached from bin/autopartition-crypto, which this applier does not "
-               "drive) — put the swap in the encrypted volume group, or declare the "
-               "root filesystem directly inside the container instead of over LVM")
     # Not "crypto": that makes partman-auto-lvm put our method{ crypto } line
     # into pvscheme (auto-lvm.sh:245), where the VG map compares the raw disk
     # against /dev/mapper/<part>_crypt and bails out no_such_pv (:97,:106).
@@ -1036,19 +893,12 @@ def render_preseed(doc: dict) -> str:
         # "You need to choose a passphrase to encrypt ...". partman-base's
         # init.d/01early_command runs partman/early_command after the partman
         # udebs are unpacked and before partitioning, which is the right moment.
-        if PLAIN_SWAP:
-            # Same window as the hook below: partman-base's partman:109 anna-installs
-            # partman-crypto before any init.d script runs, so the check file is
-            # already on disk here, and check.d itself is not reached until after
-            # display.d.
-            inject.append(lift_unsafe_swap_veto())
         if BARE_CRYPT:
             # Installed from partman/early_command for the same reason the
             # passphrase is: /lib/partman only exists once the partman udebs are
             # unpacked, which init.d/01early_command guarantees and
             # preseed/early_command does not.
-            blob = b64(bare_crypto_hook(BARE_CRYPT[0][1], BARE_CRYPT[0][2],
-                                        bool(PLAIN_SWAP)))
+            blob = b64(bare_crypto_hook(BARE_CRYPT[0][1], BARE_CRYPT[0][2]))
             inject += [f"echo {blob} | base64 -d > {BARE_CRYPT_HOOK}",
                        f"chmod 755 {BARE_CRYPT_HOOK}"]
         crypt_early = "; ".join(inject)
