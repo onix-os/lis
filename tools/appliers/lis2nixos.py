@@ -1513,11 +1513,16 @@ def render_wifi(wifi: list, manager: str, out: list[str]) -> None:
                "(services/networking/iwd.nix:36) exposes only `settings` for "
                "main.conf and has no declarative network list — set "
                "network.manager to networkmanager or systemd-networkd")
+        # The section is refused as a whole; leaving its leaves unread would add
+        # a second, weaker "never read" warning for the same decision.
+        for net in wifi:
+            consume(net)
         return
-    warn(f"network.wifi[].psk_hash is read at boot from {WIRELESS_SECRETS}, not "
-         "written into configuration.nix, which the Nix store publishes "
-         "world-readable; --apply installs that file, a translate-only run must "
-         "provision it")
+    if any(net.get("psk_hash") for net in wifi):
+        warn(f"network.wifi[].psk_hash is read at boot from {WIRELESS_SECRETS}, "
+             "not written into configuration.nix, which the Nix store publishes "
+             "world-readable; --apply installs that file, a translate-only run "
+             "must provision it")
     if manager == "systemd-networkd":
         out += ["  networking.wireless.enable = true;",
                 f"  networking.wireless.secretsFile = {nix_str(WIRELESS_SECRETS)};"]
