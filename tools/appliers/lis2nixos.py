@@ -971,7 +971,21 @@ def render_files(doc: dict) -> tuple[list[str], list[str]]:
 
     out: list[str] = []
     cmds: list[str] = []
+    seen: set[str] = set()
     for entry in doc.get("files", []) or []:
+        if not entry["path"].startswith("/"):
+            refuse(f"files[] entry {entry['path']!r} is not an absolute path — "
+                   "there is no working directory a relative one could be "
+                   "resolved against, in the store or in an activation script")
+            continue
+        if entry["path"] in seen:
+            # Two entries for one path define environment.etc.<name>.text twice,
+            # which is a duplicate-attribute error at parse time — reached only
+            # after disko has already destroyed the disks on an --apply run.
+            refuse(f"files[] declares {entry['path']!r} twice; the document has "
+                   "to say once what the file contains")
+            continue
+        seen.add(entry["path"])
         raw = entry["content"]
         blob = base64.b64decode(raw) if entry.get("encoding") == "base64" \
             else raw.encode()
