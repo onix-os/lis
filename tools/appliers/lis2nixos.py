@@ -25,6 +25,7 @@ from lis_common import (track, check_unread, luks_key_path, check_raid_consumers
                         check_encryption_emitted, resolve_mountpoints,
                         check_unhandled, check_section_fields, check_mirror, check_kernel_variant, check_user_sudo,
                         check_boot_extras, check_keymap, check_version, enforce,
+                        check_script_fields,
                         load_doc, refuse, report, warn)
 
 
@@ -913,6 +914,7 @@ def render_script_hooks(doc: dict, file_cmds: list[str] | None = None) -> list[s
                     f"lis_as_user {user['name']} {json.dumps(c)}")
 
     firstboot = [s["content"] for s in scripts.get("firstboot", []) if s.get("content")]
+    firstboot += snapshot_commands(doc)
     firstboot += enrollment_commands(doc)
     firstboot += registration_commands(doc, "nixos")
     for user in doc.get("users", []) or []:
@@ -1069,7 +1071,24 @@ def render_boot(doc: dict) -> list[str]:
         if firmware == "bios":
             out.append(f"  boot.loader.grub.devices = {nix_list(devices)};")
         else:
-            out.append("  boot.loader.grub.efiSupport = true;")
+            # efiSupport alone does not build: grub.nix asserts that devices or
+            # mirroredBoots is set, and an EFI GRUB has no MBR to embed itself
+            # in, so the sentinel "nodev" is the value that satisfies it
+            # (grub.nix:896 accepts exactly "nodev" or an absolute path).
+            # Verified: with efiSupport and no device, config.assertions carries
+            # "You must set the option 'boot.loader.grub.devices' … to make the
+            # system bootable" — an evaluation failure after disko has wiped
+            # the disks.
+            warn("boot.loader grub on UEFI installs to the ESP fallback path "
+                 "(EFI/BOOT/BOOTX64.EFI) instead of writing an NVRAM entry, so the "
+                 "firmware finds it with no efibootmgr call; a fallback loader "
+                 "already on that ESP is replaced")
+            out += ["  boot.loader.grub.efiSupport = true;",
+                    "  boot.loader.grub.device = \"nodev\";",
+                    # --removable, per install-grub.pl:775-777. Mutually
+                    # exclusive with canTouchEfiVariables (grub.nix:871), which
+                    # is why that option is not set on this branch.
+                    "  boot.loader.grub.efiInstallAsRemovable = true;"]
         if os_prober:
             out.append("  boot.loader.grub.useOSProber = true;")
         if pwhash:
@@ -1133,6 +1152,912 @@ def render_boot(doc: dict) -> list[str]:
     return out
 
 
+# ── network ──────────────────────────────────────────────────────────
+#
+# Everything below emits options verified against nixos-24.11 (the channel
+# tools/e2e/iso.py pins). Paths and the module lines they were read from:
+#   networking.interfaces.<n>.{useDHCP,ipv4.addresses,ipv6.addresses}
+#                                       tasks/network-interfaces.nix:216,228,246
+#   networking.defaultGateway/-6        tasks/network-interfaces.nix:655,668
+#   networking.nameservers              tasks/network-interfaces.nix:~680
+#   networking.networkmanager.unmanaged services/networking/networkmanager.nix:211
+#   networking.networkmanager.ensureProfiles.{profiles,environmentFiles}
+#                                       services/networking/networkmanager.nix:427,488
+#   networking.wireless.{enable,secretsFile,networks.<s>.{pskRaw,hidden}}
+#                                       services/networking/wpa_supplicant.nix:250,307,406
+#   networking.firewall.allowed{TCP,UDP}Port{s,Ranges}
+#   systemd.network.links.<n>.{matchConfig,linkConfig}
+#                                       system/boot/networkd.nix:3162 — ".link units are
+#                                       honored by udev, no matter if systemd-networkd is
+#                                       enabled or not" (networkd.nix:3289)
+#   systemd.suppressedSystemUnits       system/boot/systemd.nix:426
+
+# The PSK of a WPA network is the credential itself, so it must not be written
+# into configuration.nix: that file lands in the world-readable Nix store. Both
+# wireless back-ends can read secrets from a file outside the store instead —
+# wpa_supplicant through `secretsFile` (`varname=value` lines, wpa_supplicant.nix:250)
+# and NetworkManager through `ensureProfiles.environmentFiles`, which envsubst's
+# `$varname` into the profile (networkmanager.nix:488). Both formats are
+# `NAME=value`, so one file serves either back-end.
+WIRELESS_SECRETS = "/var/lib/lis/wireless.env"
+
+
+def wireless_var(index: int) -> str:
+    return f"LIS_WIFI_PSK_{index}"
+
+
+def cidr(addr: str) -> tuple[str, int, int] | None:
+    """'10.0.0.5/24' → ('10.0.0.5', 24, 4). None when it is not a CIDR."""
+    host, sep, mask = addr.partition("/")
+    if not sep or not mask.isdigit() or not host:
+        return None
+    family = 6 if ":" in host else 4
+    prefix = int(mask)
+    if prefix > (128 if family == 6 else 32):
+        return None
+    return host, prefix, family
+
+
+def nix_addr_list(addrs: list[tuple[str, int]]) -> str:
+    items = " ".join(f"{{ address = {nix_str(a)}; prefixLength = {p}; }}"
+                     for a, p in addrs)
+    return f"[ {items} ]"
+
+
+def render_firewall(firewall: dict, out: list[str]) -> None:
+    """network.firewall → networking.firewall.*.
+
+    A port *range* is why this is not two list comprehensions: '8000-8010/tcp'
+    used to be pasted straight into `allowedTCPPorts`, which is not an integer
+    and not even parseable Nix — and under --apply the disks are already gone by
+    the time the evaluation fails.
+    """
+    if services := firewall.get("allow_services"):
+        refuse(f"network.firewall.allow_services {services!r}: NixOS has no "
+               "service-name to port table — networking.firewall only takes "
+               "numbers (allowedTCPPorts/allowedTCPPortRanges); name the ports "
+               "in network.firewall.allow_ports instead")
+    enabled = firewall.get("enabled")
+    if enabled is not None:
+        out.append(f"  networking.firewall.enable = {str(enabled).lower()};")
+    ports: dict[str, list[int]] = {"tcp": [], "udp": []}
+    ranges: dict[str, list[tuple[int, int]]] = {"tcp": [], "udp": []}
+    for spec in firewall.get("allow_ports", []) or []:
+        port, _, proto = str(spec).partition("/")
+        low, dash, high = port.partition("-")
+        if proto not in ports or not low.isdigit() or (dash and not high.isdigit()):
+            refuse(f"network.firewall.allow_ports {spec!r} is not <port>[-<port>]/<tcp|udp>")
+            continue
+        if dash:
+            ranges[proto].append((int(low), int(high)))
+        else:
+            ports[proto].append(int(low))
+    if enabled is False and (any(ports.values()) or any(ranges.values())):
+        warn("network.firewall.allow_ports is not emitted: the same document sets "
+             "network.firewall.enabled false, and networking.firewall ignores its "
+             "allow lists when disabled")
+        return
+    for proto, opt in (("tcp", "TCP"), ("udp", "UDP")):
+        if ports[proto]:
+            listed = " ".join(str(p) for p in ports[proto])
+            out.append(f"  networking.firewall.allowed{opt}Ports = [ {listed} ];")
+        if ranges[proto]:
+            listed = " ".join(f"{{ from = {lo}; to = {hi}; }}" for lo, hi in ranges[proto])
+            out.append(f"  networking.firewall.allowed{opt}PortRanges = [ {listed} ];")
+
+
+def render_interfaces(interfaces: list, manager: str, out: list[str]) -> list[str]:
+    """network.interfaces[] → networking.interfaces.<name> and friends.
+
+    Returns the interface names configured here so the caller can hand them to
+    NetworkManager as `unmanaged`: NixOS assigns the addresses through its own
+    units, and NM left to itself would start a second, contradictory DHCP on the
+    very interface the document pinned.
+    """
+    names: list[str] = []
+    nameservers: list[str] = []
+    gateways: dict[int, tuple[str, str]] = {}
+    dns_sources = 0
+    for index, iface in enumerate(interfaces):
+        match = iface.get("match", {}) or {}
+        name, mac = match.get("name"), match.get("mac")
+        if not name and not mac:
+            refuse(f"network.interfaces[{index}].match names neither an interface "
+                   "nor a MAC address; nothing to key networking.interfaces on")
+            continue
+        if not name:
+            # networking.interfaces is keyed by name, so a MAC-only match needs a
+            # name to exist first. A .link file gives it one; udev honours those
+            # whether or not systemd-networkd runs (networkd.nix:3289).
+            name = f"lis{index}"
+            warn(f"network.interfaces[{index}].match.mac {mac!r}: NixOS keys "
+                 f"networking.interfaces by name, so the device is renamed to "
+                 f"{name!r} by a systemd.network.links entry first")
+        if mac:
+            out += [f"  systemd.network.links.\"10-{name}\" = {{",
+                    f"    matchConfig.MACAddress = {nix_str(mac)};",
+                    f"    linkConfig.Name = {nix_str(name)};",
+                    "  };"]
+        names.append(name)
+
+        settings: list[str] = []
+        dhcp4, dhcp6 = iface.get("dhcp4"), iface.get("dhcp6")
+        if dhcp4 is not None and dhcp6 is not None and dhcp4 != dhcp6:
+            refuse(f"network.interfaces[{index}] asks for dhcp4={dhcp4} and "
+                   f"dhcp6={dhcp6}: networking.interfaces.<n>.useDHCP "
+                   "(network-interfaces.nix:216) is one flag for both families")
+            continue
+        v4: list[tuple[str, int]] = []
+        v6: list[tuple[str, int]] = []
+        for addr in iface.get("addresses", []) or []:
+            parsed = cidr(addr)
+            if parsed is None:
+                refuse(f"network.interfaces[{index}].addresses {addr!r} is not "
+                       "<address>/<prefix>; networking.interfaces.<n>.ipv4.addresses "
+                       "takes an address and a prefixLength separately")
+                continue
+            host, prefix, family = parsed
+            (v6 if family == 6 else v4).append((host, prefix))
+        dhcp = dhcp4 if dhcp4 is not None else dhcp6
+        if dhcp is None and (v4 or v6):
+            # Explicit addresses mean the document does not want a lease; leaving
+            # useDHCP at its default lets dhcpcd overwrite them.
+            dhcp = False
+        if dhcp is not None:
+            settings.append(f"    useDHCP = {str(dhcp).lower()};")
+        if v4:
+            settings.append(f"    ipv4.addresses = {nix_addr_list(v4)};")
+        if v6:
+            settings.append(f"    ipv6.addresses = {nix_addr_list(v6)};")
+        if settings:
+            out.append(f"  networking.interfaces.{nix_str(name)} = {{")
+            out += settings
+            out.append("  };")
+
+        if gw := iface.get("gateway"):
+            family = 6 if ":" in gw else 4
+            if family in gateways and gateways[family] != (gw, name):
+                refuse(f"network.interfaces[{index}].gateway {gw!r}: NixOS has one "
+                       f"networking.defaultGateway{'6' if family == 6 else ''} "
+                       "(network-interfaces.nix:655), already claimed by "
+                       f"{gateways[family][0]!r} on {gateways[family][1]!r}")
+            else:
+                gateways[family] = (gw, name)
+        if dns := iface.get("dns"):
+            dns_sources += 1
+            nameservers += [d for d in dns if d not in nameservers]
+
+    for family, (address, iface_name) in sorted(gateways.items()):
+        opt = "defaultGateway6" if family == 6 else "defaultGateway"
+        out.append(f"  networking.{opt} = {{ address = {nix_str(address)}; "
+                   f"interface = {nix_str(iface_name)}; }};")
+    if nameservers:
+        if dns_sources > 1:
+            warn("network.interfaces[].dns is merged into one list: NixOS resolves "
+                 "through networking.nameservers, which is system-wide and has no "
+                 "per-interface form")
+        out.append(f"  networking.nameservers = {nix_list(nameservers)};")
+    return names
+
+
+def render_wifi(wifi: list, manager: str, out: list[str]) -> None:
+    """network.wifi[] → NetworkManager profiles or a wpa_supplicant network.
+
+    Which back-end is not a preference: networkmanager.nix:551 asserts that
+    networking.wireless and NetworkManager cannot both drive the radio, so the
+    document's `manager` decides and the other back-end is never emitted.
+    """
+    if manager == "iwd":
+        refuse("network.wifi with network.manager 'iwd': the NixOS iwd module "
+               "(services/networking/iwd.nix:36) exposes only `settings` for "
+               "main.conf and has no declarative network list — set "
+               "network.manager to networkmanager or systemd-networkd")
+        return
+    warn(f"network.wifi[].psk_hash is read at boot from {WIRELESS_SECRETS}, not "
+         "written into configuration.nix, which the Nix store publishes "
+         "world-readable; --apply installs that file, a translate-only run must "
+         "provision it")
+    if manager == "systemd-networkd":
+        out += ["  networking.wireless.enable = true;",
+                f"  networking.wireless.secretsFile = {nix_str(WIRELESS_SECRETS)};"]
+        for index, net in enumerate(wifi):
+            ssid = net["ssid"]
+            psk = net.get("psk_hash")
+            if psk is None:
+                out.append(f"  networking.wireless.networks.{nix_str(ssid)}.auth = "
+                           "\"key_mgmt=NONE\";")
+            elif re.fullmatch(r"[0-9a-fA-F]{64}", str(psk)):
+                out.append(f"  networking.wireless.networks.{nix_str(ssid)}.pskRaw = "
+                           f"{nix_str('ext:' + wireless_var(index))};")
+            else:
+                refuse(f"network.wifi[{index}].psk_hash is not a 64-character hex "
+                       "PSK; networking.wireless.networks.<ssid>.pskRaw is typed "
+                       "strMatching \"([[:xdigit:]]{64})|(ext:…)\" "
+                       "(wpa_supplicant.nix:308)")
+                continue
+            if net.get("hidden"):
+                out.append(f"  networking.wireless.networks.{nix_str(ssid)}.hidden = true;")
+        return
+    # networkmanager, and `auto` — which the manager block resolved to NM.
+    out.append("  networking.networkmanager.ensureProfiles.environmentFiles = "
+               f"[ {nix_str(WIRELESS_SECRETS)} ];")
+    for index, net in enumerate(wifi):
+        ssid = net["ssid"]
+        out += [f"  networking.networkmanager.ensureProfiles.profiles.\"lis-wifi-{index}\" = {{",
+                f"    connection = {{ id = {nix_str(ssid)}; type = \"wifi\"; }};",
+                f"    wifi = {{ ssid = {nix_str(ssid)}; mode = \"infrastructure\";"
+                + (" hidden = true;" if net.get("hidden") else "") + " };"]
+        if psk := net.get("psk_hash"):
+            del psk  # the value never leaves the seed; only its variable name is emitted
+            out.append("    \"wifi-security\" = { \"key-mgmt\" = \"wpa-psk\"; psk = "
+                       f"{nix_str('$' + wireless_var(index))}; }};")
+        out += ["    ipv4 = { method = \"auto\"; };",
+                "    ipv6 = { method = \"auto\"; };",
+                "  };"]
+
+
+def write_wireless_secrets(doc: dict) -> None:
+    """Stage network.wifi[].psk_hash onto the target, outside the Nix store.
+
+    Mirrors write_birth_certificate: --apply is the only moment the applier has
+    both the document and the installed root, and mode 0600 under /var/lib is
+    the one place a PSK can live where wpa_supplicant and NetworkManager can
+    both read it and `nix store` cannot.
+    """
+    wifi = (doc.get("network", {}) or {}).get("wifi") or []
+    secrets = [f"{wireless_var(i)}={net['psk_hash']}"
+               for i, net in enumerate(wifi) if net.get("psk_hash")]
+    if not secrets:
+        return
+    path = pathlib.Path("/mnt") / WIRELESS_SECRETS.lstrip("/")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(secrets) + "\n")
+        path.chmod(0o600)
+        print(f"wrote wireless secrets {path}")
+    except OSError as err:
+        print(f"warning: could not write wireless secrets: {err}", file=sys.stderr)
+
+
+def render_network(doc: dict) -> list[str]:
+    network = doc.get("network", {}) or {}
+    out: list[str] = []
+
+    interfaces = network.get("interfaces", []) or []
+    wifi = network.get("wifi", []) or []
+    manager = network.get("manager", "auto")
+    if manager in ("auto", "networkmanager"):
+        out.append("  networking.networkmanager.enable = true;")
+    elif manager == "systemd-networkd":
+        out.append("  networking.useNetworkd = true;")
+    elif manager == "iwd":
+        out.append("  networking.wireless.iwd.enable = true;")
+
+    static = render_interfaces(interfaces, manager, out)
+    if static and manager in ("auto", "networkmanager"):
+        out.append(f"  networking.networkmanager.unmanaged = {nix_list(static)};")
+    if wifi:
+        render_wifi(wifi, manager, out)
+
+    for entry in network.get("hosts", []) or []:
+        out.append(f"  networking.hosts.{nix_str(entry['ip'])} = {nix_list(entry['names'])};")
+
+    if firewall := network.get("firewall"):
+        render_firewall(firewall, out)
+
+    ssh = network.get("ssh", {}) or {}
+    if ssh.get("enabled"):
+        out.append("  services.openssh.enable = true;")
+    elif "enabled" in ssh:
+        # Emitted rather than left to the default: `false` is intent, and a role
+        # or a later module turning sshd on must lose to it, not silently win.
+        out.append("  services.openssh.enable = false;")
+        if "password_auth" in ssh or ssh.get("permit_root"):
+            warn("network.ssh.password_auth / permit_root have no effect: the same "
+                 "document sets network.ssh.enabled false")
+    if "password_auth" in ssh:
+        out.append("  services.openssh.settings.PasswordAuthentication = "
+                   f"{str(ssh['password_auth']).lower()};")
+    if ssh.get("permit_root"):
+        out.append("  services.openssh.settings.PermitRootLogin = "
+                   f"{nix_str(ssh['permit_root'])};")
+    return out
+
+
+class NixOptions:
+    """A flat block of `option = value;` lines that refuses to define one twice.
+
+    configuration.nix is a single attribute set, so writing the same option on
+    two lines is `error: attribute already defined` — an evaluation failure,
+    and under --apply one raised *after* disko has wiped the disks. Several
+    fields legitimately reach for the same switch (`software.services.enable`
+    and `network.ssh.enabled` both mean sshd), so the same value twice is one
+    intent stated twice and is collapsed, while two different values is a
+    document contradicting itself and is refused.
+    """
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+        self.values: dict[str, str] = {}
+
+    def taken(self, path: str, value: str) -> None:
+        """Record an option another renderer has already written out."""
+        self.values[path] = value
+
+    def set(self, path: str, value: str, *, label: str = "") -> None:
+        if path in self.values:
+            if self.values[path] != value:
+                refuse(f"{label or path}: the document asks for two different "
+                       f"values of the NixOS option {path} "
+                       f"({self.values[path]} and {value})")
+            return
+        self.values[path] = value
+        self.lines.append(f"  {path} = {value};")
+
+    def raw(self, line: str) -> None:
+        self.lines.append(line)
+
+
+# ── software ─────────────────────────────────────────────────────
+
+# `software.role` → the session modules NixOS names. A role is a session, not
+# a greeter: which display manager starts it is `desktop.display_manager`, so
+# that the two fields cannot contradict each other.
+ROLE_SESSION = {
+    "desktop:gnome": [("services.xserver.enable", "true"),
+                      ("services.xserver.desktopManager.gnome.enable", "true")],
+    "desktop:kde": [("services.xserver.enable", "true"),
+                    ("services.desktopManager.plasma6.enable", "true")],
+    "desktop:xfce": [("services.xserver.enable", "true"),
+                     ("services.xserver.desktopManager.xfce.enable", "true")],
+    "desktop:sway": [("programs.sway.enable", "true")],
+    "desktop:hyprland": [("programs.hyprland.enable", "true")],
+}
+
+# The command that starts each role's session. greetd runs one command and
+# keeps no session list of its own, so a greeter needs this to have something
+# to launch. Each name is the session binary the role's own module puts on the
+# system path.
+ROLE_COMMAND = {
+    "desktop:gnome": "gnome-session",
+    "desktop:kde": "startplasma-wayland",
+    "desktop:xfce": "startxfce4",
+    "desktop:sway": "sway",
+    "desktop:hyprland": "Hyprland",
+}
+
+# nixos/modules/profiles/minimal.nix — NixOS's own answer to "minimal", copied
+# rather than imported because a generated configuration.nix has no stable
+# <nixpkgs/nixos/modules/…> path once it is evaluated from a flake. The
+# profile uses mkDefault; a document that asks for the role is stating it
+# outright, so the values are emitted plain.
+MINIMAL_PROFILE = [
+    ("documentation.enable", "false"),
+    ("documentation.doc.enable", "false"),
+    ("documentation.info.enable", "false"),
+    ("documentation.man.enable", "false"),
+    ("documentation.nixos.enable", "false"),
+    ("programs.command-not-found.enable", "false"),
+]
+
+# environment.defaultPackages (nixos/modules/config/system-path.nix) — the
+# only packages in a NixOS closure that an operator can subtract. Verified
+# against nixos-24.11: the default evaluates to exactly these three.
+DEFAULT_PACKAGES = ("perl", "rsync", "strace")
+
+# systemd unit names (SPEC §11: "services uses systemd unit names as the
+# lingua franca") → the NixOS option that owns the unit. Enabling a unit no
+# module declares does nothing on NixOS, so only names with a real option are
+# accepted; the rest refuse rather than pretend.
+SERVICE_OPTIONS = {
+    "sshd": "services.openssh.enable",
+    "ssh": "services.openssh.enable",
+    "tailscaled": "services.tailscale.enable",
+    "docker": "virtualisation.docker.enable",
+    "podman": "virtualisation.podman.enable",
+    "libvirtd": "virtualisation.libvirtd.enable",
+    "fail2ban": "services.fail2ban.enable",
+    "avahi-daemon": "services.avahi.enable",
+    "cups": "services.printing.enable",
+    "cronie": "services.cron.enable",
+    "cron": "services.cron.enable",
+    "bluetooth": "hardware.bluetooth.enable",
+    "nfs-server": "services.nfs.server.enable",
+}
+
+FLATHUB_REPO = "https://dl.flathub.org/repo/flathub.flatpakrepo"
+
+# The application sources SPEC §11 defines for `apps[].preference`.
+APP_SOURCES = ("native", "flatpak", "snap", "appimage")
+
+APP_SOURCE_REFUSALS = {
+    "snap": "snapd is not part of NixOS and the store has no writable "
+            "/snap; software.snap[] refuses for the same reason",
+    "appimage": "an AppImage is fetched from the network at install time, "
+                "which contradicts the seed/offline model every LIS "
+                "applier installs under",
+}
+
+
+def resolve_app(app: dict) -> tuple[str | None, str | None]:
+    """Pick the source one `software.apps[]` object is installed from.
+
+    `preference[]` is an ordered preference, not a requirement: a source this
+    applier cannot provide is skipped with a warning as long as a later one
+    can be, and only refuses when nothing in the list survives. Without a
+    preference the arbitration is native-first, as SPEC §11 describes.
+    """
+    available: dict[str, str] = {}
+    if native := (app.get("package") or app.get("name")):
+        available["native"] = native
+    for source in ("flatpak", "snap", "appimage"):
+        if value := app.get(source):
+            available[source] = value
+
+    name = app.get("name") or app.get("package") or "?"
+    order = [s for s in (app.get("preference") or [])] or ["native", "flatpak"]
+    skipped: list[str] = []
+    for source in order:
+        if source not in APP_SOURCES:
+            refuse(f"software.apps[] {name!r}: preference {source!r} is not an "
+                   f"application source LIS defines ({', '.join(APP_SOURCES)})")
+            return None, None
+        if source not in available:
+            continue
+        if source in APP_SOURCE_REFUSALS:
+            skipped.append(source)
+            continue
+        for dropped in skipped:
+            warn(f"software.apps[] {name!r}: {dropped!r} is preferred over "
+                 f"{source!r} but {APP_SOURCE_REFUSALS[dropped]} — installing "
+                 f"the {source} source instead")
+        return source, available[source]
+
+    for dropped in skipped:
+        refuse(f"software.apps[] {name!r}: the document offers only {dropped!r}, "
+               f"and {APP_SOURCE_REFUSALS[dropped]}")
+    if not skipped:
+        refuse(f"software.apps[] {name!r}: none of its declared sources "
+               f"({', '.join(sorted(available)) or 'none'}) appears in "
+               f"preference {order}")
+    return None, None
+
+
+def flatpak_unit(apps: list[str]) -> list[str]:
+    """A first-boot unit that adds the flathub remote and installs the apps.
+
+    A flatpak app ID resolves against a *remote*, and NixOS configures none:
+    `services.flatpak.enable` installs the runtime and nothing else, so an app
+    list on its own reaches nothing (MATRIX §2.10 fn 27, and the same
+    missing-remote bug in six other appliers). Installation needs the network
+    and a running system, so it cannot be declarative — it is emulated here,
+    once, at first boot.
+    """
+    body = [f"flatpak remote-add --if-not-exists flathub {FLATHUB_REPO}"]
+    body += [f"flatpak install -y --noninteractive flathub {app}" for app in apps]
+    body += ["install -d -m755 /var/lib/lis",
+             "touch /var/lib/lis/.flatpak-done"]
+    return ["  systemd.services.lis-flatpak = {",
+            "    description = \"LIS flatpak application install\";",
+            "    wantedBy = [ \"multi-user.target\" ];",
+            "    after = [ \"network-online.target\" ];",
+            "    wants = [ \"network-online.target\" ];",
+            "    unitConfig.ConditionPathExists = \"!/var/lib/lis/.flatpak-done\";",
+            "    serviceConfig.Type = \"oneshot\";",
+            "    path = [ pkgs.flatpak pkgs.coreutils ];",
+            "    script = " + nix_script("\n".join(body)) + ";",
+            "  };"]
+
+
+def render_software(doc: dict, opts: NixOptions) -> None:
+    """software.* → packages, roles, services and application runtimes."""
+    software = doc.get("software", {}) or {}
+    role = software.get("role", "")
+
+    if role in ROLE_SESSION:
+        for path, value in ROLE_SESSION[role]:
+            opts.set(path, value, label=f"software.role {role!r}")
+    elif role == "minimal":
+        for path, value in MINIMAL_PROFILE:
+            opts.set(path, value, label="software.role 'minimal'")
+    elif role == "server":
+        # No refusal and no silence: NixOS genuinely has no server package
+        # set, and saying so is the difference between "we chose not to" and
+        # the silent drop this line used to be.
+        warn("software.role 'server': NixOS ships no server metapackage — its "
+             "base closure is already headless, so the role adds nothing. Name "
+             "what the server needs in software.packages[] and "
+             "software.services.enable[]")
+    elif role:
+        refuse(f"software.role {role!r} has no default-translator mapping")
+
+    # software.exclude[] — the only subtractable packages in a NixOS closure.
+    excluded = list(software.get("exclude", []) or [])
+    for name in excluded:
+        if name not in DEFAULT_PACKAGES:
+            refuse(f"software.exclude {name!r}: NixOS builds a closure rather "
+                   "than installing into one, so a package cannot be removed "
+                   "after the fact — the only subtractable set is "
+                   "environment.defaultPackages "
+                   "(nixos/modules/config/system-path.nix), which holds exactly "
+                   f"{', '.join(DEFAULT_PACKAGES)}. Anything else arrives "
+                   "because a module pulls it in; turn that module off instead")
+    if role == "minimal":
+        opts.set("environment.defaultPackages", "lib.mkForce [ ]")
+    elif excluded:
+        keep = [p for p in DEFAULT_PACKAGES if p not in excluded]
+        keep_expr = f"(with pkgs; [ {' '.join(keep)} ])" if keep else "[ ]"
+        opts.set("environment.defaultPackages", f"lib.mkForce {keep_expr}")
+
+    packages = list(software.get("packages", []) or [])
+    flatpaks = list(software.get("flatpak", []) or [])
+    for app in software.get("apps", []) or []:
+        if isinstance(app, str):
+            packages.append(app)
+            continue
+        source, value = resolve_app(app)
+        if source == "native":
+            packages.append(value)
+        elif source == "flatpak":
+            flatpaks.append(value)
+
+    if packages:
+        opts.raw("  # Package names pass through verbatim; "
+                 "unresolvable names fail the build.")
+        opts.set("environment.systemPackages",
+                 f"with pkgs; [ {' '.join(packages)} ]")
+
+    services = software.get("services", {}) or {}
+    # network.ssh writes services.openssh itself; read it so that asking for
+    # sshd in both places is one switch rather than a duplicate attribute.
+    if ((doc.get("network") or {}).get("ssh") or {}).get("enabled") is not None:
+        enabled = ((doc.get("network") or {}).get("ssh") or {})["enabled"]
+        opts.taken("services.openssh.enable", str(bool(enabled)).lower())
+    for unit in services.get("enable", []) or []:
+        if option := SERVICE_OPTIONS.get(unit):
+            opts.set(option, "true", label=f"software.services.enable {unit!r}")
+        else:
+            refuse(f"software.services.enable {unit!r}: NixOS builds its unit "
+                   "set from modules, so enabling a unit no module declares is "
+                   "a no-op — this translator maps only the units that have an "
+                   f"option ({', '.join(sorted(SERVICE_OPTIONS))}); declare the "
+                   "rest in your own module")
+    suppressed: list[str] = []
+    for unit in services.get("disable", []) or []:
+        if option := SERVICE_OPTIONS.get(unit):
+            opts.set(option, "false", label=f"software.services.disable {unit!r}")
+        else:
+            # systemd.suppressedSystemUnits removes the unit file from the
+            # generated system, which is the one mechanism that works on a
+            # unit this configuration never declares. `systemd.services.<n>.
+            # enable = false` would be the silent no-op instead.
+            suppressed.append(unit if "." in unit else unit + ".service")
+    if suppressed:
+        opts.set("systemd.suppressedSystemUnits", nix_list(suppressed))
+
+    if flatpaks or software.get("flatpak") is not None:
+        opts.set("services.flatpak.enable", "true")
+        # nixos/modules/services/desktops/flatpak.nix asserts
+        # `xdg.portal.enable == true`; without it the configuration does not
+        # evaluate at all.
+        opts.set("xdg.portal.enable", "true")
+    if flatpaks:
+        opts.lines.extend(flatpak_unit(flatpaks))
+        warn("software.flatpak[]: flatpak applications are installed by a "
+             "first-boot unit (lis-flatpak), not by the configuration — the "
+             "machine needs the network on its first boot")
+
+    if software.get("snap"):
+        refuse("software.snap[] is not available on NixOS: snapd needs a "
+               "writable /snap and FHS mount namespaces the store does not "
+               "provide, and nixpkgs ships no snapd service module")
+
+
+# ── desktop and drivers ──────────────────────────────────────────
+
+# Verified against nixos-24.11: `services.displayManager.gdm` does not exist
+# on this release (the move out of services.xserver landed later), while sddm
+# and ly are already under services.displayManager. Getting either one wrong
+# is an evaluation error, not a drop.
+DM_OPTIONS = {
+    "gdm": "services.xserver.displayManager.gdm.enable",
+    "sddm": "services.displayManager.sddm.enable",
+    "lightdm": "services.xserver.displayManager.lightdm.enable",
+    "ly": "services.displayManager.ly.enable",
+}
+
+# Greeters that need an X server of their own. sddm and ly run on Wayland.
+DM_NEEDS_XSERVER = ("gdm", "lightdm")
+
+# `display_manager: auto` — the greeter each role is normally started by.
+ROLE_DM = {
+    "desktop:gnome": "gdm",
+    "desktop:kde": "sddm",
+    "desktop:xfce": "lightdm",
+    "desktop:sway": "greetd",
+    "desktop:hyprland": "greetd",
+}
+
+TUIGREET = "${pkgs.greetd.tuigreet}/bin/tuigreet --time --remember"
+
+
+def render_desktop(doc: dict, opts: NixOptions) -> None:
+    """desktop.* → greeter, autologin and session plumbing."""
+    desktop = doc.get("desktop") or {}
+    role = (doc.get("software", {}) or {}).get("role", "")
+
+    if desktop and not role.startswith("desktop:"):
+        warn("desktop.* is declared without a desktop:* software.role; "
+             "schema.md §12 says the section must be absent unless the role is "
+             "a desktop one — the plumbing is emitted as declared")
+
+    asked = desktop.get("display_manager", "auto")
+    manager = ROLE_DM.get(role) if asked == "auto" else asked
+    if manager == "none":
+        manager = None
+    if manager and manager not in DM_OPTIONS and manager != "greetd":
+        refuse(f"desktop.display_manager {manager!r} has no NixOS module in the "
+               "default translator")
+        manager = None
+
+    session = ROLE_COMMAND.get(role)
+    if manager in DM_OPTIONS:
+        if manager in DM_NEEDS_XSERVER:
+            opts.set("services.xserver.enable", "true",
+                     label=f"desktop.display_manager {manager!r}")
+        opts.set(DM_OPTIONS[manager], "true")
+    elif manager == "greetd":
+        if session is None:
+            refuse("desktop.display_manager 'greetd': greetd starts a single "
+                   "session command and keeps no session list "
+                   "(nixos/modules/services/display-managers/greetd.nix), so "
+                   "without a desktop:* software.role there is nothing for it "
+                   "to launch")
+            manager = None
+        else:
+            opts.set("services.greetd.enable", "true")
+            opts.set("services.greetd.settings.default_session.command",
+                     f'"{TUIGREET} --cmd {session}"')
+    elif asked == "none" and role in ROLE_SESSION:
+        warn(f"desktop.display_manager 'none' with software.role {role!r}: the "
+             "session is installed but nothing starts it — log in on a tty and "
+             "start it by hand")
+
+    if autologin := desktop.get("autologin"):
+        declared = {user["name"] for user in doc.get("users", []) or []}
+        if autologin not in declared:
+            refuse(f"desktop.autologin {autologin!r} names an account this "
+                   "document does not declare (schema.md §12: autologin must "
+                   "name an existing user)")
+        elif manager is None:
+            refuse("desktop.autologin needs a greeter to log in through, and "
+                   "desktop.display_manager resolved to none")
+        elif manager == "ly":
+            refuse("desktop.autologin with ly: the ly module asserts "
+                   "!services.displayManager.autoLogin.enable "
+                   "(nixos/modules/services/display-managers/ly.nix), so the "
+                   "combination cannot be evaluated — ly has no autologin of "
+                   "its own")
+        elif manager == "greetd":
+            # greetd ignores services.displayManager.autoLogin entirely; its
+            # own autologin is an initial_session that runs before the greeter.
+            opts.set("services.greetd.settings.initial_session.command",
+                     f'"{session}"')
+            opts.set("services.greetd.settings.initial_session.user",
+                     nix_str(autologin))
+        else:
+            opts.set("services.displayManager.autoLogin.enable", "true")
+            opts.set("services.displayManager.autoLogin.user", nix_str(autologin))
+            if role in ROLE_SESSION:
+                # sddm and gdm pick the autologin session out of the session
+                # list, which is ambiguous the moment a second one is
+                # installed; naming it keeps the choice the document's.
+                opts.set("services.displayManager.defaultSession",
+                         nix_str(ROLE_DEFAULT_SESSION[role]))
+
+    if not desktop:
+        return
+    audio = desktop.get("audio", "auto")
+    if audio in ("auto", "pipewire"):
+        opts.raw("  services.pipewire = { enable = true; alsa.enable = true; "
+                 "pulse.enable = true; };")
+        opts.taken("services.pipewire", "enable")
+    elif audio == "pulseaudio":
+        # `services.pulseaudio` does not exist on the release this translator
+        # targets: the rename from `hardware.pulseaudio` landed after 24.11,
+        # so the new spelling is an evaluation error — and under --apply it is
+        # one raised *after* disko has wiped the disks.
+        opts.set("hardware.pulseaudio.enable", "true")
+    elif audio == "none":
+        # A desktop module turns a sound server on by default, so "none" has
+        # to say so out loud or it is not honored at all.
+        opts.set("services.pipewire.enable", "lib.mkForce false")
+        opts.set("hardware.pulseaudio.enable", "lib.mkForce false")
+    if desktop.get("bluetooth") is not None:
+        opts.set("hardware.bluetooth.enable",
+                 str(bool(desktop["bluetooth"])).lower(), label="desktop.bluetooth")
+    if desktop.get("printing") is not None:
+        opts.set("services.printing.enable",
+                 str(bool(desktop["printing"])).lower(), label="desktop.printing")
+
+
+# The session name each role registers, for services.displayManager.defaultSession.
+ROLE_DEFAULT_SESSION = {
+    "desktop:gnome": "gnome",
+    "desktop:kde": "plasma",
+    "desktop:xfce": "xfce",
+    "desktop:sway": "sway",
+    "desktop:hyprland": "hyprland",
+}
+
+
+def render_drivers(doc: dict, opts: NixOptions) -> None:
+    """drivers.gpu / drivers.firmware → video drivers and firmware sets."""
+    drivers = doc.get("drivers", {}) or {}
+    gpu = drivers.get("gpu")
+    if gpu in ("amdgpu", "intel"):
+        opts.set("services.xserver.videoDrivers", nix_list([gpu]))
+    elif gpu in ("nvidia", "nvidia-open"):
+        opts.set("services.xserver.videoDrivers", nix_list(["nvidia"]))
+        opts.set("hardware.nvidia.open", str(gpu == "nvidia-open").lower())
+        # The nvidia driver is unfree; without this the configuration stops
+        # with "Package 'nvidia-x11' has an unfree license", which under
+        # --apply lands after disko has already wiped the disks.
+        opts.set("nixpkgs.config.allowUnfree", "true")
+    elif gpu not in (None, "auto", "none"):
+        refuse(f"drivers.gpu {gpu!r} has no NixOS mapping")
+
+    firmware = drivers.get("firmware")
+    if firmware == "all":
+        opts.set("hardware.enableAllFirmware", "true")
+        # hardware.enableAllFirmware asserts on allowUnfree
+        # (nixos/modules/hardware/all-firmware.nix): the non-redistributable
+        # blobs cannot be built without it.
+        opts.set("nixpkgs.config.allowUnfree", "true")
+    elif firmware == "auto":
+        opts.set("hardware.enableRedistributableFirmware", "true")
+    elif firmware == "none":
+        opts.set("hardware.enableRedistributableFirmware", "false")
+    elif firmware is not None:
+        refuse(f"drivers.firmware {firmware!r} has no NixOS mapping")
+
+
+def render_security(doc: dict) -> list[str]:
+    """system.security.module → the Linux security module, actually switched on.
+
+    The failure this replaces is one the audit found on three other appliers:
+    `module: apparmor` installs the userland tools and stops there, so the
+    machine boots with no LSM and the report says the request was honored.
+    NixOS can do the whole thing declaratively — `security.apparmor.enable`
+    adds `apparmor=1 security=apparmor` to the kernel command line
+    (nixos/modules/security/apparmor.nix:194-197 on 24.11), which is what
+    actually activates the module, and pulls in the parser, aa-status and the
+    profile-loading unit.
+    """
+    module = ((doc.get("system", {}) or {}).get("security") or {}).get("module")
+    out: list[str] = []
+    if module == "apparmor":
+        out += ["  security.apparmor.enable = true;",
+                # `enable` on its own leaves the parser with an empty include
+                # path, so any profile that says `include <abstractions/base>`
+                # — which is nearly all of them — fails to load. nixpkgs ships
+                # the same line as an opt-in module that is not in
+                # module-list.nix (security/apparmor/profiles.nix:6).
+                "  security.apparmor.packages = [ pkgs.apparmor-profiles ];"]
+        warn("system.security.module apparmor: the LSM is enabled and the "
+             "upstream abstractions are on the parser include path, but LIS has "
+             "no vocabulary for profiles and NixOS confines only what "
+             "security.apparmor.policies names — which is empty here, so nothing "
+             "beyond the profiles other NixOS modules declare is confined")
+    elif module == "none":
+        # Explicit, not inherited: 'none' is a decision the document made, and
+        # a file that simply omits the option reads the same as one that never
+        # considered it.
+        out.append("  security.apparmor.enable = false;")
+    elif module == "selinux":
+        refuse("system.security.module selinux: NixOS 24.11 has no SELinux module "
+               "— nothing in nixos/modules enables it, the kernel is built without "
+               "CONFIG_SECURITY_SELINUX, and there is no policy store; AppArmor is "
+               "the only LSM this applier can switch on")
+    elif module == "auto":
+        # 'auto' asks for the distro's own default, and NixOS's is no LSM.
+        # Emitted as a comment so the file distinguishes "asked for the default"
+        # from "nobody looked".
+        out.append("  # system.security.module: auto — NixOS enables no LSM by "
+                   "default; set apparmor to turn one on.")
+    elif module is not None:
+        refuse(f"system.security.module {module!r} is not a value SPEC §8 defines "
+               "(auto | selinux | apparmor | none)")
+    return out
+
+
+def render_users(doc: dict) -> list[str]:
+    """users[] → users.users.<name>, per-user sudo rules and login shells."""
+    out: list[str] = []
+    nopasswd: list[str] = []
+    ssh = ((doc.get("network", {}) or {}).get("ssh", {}) or {})
+    for user in doc.get("users", []) or []:
+        name = user["name"]
+        out.append(f"  users.users.{name} = {{")
+        if name != "root":
+            out.append("    isNormalUser = true;")
+        if user.get("uid") is not None:
+            out.append(f"    uid = {user['uid']};")
+        if user.get("comment"):
+            out.append(f"    description = {nix_str(user['comment'])};")
+        groups = list(user.get("groups", []))
+        if user.get("admin") and "wheel" not in groups:
+            groups.insert(0, "wheel")
+        if groups:
+            # No longer skipped for root. users.users.root is an ordinary entry
+            # of the same submodule (config/users-groups.nix:702-719 documents
+            # it as "This can also be used to set options for root"), so
+            # extraGroups works there exactly as it does for anyone else; the
+            # old guard dropped `groups` for root without a word.
+            out.append(f"    extraGroups = {nix_list(groups)};")
+        password = user.get("password") or {}
+        if password.get("plain"):
+            # SPEC §2.4: documents never carry plaintext secrets.
+            refuse(f"user '{name}': password.plain is a plaintext secret")
+        else:
+            # password_field() implements SPEC §9's rule that `locked` wins
+            # while keeping the hash: '!' in front of the stored crypt(3) field
+            # is what `passwd -l` writes, so `passwd -u` can undo it later.
+            # NixOS copies hashedPassword into /etc/shadow verbatim
+            # (config/users-groups.nix:344), so the prefix arrives intact.
+            if password.get("locked") and password.get("hash"):
+                out.append("    # locked with the hash kept, as passwd -l writes "
+                           "it; NixOS's hash-shape")
+                out.append("    # heuristic warns about the '!' prefix "
+                           "(users-groups.nix:1196) — expected.")
+            out.append(f"    hashedPassword = {nix_str(password_field(user) or '!')};")
+        if keys := user.get("ssh_authorized_keys"):
+            out.append(f"    openssh.authorizedKeys.keys = {nix_list(keys)};")
+            if not ssh.get("enabled"):
+                warn(f"user '{name}': ssh_authorized_keys is installed, but the "
+                     "document does not set network.ssh.enabled, so no sshd runs "
+                     "and the keys authorise nothing")
+        shell = user.get("shell")
+        if shell in ("zsh", "fish"):
+            out.append(f"    shell = pkgs.{shell};")
+        elif shell == "bash":
+            out.append("    shell = pkgs.bashInteractive;")
+        elif shell in SHELL_PATHS:
+            # NixOS has no /bin/bash: outside the store only /bin/sh and
+            # /usr/bin/env exist, so a literal path would produce an account
+            # whose login fails with "Cannot execute". Map to the package that
+            # the path names.
+            out.append(f"    shell = pkgs.{SHELL_PATHS[shell]};")
+        elif shell and shell.startswith("/nix/store/"):
+            out.append(f"    shell = {nix_str(shell)};")
+        elif shell and shell.startswith("/"):
+            refuse(f"user '{name}': shell {shell!r} is an absolute path "
+                   "that does not exist on NixOS outside the store")
+        elif shell:
+            refuse(f"user '{name}': shell {shell!r} has no pkgs attribute")
+        out.append("  };")
+        if user.get("sudo") == "nopasswd":
+            nopasswd.append(name)
+        if shell in ("zsh", "fish"):
+            out.append(f"  programs.{shell}.enable = true;")
+    if nopasswd:
+        # Per account, not per wheel. The old line was
+        # `security.sudo.wheelNeedsPassword = false`, which hands passwordless
+        # root to every member of wheel — including accounts the document
+        # created with `admin: true` and no `sudo:` key at all, and including
+        # any account added later. security.sudo.extraRules names the user
+        # (security/sudo.nix:90-205); our definitions carry the default
+        # priority 1000 and so land after the built-in wheel rule at
+        # mkOrder 600 (sudo.nix:252-264), which is what makes them win —
+        # sudoers takes the last matching rule.
+        out.append("  security.sudo.extraRules = [")
+        for name in nopasswd:
+            out.append(f"    {{ users = [ {nix_str(name)} ]; commands = "
+                       "[ { command = \"ALL\"; options = [ \"NOPASSWD\" ]; } ]; }")
+        out.append("  ];")
+    return out
+
+
 def render_configuration(doc: dict) -> str:
     system = doc.get("system", {}) or {}
     boot = doc.get("boot", {}) or {}
@@ -1155,8 +2080,17 @@ def render_configuration(doc: dict) -> str:
         out.append(f"  networking.domain = {nix_str(system['domain'])};")
     if system.get("timezone"):
         out.append(f"  time.timeZone = {nix_str(system['timezone'])};")
-    if system.get("hwclock") == "localtime":
-        out.append("  time.hardwareClockInLocalTime = true;")
+    hwclock = system.get("hwclock")
+    if hwclock in ("utc", "localtime"):
+        # Stated in both directions. `utc` used to emit nothing and lean on the
+        # NixOS default, which reads the same in the generated file as a
+        # document that never mentioned the clock at all — and leaves the answer
+        # to whatever a later `imports =` decides.
+        out.append("  time.hardwareClockInLocalTime = "
+                   f"{str(hwclock == 'localtime').lower()};")
+    elif hwclock is not None:
+        refuse(f"system.hwclock {hwclock!r} is not a value SPEC §8 defines "
+               "(utc | localtime)")
     if system.get("locale"):
         out.append(f"  i18n.defaultLocale = {nix_str(system['locale'])};")
     consume(system.get("locale_overrides", {}) or {})
@@ -1169,8 +2103,13 @@ def render_configuration(doc: dict) -> str:
         out.append(f"  console.font = {nix_str(keymap['font'])};")
     if keymap.get("layout"):
         out.append(f"  services.xserver.xkb.layout = {nix_str(keymap['layout'])};")
-        if keymap.get("variant"):
-            out.append(f"  services.xserver.xkb.variant = {nix_str(keymap['variant'])};")
+    if keymap.get("variant"):
+        # No longer nested inside `layout`: a document that names only a variant
+        # used to have it dropped and warned about, though nothing was in the
+        # way. services.xserver.xkb.layout defaults to "us", so a lone variant
+        # is a variant of the distro default layout — which is exactly what a
+        # document that leaves the layout unstated is asking for.
+        out.append(f"  services.xserver.xkb.variant = {nix_str(keymap['variant'])};")
     time_cfg = system.get("time", {}) or {}
     if time_cfg.get("servers"):
         out.append(f"  networking.timeServers = {nix_list(time_cfg['servers'])};")
@@ -1182,52 +2121,60 @@ def render_configuration(doc: dict) -> str:
         out.append("  services.timesyncd.enable = false;")
     if system.get("init") not in (None, "systemd", "auto"):
         refuse("system.init: NixOS is systemd-only")
+    telemetry = system.get("telemetry")
+    if telemetry in ("off", "default"):
+        # Not a drop: SPEC §8 asks the applier to disable any telemetry it
+        # installs, and a plain NixOS closure installs none — there is no
+        # popularity-contest, no phone-home timer, nothing to switch off. Said
+        # in the file rather than left to the tracker, so the next reader can
+        # tell "nothing to do" from "nobody looked".
+        out.append(f"  # system.telemetry: {telemetry} — a plain NixOS system "
+                   "collects and reports nothing, so there is no opt-out to emit.")
+    elif telemetry is not None:
+        refuse(f"system.telemetry {telemetry!r} is not a value SPEC §8 defines "
+               "(off | default)")
+    kdump = system.get("kdump")
+    if kdump:
+        # boot.crashDump kexecs a second kernel on panic and leaves /proc/vmcore
+        # in rescue (nixos/modules/misc/crashdump.nix:20-56) — the kdump
+        # mechanism, under a NixOS name.
+        out.append("  boot.crashDump.enable = true;")
+        warn("system.kdump: honored through boot.crashDump.enable, which adds a "
+             "boot.kernelPatches entry (CRASH_DUMP, DEBUG_INFO, PROC_VMCORE) — "
+             "the kernel can no longer come from the binary cache and will be "
+             "compiled from source during nixos-install")
+    elif kdump is not None:
+        out.append("  boot.crashDump.enable = false;")
     out.append("")
 
-    manager = network.get("manager", "auto")
-    if manager in ("auto", "networkmanager"):
-        out.append("  networking.networkmanager.enable = true;")
-    elif manager == "systemd-networkd":
-        out.append("  networking.useNetworkd = true;")
-    elif manager == "iwd":
-        out.append("  networking.wireless.iwd.enable = true;")
-    if network.get("interfaces"):
-        refuse("network.interfaces: static interface configuration is not emitted by "
-               "the default translator — declare it in your own module")
-    if network.get("wifi"):
-        refuse("network.wifi: NetworkManager profiles are stateful and are not emitted")
-    for entry in network.get("hosts", []) or []:
-        out.append(f"  networking.hosts.{nix_str(entry['ip'])} = {nix_list(entry['names'])};")
-    firewall = network.get("firewall")
-    if firewall:
-        if "enabled" in firewall:
-            out.append(f"  networking.firewall.enable = {str(firewall['enabled']).lower()};")
-        tcp = [p.split("/")[0] for p in firewall.get("allow_ports", []) if p.endswith("/tcp")]
-        udp = [p.split("/")[0] for p in firewall.get("allow_ports", []) if p.endswith("/udp")]
-        if tcp:
-            out.append(f"  networking.firewall.allowedTCPPorts = [ {' '.join(tcp)} ];")
-        if udp:
-            out.append(f"  networking.firewall.allowedUDPPorts = [ {' '.join(udp)} ];")
-    ssh = network.get("ssh", {}) or {}
-    if ssh.get("enabled"):
-        out.append("  services.openssh.enable = true;")
-        if "password_auth" in ssh:
-            out.append(f"  services.openssh.settings.PasswordAuthentication = {str(ssh['password_auth']).lower()};")
-        if ssh.get("permit_root"):
-            out.append(f"  services.openssh.settings.PermitRootLogin = {nix_str(ssh['permit_root'])};")
-    module = ((system.get("security") or {}).get("module"))
-    if module == "apparmor":
-        out.append("  security.apparmor.enable = true;")
-    elif module == "none":
-        out.append("  security.apparmor.enable = false;")
-    elif module == "selinux":
-        refuse("system.security.module 'selinux' is not supported by NixOS")
+    out += render_network(doc)
+    out += render_security(doc)
 
     # hwclock and locale_overrides are emitted where the rest of the i18n and
     # time settings are; duplicating them here defined the same Nix option
     # twice, which is an evaluation error rather than a merge.
     if extra := system.get("extra_locales"):
-        locales = ["en_US.UTF-8/UTF-8"] + [f"{l}/{l.split('.')[-1]}" for l in extra]
+        # i18n.supportedLocales *replaces* a default that already carries
+        # C.UTF-8, en_US.UTF-8, i18n.defaultLocale and every extraLocaleSettings
+        # value (config/i18n.nix:59-74). Listing only en_US plus the extras
+        # therefore built a glibc locale archive with no entry for the
+        # document's own `system.locale`, so LANG named a locale the system did
+        # not have. Rebuild the whole set instead of overwriting part of it.
+        def supported(name: str) -> str:
+            base, dot, codeset = name.partition(".")
+            if not dot:
+                return name + "/UTF-8"
+            if codeset.lower().replace("-", "") == "utf8":
+                codeset = "UTF-8"
+            return f"{base}.{codeset}/{codeset}"
+
+        wanted = ["C.UTF-8", "en_US.UTF-8"]
+        if system.get("locale"):
+            wanted.append(system["locale"])
+        wanted += [v for k, v in (system.get("locale_overrides", {}) or {}).items()
+                   if k != "LANGUAGE"]
+        wanted += list(extra)
+        locales = list(dict.fromkeys(supported(l) for l in wanted))
         out.append(f"  i18n.supportedLocales = {nix_list(locales)};")
 
     if mirror_url := (doc.get("mirror", {}) or {}).get("url"):
@@ -1239,139 +2186,18 @@ def render_configuration(doc: dict) -> str:
         out.append(f"  networking.proxy.noProxy = {nix_str(','.join(proxy['no_proxy']))};")
     out.append("")
 
-    wheel_nopasswd = False
-    for user in doc.get("users", []):
-        out.append(f"  users.users.{user['name']} = {{")
-        if user["name"] != "root":
-            out.append("    isNormalUser = true;")
-        if user.get("uid") is not None:
-            out.append(f"    uid = {user['uid']};")
-        if user.get("comment"):
-            out.append(f"    description = {nix_str(user['comment'])};")
-        groups = list(user.get("groups", []))
-        if user.get("admin") and "wheel" not in groups:
-            groups.insert(0, "wheel")
-        if user["name"] != "root" and groups:
-            out.append(f"    extraGroups = {nix_list(groups)};")
-        password = user.get("password") or {}
-        if password.get("plain"):
-            # SPEC §2.4: documents never carry plaintext secrets.
-            refuse(f"user '{user['name']}': password.plain is a plaintext secret")
-        elif password.get("locked"):
-            out.append("    hashedPassword = \"!\";")
-        elif password.get("hash"):
-            out.append(f"    hashedPassword = {nix_str(password['hash'])};")
-        else:
-            # SPEC §9: "Omitting `password` leaves the account passwordless-locked."
-            out.append("    hashedPassword = \"!\";")
-        if user.get("ssh_authorized_keys"):
-            out.append(f"    openssh.authorizedKeys.keys = {nix_list(user['ssh_authorized_keys'])};")
-        shell = user.get("shell")
-        if shell in ("zsh", "fish"):
-            out.append(f"    shell = pkgs.{shell};")
-        elif shell == "bash":
-            out.append("    shell = pkgs.bashInteractive;")
-        elif shell in SHELL_PATHS:
-            # NixOS has no /bin/bash: outside the store only /bin/sh and
-            # /usr/bin/env exist, so a literal path would produce an account
-            # whose login fails with "Cannot execute". Map to the package that
-            # the path names.
-            out.append(f"    shell = pkgs.{SHELL_PATHS[shell]};")
-        elif shell and shell.startswith("/nix/store/"):
-            out.append(f"    shell = {nix_str(shell)};")
-        elif shell and shell.startswith("/"):
-            refuse(f"user '{user['name']}': shell {shell!r} is an absolute path "
-                   "that does not exist on NixOS outside the store")
-        elif shell:
-            refuse(f"user '{user['name']}': shell {shell!r} has no pkgs attribute")
-        if user.get("dotfiles"):
-            pass   # honored by chroot_intents()
-        out.append("  };")
-        if user.get("sudo") == "nopasswd":
-            wheel_nopasswd = True
-        if shell in ("zsh", "fish"):
-            out.append(f"  programs.{shell}.enable = true;")
-    if wheel_nopasswd:
-        out.append("  security.sudo.wheelNeedsPassword = false;")
+    out += render_users(doc)
     out.append("")
 
-    role = software.get("role", "")
-    role_map = {
-        "desktop:gnome": ["  services.xserver.enable = true;",
-                          "  services.xserver.displayManager.gdm.enable = true;",
-                          "  services.xserver.desktopManager.gnome.enable = true;"],
-        "desktop:kde": ["  services.xserver.enable = true;",
-                        "  services.displayManager.sddm.enable = true;",
-                        "  services.desktopManager.plasma6.enable = true;"],
-        "desktop:xfce": ["  services.xserver.enable = true;",
-                         "  services.xserver.desktopManager.xfce.enable = true;"],
-        "desktop:sway": ["  programs.sway.enable = true;"],
-        "desktop:hyprland": ["  programs.hyprland.enable = true;"],
-    }
-    if role in role_map:
-        out += role_map[role]
-    elif role not in ("", "minimal", "server"):
-        refuse(f"software.role {role!r} has no default-translator mapping")
-    
-    # Process software.packages + software.apps
-    pkgs_list = list(software.get("packages", []))
-    for app in software.get("apps", []):
-        if isinstance(app, str):
-            pkgs_list.append(app)
-        elif isinstance(app, dict):
-            if name := (app.get("package") or app.get("name")):
-                pkgs_list.append(name)
-
-    if pkgs_list:
-        out += ["  # Package names pass through verbatim; unresolvable names fail the build.",
-                f"  environment.systemPackages = with pkgs; [ {' '.join(pkgs_list)} ];"]
-    if software.get("exclude"):
-        pass   # honored by chroot_intents()
-    services = software.get("services", {}) or {}
-    for unit in services.get("enable", []):
-        mapped = {"sshd": None, "tailscaled": "  services.tailscale.enable = true;",
-                  "docker": "  virtualisation.docker.enable = true;"}.get(unit, "?")
-        if mapped == "?":
-            refuse(f"software.services.enable {unit!r} has no default mapping — "
-                   "add the module option yourself")
-        elif mapped:
-            out.append(mapped)
-    for unit in services.get("disable", []):
-        refuse(f"software.services.disable {unit!r} is not mapped by the default translator")
-    if software.get("flatpak"):
-        out.append("  services.flatpak.enable = true;")
-        warn("flatpak app installation happens at runtime, not in configuration")
-    if software.get("snap"):
-        refuse("software.snap is not available on NixOS")
-
-    if desktop:
-        audio = desktop.get("audio", "auto")
-        if audio in ("auto", "pipewire"):
-            out.append("  services.pipewire = { enable = true; alsa.enable = true; pulse.enable = true; };")
-        elif audio == "pulseaudio":
-            # `services.pulseaudio` does not exist on the release this
-            # translator targets: the rename from `hardware.pulseaudio`
-            # landed after 24.11, so the new spelling is an evaluation
-            # error — and under --apply it is one raised *after* disko has
-            # already wiped the disks.
-            out.append("  hardware.pulseaudio.enable = true;")
-        if desktop.get("bluetooth"):
-            out.append("  hardware.bluetooth.enable = true;")
-        if desktop.get("printing"):
-            out.append("  services.printing.enable = true;")
-        if desktop.get("autologin"):
-            out += ["  services.displayManager.autoLogin.enable = true;",
-                    f"  services.displayManager.autoLogin.user = {nix_str(desktop['autologin'])};"]
-
-    drivers = doc.get("drivers", {}) or {}
-    gpu = drivers.get("gpu")
-    if gpu in ("amdgpu", "intel"):
-        out.append(f"  services.xserver.videoDrivers = [ {nix_str(gpu)} ];")
-    elif gpu not in (None, "auto", "none", "nvidia", "nvidia-open"):
-        refuse(f"drivers.gpu {gpu!r} has no NixOS mapping")
-    if drivers.get("gpu") in ("nvidia", "nvidia-open"):
-        out += ["  services.xserver.videoDrivers = [ \"nvidia\" ];",
-                f"  hardware.nvidia.open = {str(drivers['gpu'] == 'nvidia-open').lower()};"]
+    # software, desktop and drivers share one option namespace: a role, a
+    # display manager and a service list can all reach for the same switch, so
+    # they are rendered through one collector that refuses a contradiction
+    # instead of emitting the same attribute twice.
+    opts = NixOptions()
+    render_software(doc, opts)
+    render_desktop(doc, opts)
+    render_drivers(doc, opts)
+    out += opts.lines
 
     file_lines, file_cmds = render_files(doc)
     out += file_lines
@@ -1384,7 +2210,22 @@ def render_configuration(doc: dict) -> str:
              "systemd-cryptenroll; the generated configuration assumes the "
              "slot exists on the next boot")
     if (storage.get("snapshots", {}) or {}).get("enabled"):
-        out.append("  services.snapper.configs.root = { SUBVOLUME = \"/\"; TIMELINE_CREATE = true; TIMELINE_CLEANUP = true; };")
+        # SPEC §20.9: snapshots need a filesystem that can take them, and the
+        # NixOS module can only take them on one — services.snapper.configs.
+        # <n>.FSTYPE is types.enum [ "btrfs" ] (services/misc/snapper.nix:57-62).
+        # Emitting a snapper config over ext4 or zfs installed a timer that
+        # fails on every tick and a system with no snapshots at all.
+        root_fs = next((fs for mp, _, fs, _ in mount_table(doc)[0] if mp == "/"),
+                       None)
+        if root_fs != "btrfs":
+            refuse(f"storage.snapshots.enabled with a {root_fs or 'non-btrfs'} "
+                   "root filesystem: the NixOS snapper module accepts only "
+                   "btrfs (services.snapper.configs.<name>.FSTYPE is "
+                   "types.enum [\"btrfs\"]), so no snapshot would ever be taken")
+        else:
+            out.append("  services.snapper.configs.root = { SUBVOLUME = \"/\"; "
+                       "FSTYPE = \"btrfs\"; TIMELINE_CREATE = true; "
+                       "TIMELINE_CLEANUP = true; };")
     swap = storage.get("swap", {}) or {}
     if swap.get("zram"):
         out.append("  zramSwap.enable = true;")
@@ -1392,8 +2233,6 @@ def render_configuration(doc: dict) -> str:
         size = swap["file"]["size"]
         gib = int(size[:-3]) if size.endswith("GiB") else 4
         out.append(f"  swapDevices = [ {{ device = {nix_str(swap['file']['path'])}; size = {gib * 1024}; }} ];")
-    if system.get("kdump"):
-        refuse("system.kdump has no NixOS default mapping")
 
     out += ["", "  # Pin to the release the generator targeted; do not blindly bump.",
             "  system.stateVersion = \"25.05\";", "}"]
