@@ -719,8 +719,21 @@ def mount_table(doc: dict) -> tuple[list[tuple[str, str, str, list[str]]], list[
 # ── configuration.nix ────────────────────────────────────────────
 
 def nix_script(body: str) -> str:
-    """Wrap a shell body in a Nix indented string, escaping the two magic sequences."""
-    return "''\n" + body.replace("''", "''''").replace("${", "''${") + "\n    ''"
+    """Wrap a shell body in a Nix indented string, escaping the two magic sequences.
+
+    The escape for a literal `''` inside an indented string is `'''`, not
+    `''''`: Nix reads the first two quotes as the escape introducer and the
+    third as the single character it yields, so `''''` produces *three*
+    quotes. A hook body containing `''` — `x=''` is ordinary shell, and
+    `print('''…''')` ordinary Python — therefore gained a stray quote on the
+    way into configuration.nix, which in shell is an unterminated string that
+    swallows the rest of the hook. Verified both directions with
+    `nix-instantiate --eval`: `''a''''b''` → `a'''b`, `''a'''b''` → `a''b`.
+
+    `${` must still be escaped as `''${` so that Nix leaves shell parameter
+    expansion for the shell instead of resolving it as antiquotation.
+    """
+    return "''\n" + body.replace("''", "'''").replace("${", "''${") + "\n    ''"
 
 
 # Running a hook as its user cannot go through `su`: activation happens inside
@@ -2741,12 +2754,22 @@ def main() -> int:
 
 
 def write_birth_certificate(doc: dict) -> None:
-    """Record the applied document on the installed system (delivery.md §8)."""
+    """Record the applied document on the installed system (delivery.md §8).
+
+    Written through redact_secrets, the same filter the store-bound copy in
+    render_script_hooks goes through. delivery.md:144 is explicit — an applier
+    "MUST NOT copy resolved secrets into target log files or birth
+    certificates" — and network.wifi[].psk_hash is a credential in its own
+    right: the PMK *is* the network, so a certificate carrying it hands out
+    wireless access to anyone who can read the file. The redacted field names
+    write_wireless_secrets()'s 0600 path instead of the value, so the record
+    still says what was applied and where the material went.
+    """
     target = pathlib.Path("/mnt/var/lib/lis")
     try:
         target.mkdir(parents=True, exist_ok=True)
         cert = target / "system.lis.json"
-        cert.write_text(json.dumps(doc, separators=(",", ":")) + "\n")
+        cert.write_text(json.dumps(redact_secrets(doc), separators=(",", ":")) + "\n")
         cert.chmod(0o600)
         print(f"wrote birth certificate {cert}")
     except OSError as err:
