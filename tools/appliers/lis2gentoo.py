@@ -463,33 +463,37 @@ def prepare_script(doc: dict, *, disk: str, partitions: list, mountpoints: dict,
 
     # ── stage3 ──
     pointer = f"$base/latest-stage3-{arch_dir}-{stage3_flavour}.txt"
-    retry = "--retry 5 --retry-all-errors --retry-delay 3 --retry-connrefused"
     s += ["",
           "# The minimal CD starts NetworkManager but hands over the login shell",
           "# before a lease exists — it even prints `NetworkManager has started,",
-          "# but is inactive`. Downloading straight away races that, and the",
-          "# failure arrives as an unresolvable host rather than as anything that",
-          "# looks like a timing problem.",
-          'echo "lis2gentoo: waiting for the installer network"',
-          "net_ok=",
-          "for _ in $(seq 1 60); do",
-          f'  if curl -fsS --max-time 10 -o /dev/null "{pointer}"; then net_ok=1; break; fi',
-          "  sleep 5",
-          "done",
-          '[ -n "$net_ok" ] || die "the installer has no working network after five '
-          'minutes; the stage3 and the binary packages both come over it"',
+          "# but is inactive`. A download issued straight away fails as an",
+          "# unresolvable host, which looks like a broken mirror rather than the",
+          "# timing problem it is. One retry policy, applied to every fetch, rather",
+          "# than each call site inventing its own.",
+          "fetch() {   # fetch <url> <destination, or - for stdout>",
+          "  for _ in $(seq 1 20); do",
+          '    if [ "$2" = "-" ]; then',
+          '      curl -fsSL --connect-timeout 20 --max-time 120 "$1" && return 0',
+          "    else",
+          '      curl -fL --connect-timeout 20 --max-time 3600 -o "$2" "$1" && return 0',
+          "    fi",
+          "    sleep 10",
+          "  done",
+          "  return 1",
+          "}",
           "",
           "# The stage3 is a Gentoo release artifact and its verification is a",
           "# first-party procedure: gemato against the release key that ships on",
           "# this very medium. An unverified tarball is not installed.",
-          f'rel=$(curl -fsSL {retry} "{pointer}" '
+          'echo "lis2gentoo: resolving the stage3 pointer"',
+          f'rel=$(fetch "{pointer}" - '
           "| grep -v '^#' | grep -m1 '\\.tar\\.xz' | cut -d' ' -f1) "
-          f'|| die "cannot reach the Gentoo autobuilds pointer"',
+          f'|| die "cannot reach the Gentoo autobuilds pointer after 20 attempts — '
+          f'the installer has no usable network"',
           '[ -n "$rel" ] || die "the stage3 pointer file named no tarball"',
           'echo "lis2gentoo: stage3 = $rel"',
-          f'curl -fL {retry} -o "$mnt/stage3.tar.xz" "$base/$rel" '
-          '|| die "stage3 download failed"',
-          f'curl -fL {retry} -o "$mnt/stage3.tar.xz.asc" "$base/$rel.asc" '
+          'fetch "$base/$rel" "$mnt/stage3.tar.xz" || die "stage3 download failed"',
+          'fetch "$base/$rel.asc" "$mnt/stage3.tar.xz.asc" '
           '|| die "stage3 signature download failed"',
           'gemato openpgp-verify-detached -K /usr/share/openpgp-keys/gentoo-release.asc '
           '"$mnt/stage3.tar.xz.asc" "$mnt/stage3.tar.xz" '
