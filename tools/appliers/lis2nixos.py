@@ -1806,8 +1806,9 @@ def resolve_app(app: dict) -> tuple[str | None, str | None]:
         return source, available[source]
 
     for dropped in skipped:
-        refuse(f"software.apps[] {name!r}: the document offers only {dropped!r}, "
-               f"and {APP_SOURCE_REFUSALS[dropped]}")
+        refuse(f"software.apps[] {name!r}: preference {order} leaves no source "
+               f"this applier can install — {dropped!r} is out because "
+               f"{APP_SOURCE_REFUSALS[dropped]}")
     if not skipped:
         refuse(f"software.apps[] {name!r}: none of its declared sources "
                f"({', '.join(sorted(available)) or 'none'}) appears in "
@@ -1930,18 +1931,26 @@ def render_software(doc: dict, opts: NixOptions) -> None:
     if flatpaks or software.get("flatpak") is not None:
         opts.set("services.flatpak.enable", "true")
         # nixos/modules/services/desktops/flatpak.nix asserts
-        # `xdg.portal.enable == true`; without it the configuration does not
-        # evaluate at all.
+        # `xdg.portal.enable == true`, and the portal module in turn asserts
+        # that at least one implementation is present. Neither is optional:
+        # emitting services.flatpak.enable on its own — which is all this
+        # translator used to do — does not evaluate at all. The list merges,
+        # so a desktop that ships its own portal keeps it too.
         opts.set("xdg.portal.enable", "true")
+        opts.set("xdg.portal.extraPortals", "[ pkgs.xdg-desktop-portal-gtk ]")
     if flatpaks:
         opts.lines.extend(flatpak_unit(flatpaks))
         warn("software.flatpak[]: flatpak applications are installed by a "
              "first-boot unit (lis-flatpak), not by the configuration — the "
              "machine needs the network on its first boot")
 
-    if software.get("snap"):
+    if (snaps := software.get("snap")) is not None:
+        # Consumed so the refusal is the single diagnostic: without it the
+        # tracker reports each of name/channel/classic a second time as
+        # "declared but never read", which reads like three more problems.
+        consume(snaps)
         refuse("software.snap[] is not available on NixOS: snapd needs a "
-               "writable /snap and FHS mount namespaces the store does not "
+               "writable /snap and the FHS mount namespaces the store does not "
                "provide, and nixpkgs ships no snapd service module")
 
 
