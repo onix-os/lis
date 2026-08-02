@@ -341,7 +341,7 @@ def install_suse(target_disk, seed_disk, iso, ram, recipe, work):
 def install_from_live_shell(distro, target_disk, seed_disk, iso, ram, work,
                             *, applier, boot_hint, login=None, timeout=2400,
                             bootstrap=None, become_root=False,
-                            kernel=None, initrd=None, append=None):
+                            kernel=None, initrd=None, append=None, ready=None):
     """Boot a live ISO, mount the LIS seed, and let the applier drive the install.
 
     `kernel`/`initrd`/`append` boot the medium's own kernel directly instead of
@@ -349,12 +349,23 @@ def install_from_live_shell(distro, target_disk, seed_disk, iso, ram, work,
     their GRUB menu with `terminal_output gfxterm` and no serial entry, so
     editing the menu blind over a serial line is guesswork; handing QEMU the
     kernel and the command line is exact.
+
+    `ready` is a pattern that must appear before the generic prompt patterns are
+    trusted. Those patterns are deliberately loose so they fit six different
+    live consoles, and on some images they match boot *output* rather than a
+    shell — Gentoo's very first line of kernel log is
+    `Linux version 6.18.38 (portage@localhost)`, which satisfies the `localhost`
+    pattern at second zero. Everything typed after that goes into a console with
+    no shell behind it and is simply lost, and the run then fails for a reason
+    that has nothing to do with the applier.
     """
     child = qemu(target_disk, ram, iso=iso, extra_drives=[seed_disk],
                  kernel=kernel, initrd=initrd, append=append,
                  boot=None if kernel else "order=d",
                  timeout=timeout, log=work / "serial.log")
     boot_hint(child)
+    if ready:
+        child.expect(ready, timeout=900)
     prompts = [r"root@archiso", r"root@nixos", r"nixos@nixos", r"localhost",
                r"\]#", r"~ ?[#$]", r"# "]
     if login:
@@ -472,6 +483,10 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path,
                                 append=f"{SERIAL} root=live:CDLABEL={iso_label(iso_path)} "
                                        "rd.live.dir=/ rd.live.squashimg=image.squashfs "
                                        "cdroot",
+                                # autoconfig prints this banner immediately
+                                # before handing over the autologin shell.
+                                ready=[r"Welcome to the Gentoo Linux Minimal "
+                                       r"Installation CD"],
                                 # Downloading a 500MB stage3, an ebuild snapshot
                                 # and the binary packages takes longer than any
                                 # answer-file installer here.
