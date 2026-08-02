@@ -2207,7 +2207,7 @@ def check_keys(doc: dict) -> None:
                    "seed passphrase")
             continue
         if ktype == "keyfile":
-            if not secret_ref(entry.get("source")):
+            if not source:
                 refuse(f"keys['{kid}'].source: a keyfile needs a secret reference "
                        "such as {from: 'seed:keys/luks-root.key'} (SPEC §2.4); "
                        "without one there is no key material to give disko")
@@ -2410,6 +2410,13 @@ def render_configuration(doc: dict) -> str:
         out.append(f"  console.keyMap = {nix_str(keymap['console'])};")
     if keymap.get("font"):
         out.append(f"  console.font = {nix_str(keymap['font'])};")
+        if keymap["font"].startswith("ter-"):
+            # console.packages defaults to [ ] (config/console.nix:109-111), so
+            # setfont only ever sees the fonts kbd itself ships. Terminus is not
+            # one of them — and `ter-v16n` is the example SPEC §8 gives — so the
+            # name alone produced a boot that logged "cannot open font file"
+            # and kept the default font.
+            out.append("  console.packages = [ pkgs.terminus_font ];")
     if keymap.get("layout"):
         out.append(f"  services.xserver.xkb.layout = {nix_str(keymap['layout'])};")
     if keymap.get("variant"):
