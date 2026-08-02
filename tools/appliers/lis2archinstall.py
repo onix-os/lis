@@ -22,7 +22,7 @@ import pathlib
 import sys
 import uuid
 
-from lis_common import (track, check_unread, check_raid_consumers, chroot_intents, registration_commands, enrollment_commands, luks_key_path, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware,
+from lis_common import (track, check_unread, check_raid_consumers, chroot_intents, registration_commands, enrollment_commands, luks_key_path, SEED_MOUNT, resolve_disk_paths, check_snapshots, match_selectors, system_commands, security_packages, file_commands, uid_commands, password_field, shell_packages, check_arch, check_script_fields,ALL_SECTIONS, add_common_args, check_firmware, check_encryption_emitted,
                         check_unhandled, check_section_fields, sudoers_commands, boot_timeout_commands, driver_packages,
                         check_boot_extras, check_keymap, check_version, enforce,
                         load_doc, refuse, report, role_fs, role_mountpoint, warn)
@@ -409,6 +409,93 @@ def raid_disk_config(doc: dict) -> dict | None:
     return config
 
 
+def raid_encryption(storage: dict, dc: dict) -> None:
+    """Refuse every LUKS container declared alongside storage.raid[].
+
+    Nothing is emitted here, and that is the whole point: the two-pass RAID
+    arrangement has no place to put a `disk_encryption` block, so a container
+    reaching this branch was being dropped in silence and the machine installed
+    in plaintext with a success report. Each of the three places a container can
+    sit hits a different wall.
+
+    * **Over an array member.** The array is built by mdadm between the two
+      archinstall runs (assemble_arrays), out of the raw partition nodes and
+      after `wipefs -a` clears the signature the first pass left — a LUKS header
+      written there would be wiped and then overwritten by the array's own
+      metadata. Nothing can be rearranged to avoid it: archinstall has no mdadm
+      vocabulary at all, so it cannot be handed an open mapper to assemble the
+      array on instead.
+
+    * **Over a plain partition of either disk.** Those partitions are created by
+      the first pass, so the second run is given them with
+      status 'existing' (raid_disk_config), and encryption is applied inside
+      FilesystemHandler._format_partitions, which acts only on partitions where
+      `p.is_create_or_modify()` holds (disk/filesystem.py:86-95;
+      ModificationStatus.EXIST fails that test, models/device.py:1015-1016). An
+      existing partition is never re-formatted and so never encrypted. The first
+      pass cannot carry it either — it runs `--script only_hd` with no
+      credentials file, and DiskEncryption.parse_arg returns None without a
+      password (models/device.py:1536-1537).
+
+    * **Over the array itself.** The partition written across the array is the
+      one partition the second run does create, so it is the one archinstall
+      could encrypt — but `storage.raid[]` declares no `fs` and no `mountpoint`
+      (spec/schema.json), so a container over an array is only usable through a
+      volume group, and DiskEncryption.validate_enc (models/device.py:1511-1524)
+      returns False for any layout with more than two partitions *and* an
+      lvm_config. parse_arg (:1528-1530) then returns None, leaving archinstall
+      to install with no encryption at all. A RAID layout is never that small:
+      two array members, a mounted boot partition and the array's own partition
+      is already four.
+    """
+    containers = storage.get("encryption", []) or []
+    if not containers:
+        return
+    arrays = storage.get("raid", []) or []
+    members = {handle for array in arrays
+               for handle in (array.get("devices") or []) + (array.get("spares") or [])}
+    names = {array["name"] for array in arrays}
+
+    for container in containers:
+        cid, over = container["id"], container.get("over")
+        if over in members:
+            refuse(f"storage.encryption ({cid}): {over!r} is a member of a RAID "
+                   "array, and archinstall cannot install onto encrypted array "
+                   "members — it has no mdadm vocabulary, so this applier builds "
+                   "the array itself with `mdadm --create` over the bare "
+                   "partition nodes (after `wipefs -a`), which would destroy the "
+                   "LUKS header rather than assemble over it")
+        elif over in names:
+            if dc.get("lvm_config"):
+                refuse(f"storage.encryption ({cid}): archinstall drops the whole "
+                       "encryption config for this layout — "
+                       "DiskEncryption.validate_enc (models/device.py:1511-1524) "
+                       "returns False when a volume group is combined with more "
+                       "than two partitions, parse_arg (:1528-1530) then returns "
+                       "None, and the install proceeds unencrypted. A RAID layout "
+                       "has at least four (two array members, a mounted boot "
+                       "partition, and the partition written across the array)")
+            else:
+                refuse(f"storage.encryption ({cid}): nothing can consume a "
+                       f"container over array {over!r} — storage.raid[] declares "
+                       "no fs and no mountpoint, so the filesystem inside the "
+                       "container would have to come from a volume group, and "
+                       "archinstall refuses encryption with a volume group at "
+                       "this partition count (models/device.py:1511-1524)")
+        elif over in PV_IDS:
+            refuse(f"storage.encryption ({cid}): partition {over!r} is created by "
+                   "the first of the two archinstall runs a RAID layout takes and "
+                   "handed to the second one as 'existing'. archinstall encrypts "
+                   "only partitions it creates or modifies "
+                   "(disk/filesystem.py:86-95, models/device.py:1015-1016), and "
+                   "the first pass runs `--script only_hd` with no credentials "
+                   "file, so neither run would encrypt it")
+        else:
+            refuse(f"storage.encryption ({cid}): 'over' handle {over!r} does not "
+                   "resolve to a partition on a declared disk or to a declared "
+                   "array")
+
+
 def raid_commands(storage: dict) -> list[str]:
     """What the installed system needs in order to find its array at boot.
 
@@ -576,7 +663,13 @@ def translate(doc: dict) -> tuple[dict, dict]:
         warn(f"storage.raid ({names}): the volume group lands on a partition "
              "written across the array rather than on the bare array — an "
              "archinstall physical volume is a partition, never a whole device")
-        config["disk_config"] = raid_disk_config(doc)
+        raid_dc = raid_disk_config(doc)
+        if raid_dc is not None:
+            # An archinstall profile has exactly one place for encryption, and
+            # this arrangement cannot reach it; say so rather than emit a
+            # plaintext layout from a document that declared LUKS.
+            raid_encryption(storage, raid_dc)
+        config["disk_config"] = raid_dc
     elif dc := disk_config(doc):
         # Schema read from archinstall itself (models/device.py DiskEncryption):
         # disk_config carries disk_encryption {encryption_type, partitions:
@@ -1041,6 +1134,19 @@ def main() -> int:
     check_keymap(doc, {"console", "layout"})
 
     config, creds = translate(doc)
+
+    # Fail-closed backstop for the layout artifact, checked on its own: the
+    # credentials file carries only the passphrase, and only under --apply, so
+    # pairing the two would let a plaintext profile pass on the strength of a
+    # password sitting in its sibling. Evidence is per container — the obj_id of
+    # the partition it wraps, which is the only name archinstall has for it
+    # (models/device.py:1465 _DiskEncryptionSerialization) — so a document with
+    # several containers is checked one by one rather than as a group.
+    check_encryption_emitted(
+        doc, (config.get("disk_config") or {}).get("disk_encryption") or {},
+        marker=lambda container: PV_IDS.get(container.get("over")) or container["id"],
+        label="archinstall profile's disk_encryption block")
+
     args.out.mkdir(parents=True, exist_ok=True)
     cfg_file = args.out / "user_configuration.json"
     creds_file = args.out / "user_credentials.json"
