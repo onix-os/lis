@@ -1057,7 +1057,12 @@ def render_configuration(doc: dict) -> str:
         if audio in ("auto", "pipewire"):
             out.append("  services.pipewire = { enable = true; alsa.enable = true; pulse.enable = true; };")
         elif audio == "pulseaudio":
-            out.append("  services.pulseaudio.enable = true;")
+            # `services.pulseaudio` does not exist on the release this
+            # translator targets: the rename from `hardware.pulseaudio`
+            # landed after 24.11, so the new spelling is an evaluation
+            # error — and under --apply it is one raised *after* disko has
+            # already wiped the disks.
+            out.append("  hardware.pulseaudio.enable = true;")
         if desktop.get("bluetooth"):
             out.append("  hardware.bluetooth.enable = true;")
         if desktop.get("printing"):
