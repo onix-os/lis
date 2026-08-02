@@ -750,6 +750,91 @@ HOOK_PATH = ("[ pkgs.bash pkgs.coreutils pkgs.shadow pkgs.shadow.su pkgs.util-li
              "pkgs.gnused pkgs.gnugrep pkgs.gawk pkgs.findutils pkgs.systemd ]")
 
 
+# The binary each dotfiles method needs on the first-boot unit's PATH. A
+# systemd unit has no inherited PATH at all, so an unlisted tool is a plain
+# "command not found" in the journal and a home directory that never appears.
+DOTFILES_TOOLS = {"raw": ["pkgs.git"],
+                  "stow": ["pkgs.git", "pkgs.stow"],
+                  "chezmoi": ["pkgs.git", "pkgs.chezmoi"]}
+
+
+def hook_path(doc: dict) -> str:
+    """HOOK_PATH plus whatever this document's own first-boot work needs."""
+    extra = []
+    if snapshots_wanted(doc):
+        extra.append("pkgs.btrfs-progs")
+    for user in doc.get("users", []) or []:
+        method = (user.get("dotfiles") or {}).get("method") or "raw"
+        if (user.get("dotfiles") or {}).get("repo"):
+            extra += [p for p in DOTFILES_TOOLS.get(method, []) if p not in extra]
+    if not extra:
+        return HOOK_PATH
+    return HOOK_PATH[:-1] + " ".join(extra) + " ]"
+
+
+def as_user(name: str, body: str) -> str:
+    """One `lis_as_user` call, single-quoted so the *user's* shell expands it.
+
+    The body used to be emitted with json.dumps, i.e. as a double-quoted shell
+    word: `$HOME`, `$USER` and every `$(…)` in a per-user hook were therefore
+    expanded by the root shell running the activation script, before setpriv
+    dropped privilege. A hook writing to "$HOME/.config" wrote into /root.
+    setpriv already exports HOME, USER and LOGNAME for the account, so the body
+    only has to survive the trip there intact.
+    """
+    import shlex
+    return f"lis_as_user {name} {shlex.quote(body)}"
+
+
+def dotfiles_commands(doc: dict) -> list[str]:
+    """users[].dotfiles → a clone, and an apply, from the first-boot unit.
+
+    NixOS has no option for "put this git repository in that account's home":
+    home-manager is out of tree and this translator emits plain NixOS only. The
+    first-boot unit does run inside the booted target as root with the accounts
+    already created, so the intent is deliverable as ⚙ rather than dropped —
+    which is what it was, at `if user.get("dotfiles"): pass`, pointing at a
+    `chroot_intents()` this applier never imported.
+
+    Quoted with shlex, not json: the body is passed to `lis_as_user` as one
+    shell word, and a double-quoted word would let the *root* shell expand
+    `$HOME` before setpriv ever drops privilege — landing every account's
+    dotfiles in /root.
+    """
+    import shlex
+
+    out: list[str] = []
+    for user in doc.get("users", []) or []:
+        dotfiles = user.get("dotfiles") or {}
+        repo = dotfiles.get("repo")
+        if not repo:
+            continue
+        name = user["name"]
+        method = dotfiles.get("method") or "raw"
+        quoted = shlex.quote(repo)
+        # Idempotent: the unit is guarded by ConditionPathExists, but a rerun
+        # after a failed first boot must not die on an existing directory.
+        clone = ('test -e "$HOME/.dotfiles" || '
+                 f'git clone --depth 1 {quoted} "$HOME/.dotfiles"')
+        if method == "raw":
+            body = clone
+        elif method == "stow":
+            body = (clone + ' && cd "$HOME/.dotfiles" && for p in */; do '
+                    'stow -t "$HOME" -R "${p%/}"; done')
+        elif method == "chezmoi":
+            body = f'chezmoi init --apply {quoted}'
+        else:
+            refuse(f"users['{name}'].dotfiles.method {method!r} is not one of "
+                   "raw | stow | chezmoi (SPEC §9)")
+            continue
+        warn(f"users['{name}'].dotfiles: emulated by the lis-firstboot unit "
+             f"(method {method}), not by a NixOS option — the repository is "
+             "cloned once on the first boot and is not managed by the store "
+             "afterwards")
+        out.append(f"lis_as_user {name} {shlex.quote(body)}")
+    return out
+
+
 # SPEC §13 gives each lifecycle hook a distinct contract, and four of them name
 # the *live installer environment*, not the installed system: `post_storage`
 # runs right after the target is formatted and mounted, `pre_reboot` after it is
@@ -819,6 +904,50 @@ def check_stage_chroot(doc: dict) -> None:
         for stage in ("post", "post_install", "firstboot"):
             inspect(stage, user_scripts.get(stage),
                     f"users['{user.get('name')}'].scripts.{stage}[]")
+
+
+def _leaf_paths(node, prefix: str = "") -> list[str]:
+    """Dotted leaf paths under an *untracked* document fragment.
+
+    Deliberately takes the raw document, not the tracked wrapper: walking the
+    wrapper would record a read for every leaf it visits, which is the opposite
+    of what the caller wants to establish.
+    """
+    if isinstance(node, dict) and node:
+        return [p for key, value in node.items()
+                for p in _leaf_paths(value, f"{prefix}.{key}" if prefix else str(key))]
+    return [prefix] if prefix else []
+
+
+def snapshots_wanted(doc: dict) -> bool:
+    """Whether this document asks for snapshots this applier can actually take.
+
+    SPEC §20.9: `storage.snapshots.enabled` needs a filesystem that can take
+    them, and the NixOS module can only take them on one —
+    services.snapper.configs.<name>.FSTYPE is types.enum [ "btrfs" ]
+    (nixos/modules/services/misc/snapper.nix:57-62). A non-btrfs root is
+    refused where the config is rendered; nothing is set up for it here.
+    """
+    if not ((doc.get("storage", {}) or {}).get("snapshots") or {}).get("enabled"):
+        return False
+    return any(mp == "/" and fs == "btrfs" for mp, _, fs, _ in mount_table(doc)[0])
+
+
+def snapshot_commands(doc: dict) -> list[str]:
+    """Create the subvolume snapper stores its snapshots in.
+
+    `services.snapper` writes /etc/snapper/configs/<name> and nothing else: its
+    own documentation says the configured path "has to contain a subvolume named
+    .snapshots" (services/misc/snapper.nix:50-52) and the module never creates
+    it. Without it snapper exits non-zero on every timeline tick, so the
+    generated configuration described snapshots the system would never take.
+    disko cannot make it either — it is a subvolume of the root subvolume, which
+    does not exist until the root filesystem is mounted.
+    """
+    if not snapshots_wanted(doc):
+        return []
+    return ["if [ ! -d /.snapshots ]; then "
+            "btrfs subvolume create /.snapshots && chmod 750 /.snapshots; fi"]
 
 
 def host_stage_bodies(doc: dict, stage: str) -> list[str]:
@@ -908,20 +1037,24 @@ def render_script_hooks(doc: dict, file_cmds: list[str] | None = None) -> list[s
     activation += [s["content"] for stage in ("post_install", "post")
                    for s in scripts.get(stage, []) if s.get("content")]
     for user in doc.get("users", []) or []:
-        for s in (user.get("scripts", {}) or {}).get("post_install", []):
-            if c := s.get("content"):
-                activation.append(
-                    f"lis_as_user {user['name']} {json.dumps(c)}")
+        # `post` after `post_install`, the ordering SPEC §13 gives the two
+        # phases. The user-level `post` stage used to reach nothing at all here:
+        # only `post_install` and `firstboot` were collected, so a document that
+        # put its per-user work in `post` had it silently dropped.
+        for stage in ("post_install", "post"):
+            for s in (user.get("scripts", {}) or {}).get(stage, []):
+                if c := s.get("content"):
+                    activation.append(as_user(user["name"], c))
 
     firstboot = [s["content"] for s in scripts.get("firstboot", []) if s.get("content")]
     firstboot += snapshot_commands(doc)
+    firstboot += dotfiles_commands(doc)
     firstboot += enrollment_commands(doc)
     firstboot += registration_commands(doc, "nixos")
     for user in doc.get("users", []) or []:
         for s in (user.get("scripts", {}) or {}).get("firstboot", []):
             if c := s.get("content"):
-                firstboot.append(
-                    f"lis_as_user {user['name']} {json.dumps(c)}")
+                firstboot.append(as_user(user["name"], c))
 
     for stage in ("pre_install", "pre"):
         if scripts.get(stage):
@@ -936,7 +1069,11 @@ def render_script_hooks(doc: dict, file_cmds: list[str] | None = None) -> list[s
     check_stage_chroot(doc)
 
     # Birth certificate (delivery.md §8) — recorded on every activation.
-    birth = base64.b64encode(json.dumps(doc, separators=(",", ":")).encode()).decode()
+    # redact_secrets(), not doc: this copy is baked into the activation script,
+    # which lives in the Nix store and is world-readable. The file it writes is
+    # 0600, but the bytes are public long before that chmod runs.
+    birth = base64.b64encode(
+        json.dumps(redact_secrets(doc), separators=(",", ":")).encode()).decode()
     activation.append("install -d -m755 /var/lib/lis")
     activation.append(f"echo {birth} | base64 -d > /var/lib/lis/system.lis.json")
     activation.append("chmod 600 /var/lib/lis/system.lis.json")
@@ -964,7 +1101,12 @@ def render_script_hooks(doc: dict, file_cmds: list[str] | None = None) -> list[s
                 "    unitConfig.ConditionPathExists = "
                 "\"!/var/lib/lis/.firstboot-done\";",
                 "    serviceConfig.Type = \"oneshot\";",
-                f"    path = {HOOK_PATH};",
+                # systemd.services.<n>.path *replaces* PATH rather than adding
+                # to it, so a tool the unit needs has to be named here. btrfs
+                # only when the document asks for snapshots: adding it
+                # unconditionally would put btrfs-progs in the closure of every
+                # system this translator emits.
+                f"    path = {hook_path(doc)};",
                 "    script = " + nix_script(body) + ";",
                 "  };"]
     return out
@@ -1150,6 +1292,25 @@ def render_boot(doc: dict) -> list[str]:
                "(optionally the systemd one via boot.initrd.systemd.enable); dracut, "
                "mkinitcpio and booster appear nowhere in nixos/modules")
     return out
+
+
+def redact_secrets(doc: dict) -> dict:
+    """The document with key material stripped, for anything store-bound.
+
+    Shared with render_script_hooks: the birth certificate it embeds ends up in
+    the Nix store, so anything that is a credential on its own has to be taken
+    out first. network.wifi[].psk_hash is such a credential — the PMK is the
+    network, not a hash of a password — and it is the one field this translator
+    delivers out of band, through write_wireless_secrets().
+    """
+    wifi = (doc.get("network", {}) or {}).get("wifi") or []
+    if not any(net.get("psk_hash") for net in wifi):
+        return doc
+    clean = json.loads(json.dumps(doc))
+    for net in clean["network"]["wifi"]:
+        if net.get("psk_hash"):
+            net["psk_hash"] = f"<redacted: see {WIRELESS_SECRETS}>"
+    return clean
 
 
 # ── network ──────────────────────────────────────────────────────────
@@ -1611,6 +1772,19 @@ def resolve_app(app: dict) -> tuple[str | None, str | None]:
             warn(f"software.apps[] {name!r}: {dropped!r} is preferred over "
                  f"{source!r} but {APP_SOURCE_REFUSALS[dropped]} — installing "
                  f"the {source} source instead")
+        # An alternative the arbitration never reached is still a field the
+        # document wrote and this applier did not act on. Naming it is the
+        # difference between a documented choice and the silent drop the
+        # spec forbids.
+        for unused in sorted(set(available) - {source} - set(skipped)):
+            if reason := APP_SOURCE_REFUSALS.get(unused):
+                warn(f"software.apps[] {name!r}: the {unused!r} source is "
+                     f"declared but {reason}; the {source} source is "
+                     "installed instead")
+            else:
+                warn(f"software.apps[] {name!r}: the {unused!r} source is "
+                     f"declared but {source!r} is installed instead — put it "
+                     "first in preference[] if that is the wrong way round")
         return source, available[source]
 
     for dropped in skipped:
@@ -1806,6 +1980,13 @@ def render_desktop(doc: dict, opts: NixOptions) -> None:
             opts.set("services.xserver.enable", "true",
                      label=f"desktop.display_manager {manager!r}")
         opts.set(DM_OPTIONS[manager], "true")
+        if manager == "sddm" and "services.xserver.enable" not in opts.values:
+            # sddm.nix asserts that one of services.xserver.enable and
+            # services.displayManager.sddm.wayland.enable is set. A Wayland
+            # role (sway, hyprland) turns on neither, so sddm has to be told
+            # to run its Wayland greeter or the configuration does not
+            # evaluate at all.
+            opts.set("services.displayManager.sddm.wayland.enable", "true")
     elif manager == "greetd":
         if session is None:
             refuse("desktop.display_manager 'greetd': greetd starts a single "
@@ -1859,15 +2040,20 @@ def render_desktop(doc: dict, opts: NixOptions) -> None:
         return
     audio = desktop.get("audio", "auto")
     if audio in ("auto", "pipewire"):
-        opts.raw("  services.pipewire = { enable = true; alsa.enable = true; "
-                 "pulse.enable = true; };")
-        opts.taken("services.pipewire", "enable")
+        opts.set("services.pipewire.enable", "true")
+        opts.set("services.pipewire.alsa.enable", "true")
+        opts.set("services.pipewire.pulse.enable", "true")
     elif audio == "pulseaudio":
         # `services.pulseaudio` does not exist on the release this translator
         # targets: the rename from `hardware.pulseaudio` landed after 24.11,
         # so the new spelling is an evaluation error — and under --apply it is
         # one raised *after* disko has wiped the disks.
         opts.set("hardware.pulseaudio.enable", "true")
+        # Every desktop role turns pipewire on by default, and
+        # nixos/modules/services/audio/pipewire.nix asserts that pulseaudio is
+        # off. Asking for pulseaudio without saying so fails the whole
+        # evaluation, so the document's choice has to displace the default.
+        opts.set("services.pipewire.enable", "lib.mkForce false")
     elif audio == "none":
         # A desktop module turns a sound server on by default, so "none" has
         # to say so out loud or it is not honored at all.
@@ -1920,6 +2106,125 @@ def render_drivers(doc: dict, opts: NixOptions) -> None:
         opts.set("hardware.enableRedistributableFirmware", "false")
     elif firmware is not None:
         refuse(f"drivers.firmware {firmware!r} has no NixOS mapping")
+
+
+# SPEC §17.1 names the whole type vocabulary. The JSON schema types the field
+# as a bare string, so a misspelling validates cleanly and then selects nothing
+# — which is how a document asking for a hardware-token unlock can install a
+# machine whose only key is the seed passphrase and be reported as honored.
+KEY_TYPES = {"yubikey_fido2", "yubikey_challenge", "tpm2", "gpg", "age",
+             "keyfile", "passphrase", "ssh"}
+
+# Types this applier can actually turn into key material or an enrollment.
+# `keyfile` reaches disko as a passwordFile (lis_common.luks_key_path); `tpm2`
+# and `fido2` are the two flags lis_common.enrollment_commands can hand to
+# systemd-cryptenroll.
+KEY_TYPES_HONORED = {"keyfile", "tpm2", "fido2"}
+
+# Only one purpose is consumed by any installer in this repository. The rest
+# describe Phase-2 identity work — PAM, SSH, payload decryption — that nothing
+# in a NixOS translation reads.
+KEY_PURPOSES = {"payload_decryption", "disk_encryption", "secret_decryption",
+                "user_ssh_key", "user_pam_auth", "remote_auth"}
+
+
+def check_keys(doc: dict) -> None:
+    """keys[] — honor what reaches the target, refuse the rest by name.
+
+    Every leaf of this section used to be either unread or read by exactly one
+    helper with no diagnostic: `id`, `match` and `pin_required` reached nothing,
+    an unknown `type` selected nothing, a `purpose` other than disk_encryption
+    was a no-op, and `gpg`/`age` handed *ciphertext* to cryptsetup as if it were
+    a key. The whole section then earned one warning that said enrollment would
+    happen. Fail closed instead (SPEC §2.3): a key the machine will not have is
+    not a detail to warn about, it is a machine that does not unlock.
+    """
+    material = []
+    for index, entry in enumerate(doc.get("keys", []) or []):
+        kid = entry.get("id") or f"#{index}"
+        ktype = entry.get("type")
+        purposes = list(entry.get("purpose", []) or [])
+
+        if ktype is None:
+            refuse(f"keys['{kid}']: no type — SPEC §17.1 makes it the field that "
+                   "says what the key is, and nothing selects a key without it")
+            continue
+        if ktype not in KEY_TYPES and ktype not in KEY_TYPES_HONORED:
+            refuse(f"keys['{kid}'].type {ktype!r} is not one of SPEC §17.1's types "
+                   f"({', '.join(sorted(KEY_TYPES))}) — the schema types this field "
+                   "as a bare string, so a misspelling validates and then matches "
+                   "no key at all")
+            continue
+        if entry.get("match"):
+            refuse(f"keys['{kid}'].match: no applier in this repository evaluates "
+                   "hardware-token matching rules, and NixOS has no option that "
+                   "selects a token by serial or vendor — the key would be used "
+                   "whatever token happened to be plugged in")
+        if entry.get("pin_required"):
+            refuse(f"keys['{kid}'].pin_required: enrollment goes through "
+                   "lis_common.enrollment_commands, which runs systemd-cryptenroll "
+                   "without --tpm2-with-pin, so the slot would be created with no "
+                   "PIN and the document's requirement would be silently relaxed")
+
+        if not purposes:
+            refuse(f"keys['{kid}']: no purpose — SPEC §17.1 makes purpose[] what "
+                   "binds a key to a job, and an entry with none is consulted by "
+                   "nothing")
+            continue
+        for purpose in purposes:
+            if purpose not in KEY_PURPOSES:
+                refuse(f"keys['{kid}'].purpose {purpose!r} is not one of SPEC §17.1's "
+                       f"roles ({', '.join(sorted(KEY_PURPOSES))})")
+            elif purpose != "disk_encryption":
+                refuse(f"keys['{kid}'].purpose {purpose!r}: this translator emits a "
+                       "NixOS configuration and a disko layout, neither of which has "
+                       "anywhere to consume a key for that role — only "
+                       "disk_encryption reaches the target")
+        if "disk_encryption" not in purposes:
+            continue
+
+        if ktype in ("gpg", "age"):
+            # lis_common.luks_key_path returns the seed path for these types and
+            # emit_content() hands it to disko as passwordFile, which cryptsetup
+            # reads byte for byte. Nothing on the path decrypts the file, so the
+            # container is created with the *armoured ciphertext* as its
+            # passphrase and no later unlock can reproduce it.
+            refuse(f"keys['{kid}'].type {ktype!r}: the material is handed to disko as "
+                   "a passwordFile and used verbatim — nothing in this applier "
+                   "decrypts it, so the container would be keyed on the encrypted "
+                   "file's own bytes; export the key to a plain keyfile on the seed "
+                   "and declare type keyfile")
+            continue
+        if ktype not in KEY_TYPES_HONORED:
+            refuse(f"keys['{kid}'].type {ktype!r} with purpose disk_encryption: this "
+                   "applier can only turn 'keyfile' into disko key material and "
+                   "'tpm2'/'fido2' into a systemd-cryptenroll flag; the entry would "
+                   "be read by nothing and the container would fall back to the "
+                   "seed passphrase")
+            continue
+        if ktype == "keyfile":
+            if not secret_ref(entry.get("source")):
+                refuse(f"keys['{kid}'].source: a keyfile needs a secret reference "
+                       "such as {from: 'seed:keys/luks-root.key'} (SPEC §2.4); "
+                       "without one there is no key material to give disko")
+                continue
+            material.append(kid)
+
+    if len(material) > 1:
+        # luks_key_path() returns the *first* match and never looks again, so a
+        # second keyfile is not a second key — it is a key the document declared
+        # and the machine will not have.
+        refuse("keys[]: " + ", ".join(repr(k) for k in material)
+               + " all declare type keyfile with purpose disk_encryption, but LIS "
+               "v0.1 has no way to say which container takes which key "
+               "(storage.encryption[].key names a keyfile or a passphrase, not a "
+               "keys[] id — SPEC §17.2 lists the cross-reference but the schema "
+               "does not carry it), so the first one would silently key every "
+               "container")
+    elif material:
+        warn(f"keys['{material[0]}'] is used for every storage.encryption[] "
+             "container: SPEC §17.2's keys[].id cross-reference is not expressible "
+             "in schema v0.1, so the binding is by purpose, not by id")
 
 
 def render_security(doc: dict) -> list[str]:
@@ -2181,7 +2486,16 @@ def render_configuration(doc: dict) -> str:
         out.append(f"  nix.settings.substituters = [ {nix_str(mirror_url)} ];")
     proxy = doc.get("proxy", {}) or {}
     if proxy.get("http"):
+        # `default` rather than `httpProxy`: config/networking.nix:88-133 makes
+        # httpProxy, httpsProxy, ftpProxy, rsyncProxy and allProxy all fall back
+        # to it, so one LIS proxy.http covers the protocols the document did not
+        # mention instead of leaving them direct.
         out.append(f"  networking.proxy.default = {nix_str(proxy['http'])};")
+    if proxy.get("https"):
+        # Explicit wins: networking.proxy.httpsProxy defaults to proxy.default
+        # (config/networking.nix:98-101) and is what fills https_proxy when set
+        # (config/networking.nix:245-247).
+        out.append(f"  networking.proxy.httpsProxy = {nix_str(proxy['https'])};")
     if proxy.get("no_proxy"):
         out.append(f"  networking.proxy.noProxy = {nix_str(','.join(proxy['no_proxy']))};")
     out.append("")
@@ -2204,23 +2518,19 @@ def render_configuration(doc: dict) -> str:
 
     out += render_script_hooks(doc, file_cmds)
 
-    # Keys matrix
-    if doc.get("keys"):
-        warn("keys[] enrollment runs from the first-boot unit via "
-             "systemd-cryptenroll; the generated configuration assumes the "
-             "slot exists on the next boot")
+    check_keys(doc)
     if (storage.get("snapshots", {}) or {}).get("enabled"):
         # SPEC §20.9: snapshots need a filesystem that can take them, and the
         # NixOS module can only take them on one — services.snapper.configs.
         # <n>.FSTYPE is types.enum [ "btrfs" ] (services/misc/snapper.nix:57-62).
         # Emitting a snapper config over ext4 or zfs installed a timer that
         # fails on every tick and a system with no snapshots at all.
-        root_fs = next((fs for mp, _, fs, _ in mount_table(doc)[0] if mp == "/"),
-                       None)
-        if root_fs != "btrfs":
-            refuse(f"storage.snapshots.enabled with a {root_fs or 'non-btrfs'} "
-                   "root filesystem: the NixOS snapper module accepts only "
-                   "btrfs (services.snapper.configs.<name>.FSTYPE is "
+        if not snapshots_wanted(doc):
+            root_fs = next((fs for mp, _, fs, _ in mount_table(doc)[0] if mp == "/"),
+                           None)
+            refuse("storage.snapshots.enabled on a root filesystem of type "
+                   f"{root_fs or 'unknown'}: the NixOS snapper module accepts "
+                   "only btrfs (services.snapper.configs.<name>.FSTYPE is "
                    "types.enum [\"btrfs\"]), so no snapshot would ever be taken")
         else:
             out.append("  services.snapper.configs.root = { SUBVOLUME = \"/\"; "
@@ -2265,7 +2575,8 @@ def main() -> int:
                             "loader", "timeout", "os_prober", "password_hash",
                             "console", "secure_boot", "uki", "initramfs"})
     check_mirror(doc, {"url"})
-    check_section_fields(doc, "desktop", {"audio", "autologin", "bluetooth", "printing"})
+    check_section_fields(doc, "desktop", {"audio", "autologin", "bluetooth",
+                                          "display_manager", "printing"})
     check_section_fields(doc, "installer", set())
     check_keymap(doc, {"console", "font", "layout", "variant"})
 
@@ -2298,7 +2609,14 @@ def main() -> int:
     # ISO, post_install runs inside the target during activation — so the flag
     # is answered per stage by check_stage_chroot() instead.
     check_script_fields(doc, honors_chroot=True)
-    check_unread(doc, ignore=APPLY_TIME_PATHS
+    # registration is refused whole (SPEC §15: NixOS has no subscription
+    # service to attach to), so its leaves have been decided about — reporting
+    # them a second time as "never read" says the applier overlooked something
+    # it in fact turned down, and trains the reader to skim the channel the
+    # real drops arrive on.
+    decided = {f"registration.{leaf}" for leaf in
+               _leaf_paths(raw.get("registration") or {})}
+    check_unread(doc, ignore=APPLY_TIME_PATHS | decided
                  | {f"scripts.{stage}[].content" for stage in HOST_STAGES})
 
     if status := enforce(args.strict):
@@ -2346,6 +2664,7 @@ def main() -> int:
                 "'nixos-install --no-root-passwd --root /mnt'", shell=True)
         if res.returncode == 0:
             write_birth_certificate(doc)
+            write_wireless_secrets(doc)
             run_stage("on_success")
             run_stage("pre_reboot")
         else:
