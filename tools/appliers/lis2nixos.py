@@ -774,6 +774,15 @@ def render_zpools(topology: Topology, doc: dict, out: list) -> None:
     out.append("    };")
 
 
+def _shape(value) -> str:
+    """The JSON type name of a value, for a refusal that names a wrong shape.
+
+    The tracker wraps containers, so the bare class name would report
+    `TrackedList` at a reader who wrote a JSON array.
+    """
+    return type(value).__name__.replace("Tracked", "").lower()
+
+
 def adopted(part: dict) -> bool:
     """Whether a partition entry asks to adopt rather than to create.
 
@@ -792,7 +801,17 @@ def refuse_adoption(part: dict, where: str) -> None:
     guard, and `resize` has no implementation anywhere in disko.
     """
     existing = part.get("existing") or {}
-    match = existing.get("match") or {}
+    if not isinstance(existing, dict):
+        # schema.json types `existing` as an object; a scalar or a list is a
+        # schema error, and reading it as one would crash here rather than
+        # name the partition the document wanted kept.
+        refuse(f"{where}: storage.partitions[].existing must be an object, "
+               f"not {_shape(existing)} — this translator adopts "
+               "nothing either way, but a malformed adoption cannot even be "
+               "reported against its declared leaves (schema.md §6.2)")
+        return
+    match = existing.get("match")
+    match = match if isinstance(match, dict) else {}
     leaves = [f"match.{key}" for key in sorted(match)]
     leaves += [key for key in ("format", "resize") if key in existing]
     refuse(f"{where}: storage.partitions[].existing "
@@ -4855,6 +4874,14 @@ def check_installer(doc: dict) -> tuple[str, str]:
     a second time — two warnings for one drop, and no behavior either way.
     """
     installer = doc.get("installer") or {}
+    if not isinstance(installer, dict):
+        # schema.json types the section as an object. Falling through with a
+        # list or a string reached .get() on it and ended the run in a
+        # traceback, which says nothing about what the document asked for.
+        refuse(f"installer must be an object, not {_shape(installer)} "
+               "— none of the SPEC §16 keys can be read from it, so neither "
+               "on_finish nor the consent gate has a value to obey")
+        return "stay", "fail"
     check_section_fields(doc, "installer", INSTALLER_FIELDS)
 
     on_finish = installer.get("on_finish") or "stay"
@@ -4881,7 +4908,11 @@ def check_installer(doc: dict) -> tuple[str, str]:
         on_error = "fail"
 
     if interactive := installer.get("interactive"):
-        sections = ", ".join(sorted({str(name) for name in interactive}))
+        # A bare string is iterable, so listing `name for name in interactive`
+        # spelled a section name out one character at a time.
+        sections = (", ".join(sorted({str(name) for name in interactive}))
+                    if isinstance(interactive, (list, tuple, set))
+                    else repr(interactive))
         refuse(f"installer.interactive [{sections}]: this applier is a "
                "non-interactive translator — it has no frontend and asks no "
                "questions, so it cannot re-ask for a section. SPEC §16 lets a "
@@ -4889,7 +4920,11 @@ def check_installer(doc: dict) -> tuple[str, str]:
                "would be applied from the document without confirmation")
 
     if answers := installer.get("answers"):
-        ids = ", ".join(sorted(dict.keys(answers)))
+        # A non-object `answers` is a schema error; naming its type is still a
+        # better answer than a traceback, and the refusal below is the same
+        # either way because no id can match a question this applier never asks.
+        ids = (", ".join(sorted(dict.keys(answers)))
+               if isinstance(answers, dict) else _shape(answers))
         refuse(f"installer.answers ({ids}): this applier defines no questions, "
                "so no answer id can match one. SPEC §16 keys answers by "
                "applier-defined question id; every id here is unanswerable by "

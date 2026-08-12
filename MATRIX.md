@@ -2107,7 +2107,7 @@ succeeds. **Warnings never fail a run, not even under `--strict`.**
 | `system.domain` | Ubuntu, Fedora, SUSE, Arch, Alpine, Void | Honoured on Debian, NixOS and Gentoo. |
 | `system.kdump` | six; Gentoo refuses it | Native mechanisms exist on Fedora and SUSE and are unused. **NixOS now honours it** via `boot.crashDump.enable` — the only applier that does. |
 | `software.apps[].snap` / `.appimage` / `.preference[]` | all nine | Source arbitration is hardcoded native-first. Silent on Gentoo (Tier 1 #19). |
-| `installer.on_error` / `.answers` / `.unattended` | eight; **NixOS honours all three** | **`unattended` is never enforced on the other eight — do not treat it as a consent gate there.** NixOS gates disko on delivery.md §5's two keys and refuses `on_error: prompt` and every `answers` id. |
+| `installer.on_error` / `.answers` / `.unattended` | eight; **NixOS answers all three** | **`unattended` is never enforced on the other eight — do not treat it as a consent gate there.** NixOS gates disko on delivery.md §5's two keys (`unattended`, ✅), and refuses rather than drops for `on_error: prompt` (◐) and every `answers` id (⛔). |
 | `installer.on_finish` | all nine except Ubuntu/Debian/Fedora/SUSE/NixOS | **Void powers off unconditionally**, whatever the field says. NixOS now carries the field out after a zero-exit `nixos-install`. |
 | `users[].scripts.post[].*` | all but Gentoo and NixOS | The user-level `post` phase is implemented only by those two. Use `post_install` elsewhere. |
 | `scripts.*[].interpreter` / `.on_failure` | all nine, all phases | Body runs under the stage's shell; failure policy ignored. |
@@ -2138,7 +2138,7 @@ higher ❌ means more of it is quietly discarded.
 
 | Distro | ✅ YES | ◐ PARTIAL | ⚙ POST | ⛔ REFUSE | ❌ DROPS | – N/A | ? UNK | **✅+⚙ arrives** | **❌ share** |
 |---|---|---|---|---|---|---|---|---|---|
-| **NixOS** | 130 | 58 | 16 | 24 | 0 | 5 | 0 | **146** | 0% |
+| **NixOS** | 130 | 58 | 16 | 23 | 0 | 6 | 0 | **146** | 0% |
 | **Ubuntu** | 52 | 41 | 33 | 29 | 74 | 4 | 0 | **85** | 32% |
 | **Debian** | 41 | 46 | 34 | 40 | 68 | 4 | 0 | **75** | 29% |
 | **Fedora** | 56 | 40 | 16 | 30 | 86 | 4 | 1 | **72** | 37% |
@@ -2151,8 +2151,8 @@ higher ❌ means more of it is quietly discarded.
 Each row sums to 233. Sorted by ✅+⚙ — the count of leaves whose intent reaches the installed
 machine by any route.
 
-- **NixOS leads on every measure in this table** (128 ✅, 144 arriving, 3% dropped — all three the
-  best of the nine), which is what the applier's shape predicts: almost anything a LIS document can
+- **NixOS leads on every measure in this table** (130 ✅, 146 arriving, nothing dropped — all three
+  the best of the nine), which is what the applier's shape predicts: almost anything a LIS document can
   say is expressible as a NixOS option, so most of what used to be `❌` here was never a limit of
   the distro, only a line nobody had written. **No drops remain.** The last six were the five
   `installer.*` leaves and `mirror.country`, and the premise that nothing could arrive there was
@@ -2175,8 +2175,9 @@ machine by any route.
   rather than passed. `builtins.seq (attrNames system.build)` is *not* sufficient — it forces
   neither assertions nor `environment.systemPackages`, and that is exactly how the `1password-cli`
   case survived review. `hardware.nix` is covered because `configuration.nix` imports it.
-  `disko.nix` is not, and does not need to be: `disko --mode disko` evaluates the expression to
-  build its script *before* running any of it, so a type error there fails with the table intact.
+  `disko.nix` is not, and does not need to be: `disko --mode destroy,format,mount` evaluates the
+  expression to build its script *before* running any of it, so a type error there fails with the
+  table intact.
   What the pre-flight cannot see is anything that fails at **build** rather than evaluation — a
   kernel module name that does not exist, a package that fails to compile — which stays a
   post-wipe failure and has no static check short of a full build.
