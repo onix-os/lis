@@ -2116,7 +2116,12 @@ machine by any route.
   here, with the partition table intact; a host with no `<nixpkgs>` is reported as unverified
   rather than passed. `builtins.seq (attrNames system.build)` is *not* sufficient — it forces
   neither assertions nor `environment.systemPackages`, and that is exactly how the `1password-cli`
-  case survived review.
+  case survived review. `hardware.nix` is covered because `configuration.nix` imports it.
+  `disko.nix` is not, and does not need to be: `disko --mode disko` evaluates the expression to
+  build its script *before* running any of it, so a type error there fails with the table intact.
+  What the pre-flight cannot see is anything that fails at **build** rather than evaluation — a
+  kernel module name that does not exist, a package that fails to compile — which stays a
+  post-wipe failure and has no static check short of a full build.
 - **Ubuntu covers the most ground of the non-NixOS columns** (85 arriving), but a third of that is `⚙` emulation
   and it carries the largest cluster of *silent* Tier-1 drops (root users, LSM-vs-nvidia,
   keyfile unlock).
