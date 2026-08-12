@@ -840,10 +840,16 @@ def render_disko(doc: dict) -> str:
     names = partition_names(storage)
 
     if not storage.get("wipe", False):
-        # --apply runs `disko --mode destroy,format,mount`; disko recreates the
-        # table unconditionally, so honouring wipe: false is not possible here.
-        refuse("storage.wipe: false — disko destroys and recreates the "
-               "declared disks; it cannot preserve an existing layout")
+        # The mode is this translator's, not disko's only one — see
+        # refuse_adoption() for what a preserving install would additionally
+        # have to resolve before the mode alone would be enough.
+        refuse("storage.wipe: false — this translator runs disko in "
+               "destroy,format,mount, whose destroy stage clears the "
+               "partition table of every declared disk before anything is "
+               "created. §6.1 also asks the applier to fail on data not "
+               "accounted for by an `existing` adoption, and nothing here "
+               "reads the disk to find that data, so a preserving install "
+               "cannot be honoured either way")
 
     firmware = ((doc.get("target", {}) or {}).get("firmware") or "auto").lower()
     # A 1 MiB BIOS boot partition is only meaningful when GRUB is installed to
