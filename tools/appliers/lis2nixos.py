@@ -772,6 +772,10 @@ def render_disko(doc: dict) -> str:
                        "destroy,format,mount, which recreates the whole table, "
                        "so an adopted partition would be destroyed rather than "
                        "kept (schema.md §6.2)")
+                # The refusal is the answer for every leaf under it; without
+                # this the birth certificate also reports each one as an
+                # unnoticed field, which reads as a second, softer verdict.
+                consume(part["existing"])
                 continue
             disk_id, name = names[id(part)]
             out.append(f"            {nix_str(name)} = {{")
