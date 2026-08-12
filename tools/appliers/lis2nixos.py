@@ -28,7 +28,7 @@ import sys
 
 from lis_common import (track, check_unread, luks_key_path, check_raid_consumers, registration_commands, enrollment_commands, resolve_disk_paths, check_snapshots, match_selectors, consume, password_field, secret_ref, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
                         check_encryption_emitted, resolve_mountpoints,
-                        check_unhandled, check_section_fields, check_mirror, check_kernel_variant, check_user_sudo,
+                        check_unhandled, check_extensions, check_section_fields, check_mirror, check_kernel_variant, check_user_sudo,
                         ROLE_FS, role_fs,
                         check_boot_extras, check_keymap, check_version, enforce,
                         check_script_fields,
@@ -4782,6 +4782,9 @@ def main() -> int:
     check_version(doc, args.file)
     check_firmware(doc)
     check_unhandled(doc, ALL_SECTIONS)
+    # This applier translates the core document only: there is no `x-nixos`
+    # key it acts on, so the whole namespace is reported once and ignored.
+    check_extensions(doc, "x-nixos", set())
     # Every key the schema allows under boot is answered in render_boot, either
     # with an option or with a refusal carrying its reason. Leaving them out of
     # this set produced a warning saying applied fields were not applied, which
