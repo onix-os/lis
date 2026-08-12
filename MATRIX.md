@@ -1835,7 +1835,7 @@ URL with embedded credentials becomes a plaintext secret on the installed disk. 
 | Field | Ubuntu | Debian | Fedora | SUSE | Arch | NixOS | Alpine | Void | Gentoo |
 |---|---|---|---|---|---|---|---|---|---|
 | `mirror.url` | ✅¹ | ✅ | ✅² | ⚙³ | ⛔⁴ | ◐⁵ | ✅⁶ | ✅⁹ | ◐¹⁰ |
-| `mirror.country` | ❌⁷ | ✅ | ❌⁸ | ❌ | ⛔⁴ | ❌ | ❌ | ❌¹¹ | ❌¹¹ |
+| `mirror.country` | ❌⁷ | ✅ | ❌⁸ | ❌ | ⛔⁴ | ⛔¹² | ❌ | ❌¹¹ | ❌¹¹ |
 
 ¹ `apt.primary`, legacy form.
 ² `url --url=` — the actual Anaconda install source.
@@ -1854,6 +1854,13 @@ tarball and the binary host stay pinned to `distfiles.gentoo.org`
 (`lis2gentoo.py:80-82`, `:237-241`), so a document that names a mirror still fetches the bulk of
 the install from upstream.
 ¹¹ Warned on both: portage has no country-based mirror selection, and VAI's knob is a single URL.
+¹² NixOS refuses. It was a warning, which is the shape §2.3 reserves for a field marked
+`preference` — and `schema.json`'s `mirror` object has only `url` and `country`, with
+`additionalProperties: false`, so no document can mark it. `nix.settings.substituters` is one
+global endpoint (`nixos/modules/config/nix.nix:443` defaults it to the single
+`[ "https://cache.nixos.org/" ]`), a geo-routed CDN with no country dimension to select on, so
+continuing on cache.nixos.org was the silent substitution §2.3 forbids. `mirror.url` remains the
+way to pin one.
 
 ## 2.17 registration
 
@@ -1885,11 +1892,11 @@ arrive on.
 
 | Field | Ubuntu | Debian | Fedora | SUSE | Arch | NixOS | Alpine | Void | Gentoo |
 |---|---|---|---|---|---|---|---|---|---|
-| `installer.on_finish` | ◐¹ | ◐² | ◐³ | ◐⁴ | ❌⁵ | ❌⁶ | ❌⁶ | ❌¹⁷ | ❌¹⁷ |
-| `installer.on_error` | ❌⁷ | ❌⁷ | ❌⁸ | ❌⁷ | ❌⁷ | ❌⁷ | ❌⁷ | ❌⁷ | ❌⁷ |
-| `installer.interactive[]` | ✅⁹ | ❌¹⁰ | ❌¹¹ | ❌¹¹ | ❌¹² | ❌ | ❌ | ❌¹¹ | ❌¹¹ |
-| `installer.answers.<key>` | ❌¹³ | ❌¹³ | ❌¹³ | ❌¹⁴ | ❌¹³ | ❌¹³ | ❌¹⁵ | ❌¹³ | ❌¹³ |
-| `installer.unattended` | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ |
+| `installer.on_finish` | ◐¹ | ◐² | ◐³ | ◐⁴ | ❌⁵ | ✅¹⁸ | ❌⁶ | ❌¹⁷ | ❌¹⁷ |
+| `installer.on_error` | ❌⁷ | ❌⁷ | ❌⁸ | ❌⁷ | ❌⁷ | ◐¹⁹ | ❌⁷ | ❌⁷ | ❌⁷ |
+| `installer.interactive[]` | ✅⁹ | ❌¹⁰ | ❌¹¹ | ❌¹¹ | ❌¹² | ⛔²⁰ | ❌ | ❌¹¹ | ❌¹¹ |
+| `installer.answers.<key>` | ❌¹³ | ❌¹³ | ❌¹³ | ❌¹⁴ | ❌¹³ | ⛔²¹ | ❌¹⁵ | ❌¹³ | ❌¹³ |
+| `installer.unattended` | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ✅²² | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ |
 
 ¹ `reboot`/`poweroff` honoured; `stay` refuses; **absent means subiquity reboots** — the opposite
 of `schema.md` §16's documented default of `stay`.
@@ -1909,13 +1916,36 @@ names, so a typo silently disables the interactivity you asked for.
 ¹³ No raw answer injection.
 ¹⁴ AutoYaST `<ask-list>` is never emitted.
 ¹⁵ Not merged into the answerfile.
-¹⁶ **No applier consults the consent flag**, Void and Gentoo included. `installer.unattended` is
-the document half of the two-key destructive-run consent described in the spec; the second key is
-not implemented anywhere. Do not rely on it to gate anything.
+¹⁶ **No applier consults the consent flag except NixOS.** `installer.unattended` is the document
+half of the two-key destructive-run consent described in the spec; on the other eight the second
+key is not implemented either, so do not rely on it to gate anything there.
 ¹⁷ Neither new applier reads `on_finish`. **Void always powers the machine off** — `end_action=func`
 neither unmounts nor powers off on its own, so `end_function` ends with `poweroff -f`
 (`lis2void.py:834-836`), and a document asking for `reboot` or `stay` gets a power-off regardless.
 Gentoo neither reboots nor powers off: `lis-prepare.sh` unmounts and returns.
+¹⁸ NixOS: `finish_run()` (`lis2nixos.py`) carries the field out after `nixos-install` returns
+zero — `stay` (§16's default, and what the applier already did) leaves the live environment up;
+`reboot`/`poweroff` unmount `/mnt`, `swapoff -a` and then `systemctl reboot`/`poweroff`, falling
+back to `reboot -f`/`poweroff -f` where the live shell is not talking to a running systemd.
+Verified in the e2e run: the console prints `installer.on_finish 'stay': leaving the live
+environment up` before `LIS_APPLY_STATUS=0`.
+¹⁹ NixOS: `fail` (§16's default) is honoured exactly — the `scripts.on_error` hooks run and the
+non-zero status propagates out of `main()`. `prompt` **refuses**: the applier is driven from a
+serial console, an ssh session or a PXE boot, none of which guarantees an operator, and a prompt
+there parks a half-installed machine instead of failing it.
+²⁰ NixOS refuses, naming the sections asked for. The applier is a non-interactive translator with
+no frontend and no questions, so §16's "the frontend MAY re-ask" has nothing to attach to, and
+applying the listed sections straight from the document is precisely the unasked-for behaviour.
+²¹ NixOS refuses, naming the ids. The applier defines no questions, so every `answers` key is
+unanswerable by construction rather than merely unused.
+²² NixOS enforces delivery.md §5 in full. `check_consent()` requires the document half
+(`installer.unattended: true` **and** `storage.wipe: true`) and the channel half (an `unattended`
+marker at the seed root, or `lis.unattended=1` on the kernel command line) before disko runs;
+missing either, the run stops at a confirmation step — `--confirm-destroy`, the operator standing
+in for the absent key — and refuses without it. The check sits **outside** `enforce()`, so
+`--lenient` cannot wave a non-consented wipe through. The same commit moved the disko call off
+the legacy `--mode disko` alias, whose branch of the disko CLI (`disko:180-187`) is the one path
+that never sees `--yes-wipe-all-disks`, onto `--mode destroy,format,mount --yes-wipe-all-disks`.
 
 ## 2.19 x-* extensions
 
@@ -2069,8 +2099,8 @@ succeeds. **Warnings never fail a run, not even under `--strict`.**
 | `system.domain` | Ubuntu, Fedora, SUSE, Arch, Alpine, Void | Honoured on Debian, NixOS and Gentoo. |
 | `system.kdump` | six; Gentoo refuses it | Native mechanisms exist on Fedora and SUSE and are unused. **NixOS now honours it** via `boot.crashDump.enable` — the only applier that does. |
 | `software.apps[].snap` / `.appimage` / `.preference[]` | all nine | Source arbitration is hardcoded native-first. Silent on Gentoo (Tier 1 #19). |
-| `installer.on_error` / `.answers` / `.unattended` | all nine | **`unattended` is never enforced — do not treat it as a consent gate.** |
-| `installer.on_finish` | all nine except Ubuntu/Debian/Fedora/SUSE | **Void powers off unconditionally**, whatever the field says. |
+| `installer.on_error` / `.answers` / `.unattended` | eight; **NixOS honours all three** | **`unattended` is never enforced on the other eight — do not treat it as a consent gate there.** NixOS gates disko on delivery.md §5's two keys and refuses `on_error: prompt` and every `answers` id. |
+| `installer.on_finish` | all nine except Ubuntu/Debian/Fedora/SUSE/NixOS | **Void powers off unconditionally**, whatever the field says. NixOS now carries the field out after a zero-exit `nixos-install`. |
 | `users[].scripts.post[].*` | all but Gentoo and NixOS | The user-level `post` phase is implemented only by those two. Use `post_install` elsewhere. |
 | `scripts.*[].interpreter` / `.on_failure` | all nine, all phases | Body runs under the stage's shell; failure policy ignored. |
 | `scripts.on_error[].*` | refused on eight; **Gentoo implements it** as a `bash` EXIT trap | |
@@ -2100,7 +2130,7 @@ higher ❌ means more of it is quietly discarded.
 
 | Distro | ✅ YES | ◐ PARTIAL | ⚙ POST | ⛔ REFUSE | ❌ DROPS | – N/A | ? UNK | **✅+⚙ arrives** | **❌ share** |
 |---|---|---|---|---|---|---|---|---|---|
-| **NixOS** | 128 | 57 | 16 | 21 | 6 | 5 | 0 | **144** | 3% |
+| **NixOS** | 130 | 58 | 16 | 24 | 0 | 5 | 0 | **146** | 0% |
 | **Ubuntu** | 52 | 41 | 33 | 29 | 74 | 4 | 0 | **85** | 32% |
 | **Debian** | 41 | 46 | 34 | 40 | 68 | 4 | 0 | **75** | 29% |
 | **Fedora** | 56 | 40 | 16 | 30 | 86 | 4 | 1 | **72** | 37% |
@@ -2116,12 +2146,13 @@ machine by any route.
 - **NixOS leads on every measure in this table** (128 ✅, 144 arriving, 3% dropped — all three the
   best of the nine), which is what the applier's shape predicts: almost anything a LIS document can
   say is expressible as a NixOS option, so most of what used to be `❌` here was never a limit of
-  the distro, only a line nobody had written. **Only 6 drops remain**, and they are the two places
-  where nothing *can* arrive: `installer.*` (5 leaves — the applier is the installer, so there is no
-  separate installer to answer to; `on_finish` in particular means `--apply` does not reboot the
-  machine itself) and `mirror.country`, where NixOS has a single geo-routed substituter and no
-  per-country mirror to pick. Everything else that cannot be honoured now **refuses** rather than
-  dropping: the whole `existing.*` adoption subtree, `snap[]`, hardware-token `match`/`pin_required`,
+  the distro, only a line nobody had written. **No drops remain.** The last six were the five
+  `installer.*` leaves and `mirror.country`, and the premise that nothing could arrive there was
+  wrong on both counts: the applier *is* the run, so `on_finish`, `on_error` and `unattended` are
+  its own behaviour to change — it now reboots or powers off as asked, and gates the destructive
+  step on delivery.md §5's two consent keys — while `interactive[]`, `answers` and `mirror.country`
+  are genuinely unhonourable and therefore refuse. Everything else that cannot be honoured
+  **refuses** rather than dropping: the whole `existing.*` adoption subtree, `snap[]`, hardware-token `match`/`pin_required`,
   `registration.*`, and `secure_boot: true` / `uki: true` / a non-`auto` initramfs generator.
 - **The wipe-then-fail class is the thing to keep watching**, and it is now closed structurally
   rather than case by case. This applier is the one where a bad option name is an *evaluation*
