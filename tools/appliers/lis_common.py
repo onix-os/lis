@@ -22,6 +22,7 @@ import argparse
 import base64
 import json
 import pathlib
+import re
 import shlex
 import sys
 
@@ -164,14 +165,19 @@ ALL_SECTIONS = frozenset({
 
 
 def is_extension(key: str) -> bool:
-    """True for an `x-` namespace key.
+    """True for an `x-` namespace key, spelled as the schema blesses it.
 
     SPEC §2.2: keys beginning with `x-` "MUST be ignored by appliers that do not
     recognize them"; §18 makes them additive and forbids them changing the
     meaning of core sections. They are therefore neither unhandled intent to
     refuse nor unread intent to warn about.
+
+    The pattern is `schema.json`'s own `^x-[a-z0-9-]+$`, under an
+    `additionalProperties: false` that makes every other spelling a schema
+    error. Matching loosely here would silently swallow `x-Foo`, which no
+    applier and no validator would then ever report.
     """
-    return isinstance(key, str) and key.startswith("x-")
+    return isinstance(key, str) and re.fullmatch(r"x-[a-z0-9-]+", key) is not None
 
 
 def check_unhandled(doc: dict, handled: set[str] | frozenset) -> None:
