@@ -1482,6 +1482,14 @@ def dotfiles_commands(doc: dict) -> list[str]:
         dotfiles = user.get("dotfiles") or {}
         repo = dotfiles.get("repo")
         if not repo:
+            if dotfiles:
+                # schema.json makes `repo` required under dotfiles. Skipping the
+                # entry was silent, and the tracker could not catch it either:
+                # hook_path() reads `method` for the PATH it needs, so the leaf
+                # counted as read while nothing acted on it.
+                refuse(f"users['{user['name']}'].dotfiles declares no repo — "
+                       "there is nothing to clone, and `repo` is required by "
+                       "the schema")
             continue
         name = user["name"]
         method = dotfiles.get("method") or "raw"
