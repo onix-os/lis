@@ -459,7 +459,7 @@ class Topology:
                 continue
             if handle and self.owner_of(handle) is not None:
                 continue    # an aggregate or a pool owns it, directly or through luks
-            if part.get("existing"):
+            if adopted(part):
                 continue    # refused where the layout is rendered
             seen.append((spec_where(part), part, self.mountpoint_of(part)))
         for group in self.lvm:
@@ -774,6 +774,59 @@ def render_zpools(topology: Topology, doc: dict, out: list) -> None:
     out.append("    };")
 
 
+def adopted(part: dict) -> bool:
+    """Whether a partition entry asks to adopt rather than to create.
+
+    Membership, not truthiness: `"existing": {}` is a malformed adoption, and
+    reading it as "creates normally" turned the request to keep a partition
+    into an order to format it, with no diagnostic at all.
+    """
+    return "existing" in part
+
+
+def refuse_adoption(part: dict, where: str) -> None:
+    """Turn down one `existing` block, per declared sub-field (schema.md §6.2).
+
+    Every leaf gets its own reason because they fail for different reasons:
+    the match selectors have no disko equivalent, `format` fights disko's
+    guard, and `resize` has no implementation anywhere in disko.
+    """
+    existing = part.get("existing") or {}
+    match = existing.get("match") or {}
+    leaves = [f"match.{key}" for key in sorted(match)]
+    leaves += [key for key in ("format", "resize") if key in existing]
+    refuse(f"{where}: storage.partitions[].existing "
+           f"({', '.join(leaves) or 'empty'}) — this translator adopts "
+           "nothing. It renders the whole table and runs disko in "
+           "destroy,format,mount, which clears the disk before anything "
+           "could be kept. That mode is this translator's choice, not a "
+           "disko limit — but disko addresses a partition by GPT index "
+           "alone (lib/types/gpt.nix _create: --new=<index>:<start>:<end>, "
+           "--change-name=<index>:<label>), so existing.match by partition "
+           "number, label, uuid or fs first needs an apply-time probe of "
+           "the live disk, and this translator performs none (schema.md "
+           "§6.2, §20.8: a match MUST resolve to exactly one partition)")
+    if existing.get("format"):
+        refuse(f"{where}: storage.partitions[].existing.format: true — disko "
+               "guards every mkfs with `if ! (blkid <dev> | grep -q "
+               "'TYPE=')` (lib/types/filesystem.nix _create), so it declines "
+               "to re-make a filesystem that is already there; re-formatting "
+               "an adopted partition needs the signature wiped from a "
+               "preCreateHook first (lib/default.nix:438)")
+    if existing.get("resize"):
+        refuse(f"{where}: storage.partitions[].existing.resize "
+               f"{existing['resize']!r} — disko cannot resize: the whole of "
+               "its lib/ mentions no resize2fs, ntfsresize or xfs_growfs, "
+               "and nothing in this translator shells one out from a "
+               "preCreateHook, so the neighbouring partitions would be laid "
+               "over data still occupying that space (schema.md §6.2: an "
+               "applier that cannot resize the filesystem MUST fail)")
+    # The refusals are the answer for every leaf under `existing`; without
+    # this the birth certificate also reports each one as an unnoticed field,
+    # which reads as a second, softer verdict.
+    consume(part["existing"])
+
+
 def render_disko(doc: dict) -> str:
     storage = doc.get("storage")
     if not storage:
@@ -830,27 +883,15 @@ def render_disko(doc: dict) -> str:
                     "            };"]
         for part in [p for p in partitions if p.get("disk") == disk["id"]]:
             where = f"partition {part.get('id') or part.get('role') or '?'!r}"
-            if part.get("existing"):
+            if adopted(part):
                 # Was a warn() and a `continue`, which is the silent drop §2.3
                 # forbids twice over: the adopted partition disappeared from
                 # disko.nix while hardware.nix still mounted a device nobody
                 # created, and because the per-disk index was counted after the
-                # skip the *remaining* partitions were renamed too. Nothing in
-                # this translator resizes or adopts, so the honest answer is to
-                # say no. disko can express it — explicit `start`/`end`/`uuid`
-                # on a gpt partition (lib/types/gpt.nix:126,139,185,190),
-                # `--mode format,mount` to leave the table alone, and
-                # preCreateHook for the resize — so this is a gap to close, not
-                # a hard limit.
-                refuse(f"{where}: storage.partitions[].existing (adoption) is not "
-                       "implemented by this translator — it runs disko with "
-                       "destroy,format,mount, which recreates the whole table, "
-                       "so an adopted partition would be destroyed rather than "
-                       "kept (schema.md §6.2)")
-                # The refusal is the answer for every leaf under it; without
-                # this the birth certificate also reports each one as an
-                # unnoticed field, which reads as a second, softer verdict.
-                consume(part["existing"])
+                # skip the *remaining* partitions were renamed too. Closing the
+                # gap is a job for disko's format,mount mode plus an apply-time
+                # probe; until then the honest answer is to say no.
+                refuse_adoption(part, where)
                 continue
             disk_id, name = names[id(part)]
             out.append(f"            {nix_str(name)} = {{")
@@ -1112,7 +1153,7 @@ def mount_table(doc: dict) -> tuple[list[tuple[str, str, str, list[str]]], list[
             mounts.append((mountpoint, device, fs, options))
 
     for part in storage.get("partitions", []) or []:
-        if part.get("existing"):
+        if adopted(part):
             continue   # refused in render_disko; nothing here would exist to mount
         disk_id, name = names[id(part)]
         handle = part.get("id") or name
@@ -1613,6 +1654,29 @@ def snapshots_wanted(doc: dict) -> bool:
     if not ((doc.get("storage", {}) or {}).get("snapshots") or {}).get("enabled"):
         return False
     return any(mp == "/" and fs == "btrfs" for mp, _, fs, _ in mount_table(doc)[0])
+
+
+def check_boot_menu(doc: dict) -> None:
+    """Turn down storage.snapshots.boot_menu with the NixOS reason for it.
+
+    The shared helper states the outcome for nine distributions at once, so
+    the reader cannot tell whether the menu is missing because this applier
+    never got around to it or because the channel has nothing to build it
+    from. On NixOS it is the second.
+    """
+    if not ((doc.get("storage", {}) or {}).get("snapshots") or {}).get("boot_menu"):
+        return
+    refuse("storage.snapshots.boot_menu: nixos-24.11 has no grub-btrfs. Not "
+           "as a package — the channel's whole btrfs attribute set is "
+           "btrfs-assistant, btrfs-auto-snapshot, btrfs-heatmap, btrfs-progs, "
+           "btrfs-snap and ntfs2btrfs — and not as a module: no file under "
+           "nixos/modules names it, so nothing would regenerate the menu when "
+           "a snapshot is taken. Both loaders this applier can install "
+           "enumerate system *generations* instead, and their one escape "
+           "hatch (boot.loader.grub.extraEntries, "
+           "boot.loader.systemd-boot.extraEntries) is a fixed string written "
+           "at nixos-rebuild time, which no later snapshot can appear in "
+           "(schema.md §6.6)")
 
 
 def snapshot_commands(doc: dict) -> list[str]:
@@ -4592,22 +4656,24 @@ def render_configuration(doc: dict) -> str:
     if mirror_url := mirror.get("url"):
         out.append(f"  nix.settings.substituters = [ {nix_str(mirror_url)} ];")
     if country := mirror.get("country"):
-        # Read and answered instead of read by nobody. NixOS has no mirror list
-        # to pick a nearby entry from: nix.settings.substituters defaults to
-        # the single https://cache.nixos.org, which is one geo-routed CDN
-        # origin rather than a country's mirror. SPEC §14's "pick nearby
-        # mirrors" therefore has no selection to make here — the substituter
-        # already resolves to the nearest edge — and mirror.url is the field
-        # that pins a different one.
-        out.append(f"  # mirror.country: {country} — NixOS has one binary "
-                   "cache, cache.nixos.org, served from a geo-routed CDN, so "
-                   "there is no per-country mirror to select. Use mirror.url "
-                   "to pin a different substituter.")
-        warn(f"mirror.country {country!r}: NixOS keeps no mirror list — "
-             "nix.settings.substituters is the single geo-routed "
-             "cache.nixos.org — so no nearby mirror is selected. Set "
-             "mirror.url to pin a substituter explicitly (SPEC §19: recorded "
-             "as a substitution, not a drop)")
+        # A warning here was a silent substitution wearing a label: the
+        # document asked for a nearby mirror, the run continued, and
+        # cache.nixos.org was used anyway. SPEC §2.3 allows that only for a
+        # field marked `preference`, and schema.json's mirror object has no
+        # such key (properties: url, country; additionalProperties: false).
+        out.append(f"  # mirror.country: {country} — refused: NixOS has no "
+                   "per-country mirror to select. Use mirror.url to pin a "
+                   "substituter.")
+        refuse(f"mirror.country {country!r}: NixOS keeps no mirror list to "
+               "pick a nearby entry from — nix.settings.substituters is one "
+               "global endpoint whose 24.11 default is the single "
+               "[ \"https://cache.nixos.org/\" ] "
+               "(nixos/modules/config/nix.nix:443), "
+               "a geo-routed CDN with no country dimension to select on. "
+               "SPEC §14's \"pick nearby mirrors\" has no selection to make "
+               "here, and §2.3 forbids substituting cache.nixos.org for it "
+               "silently. Set mirror.url to pin a substituter explicitly, or "
+               "drop mirror.country")
     proxy = doc.get("proxy", {}) or {}
     if proxy.get("http"):
         # `default` rather than `httpProxy`: config/networking.nix:88-133 makes
@@ -4764,12 +4830,147 @@ def preflight_evaluation(config_file: pathlib.Path) -> int:
     return 1
 
 
+# SPEC §16's five keys. The section is apply-run behavior, not system state, so
+# nothing here reaches configuration.nix: on_finish and on_error steer main()
+# after nixos-install, unattended gates the destructive run, and the two
+# frontend keys are refused because this applier has no frontend.
+INSTALLER_FIELDS = frozenset({"on_finish", "on_error", "unattended",
+                              "interactive", "answers"})
+
+
+def check_installer(doc: dict) -> tuple[str, str]:
+    """Answer every SPEC §16 key and return the (on_finish, on_error) to obey.
+
+    Replaces `check_section_fields(doc, "installer", set())`, which reported
+    the whole section as unapplied and then let check_unread report each leaf
+    a second time — two warnings for one drop, and no behavior either way.
+    """
+    installer = doc.get("installer") or {}
+    check_section_fields(doc, "installer", INSTALLER_FIELDS)
+
+    on_finish = installer.get("on_finish") or "stay"
+    if on_finish not in ("reboot", "poweroff", "stay"):
+        refuse(f"installer.on_finish {on_finish!r} is not one of reboot, "
+               "poweroff or stay (SPEC §16)")
+        on_finish = "stay"
+
+    on_error = installer.get("on_error") or "fail"
+    if on_error == "prompt":
+        # The applier is driven from a serial console by a harness, an
+        # ssh session or a PXE boot; none of them guarantees an operator is
+        # watching. Prompting there stops a half-installed machine forever
+        # instead of failing it, which is worse than the default.
+        refuse("installer.on_error 'prompt': this applier runs unattended "
+               "with no interactive frontend and no guaranteed terminal — "
+               "a prompt on a serial or netboot console would hang the run "
+               "at a half-installed target rather than surface the failure. "
+               "Use the SPEC §16 default 'fail'")
+        on_error = "fail"
+    elif on_error != "fail":
+        refuse(f"installer.on_error {on_error!r} is not one of fail or "
+               "prompt (SPEC §16)")
+        on_error = "fail"
+
+    if interactive := installer.get("interactive"):
+        sections = ", ".join(sorted({str(name) for name in interactive}))
+        refuse(f"installer.interactive [{sections}]: this applier is a "
+               "non-interactive translator — it has no frontend and asks no "
+               "questions, so it cannot re-ask for a section. SPEC §16 lets a "
+               "frontend re-ask; there is none here, and the listed sections "
+               "would be applied from the document without confirmation")
+
+    if answers := installer.get("answers"):
+        ids = ", ".join(sorted(dict.keys(answers)))
+        refuse(f"installer.answers ({ids}): this applier defines no questions, "
+               "so no answer id can match one. SPEC §16 keys answers by "
+               "applier-defined question id; every id here is unanswerable by "
+               "construction, and leaving them unused would hide a document "
+               "that expects a question this applier never asks")
+        # The refusal is the verdict for each id; without this check_unread
+        # reports the same keys again as never looked at.
+        consume(answers)
+
+    # Read here so the field is decided about even on a translate-only run,
+    # where there is no destructive step for check_consent() to gate.
+    if installer.get("unattended") and not doc.get("storage", {}).get("wipe"):
+        warn("installer.unattended: true with no storage.wipe: true — "
+             "delivery.md §5 wants both before a prompt-free destructive run, "
+             "so --apply will still stop at the confirmation step")
+
+    return on_finish, on_error
+
+
+def channel_consent(doc_path: pathlib.Path) -> str | None:
+    """The delivery half of the two-key rule, or None (delivery.md §5).
+
+    Either the empty `unattended` marker at the root of the LIS seed volume
+    (delivery.md §1) or `lis.unattended=1` on the kernel command line, which is
+    the network-delivery form (delivery.md §7).
+    """
+    roots = [doc_path.resolve().parent, *doc_path.resolve().parents,
+             pathlib.Path("/run/lis/seed")]
+    for root in roots:
+        marker = root / "unattended"
+        try:
+            if marker.is_file():
+                return f"the '{marker}' consent marker on the delivery channel"
+        except OSError:
+            continue
+    try:
+        cmdline = pathlib.Path("/proc/cmdline").read_text().split()
+    except OSError:
+        cmdline = []
+    if "lis.unattended=1" in cmdline:
+        return "lis.unattended=1 on the kernel command line"
+    return None
+
+
+def check_consent(doc: dict, doc_path: pathlib.Path, confirmed: bool) -> int:
+    """Refuse a prompt-free destructive run that nobody consented to.
+
+    delivery.md §5: erasing a machine needs both a document key
+    (`installer.unattended: true` with `storage.wipe: true`) and a delivery
+    key. Missing either, the run must stop at a confirmation step — which for
+    a command-line applier is --confirm-destroy, typed by the operator who is
+    standing in for the missing key.
+    """
+    installer = doc.get("installer") or {}
+    storage = doc.get("storage") or {}
+    missing = []
+    if not installer.get("unattended"):
+        missing.append("installer.unattended: true")
+    if not storage.get("wipe"):
+        missing.append("storage.wipe: true")
+    channel = channel_consent(doc_path)
+    if channel is None:
+        missing.append("an 'unattended' marker on the seed volume or "
+                       "lis.unattended=1 on the kernel command line")
+    if not missing:
+        print(f"consent: both keys present — {channel}, and "
+              "installer.unattended with storage.wipe in the document")
+        return 0
+    if confirmed:
+        warn("--confirm-destroy stood in for the two-key consent rule: "
+             + "; ".join(missing) + " (delivery.md §5). The disks named in "
+             "storage are about to be erased on the operator's word alone")
+        return 0
+    refuse("refusing a destructive run without consent (delivery.md §5): "
+           + "; ".join(missing) + " — missing. Supply the missing key, or "
+           "pass --confirm-destroy to stand at the confirmation step in "
+           "person. Nothing has been written to any disk")
+    return 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Translate a LIS document into a plain NixOS configuration.")
     add_common_args(ap)
     ap.add_argument("--apply", "-a", action="store_true",
                     help="partition with disko and run nixos-install on the live system")
+    ap.add_argument("--confirm-destroy", action="store_true",
+                    help="stand in for the two-key consent rule (delivery.md "
+                         "§5) when the document or the delivery channel does "
+                         "not carry its half: the operator confirms the wipe")
     args = ap.parse_args()
 
     raw = load_doc(args.file)
@@ -4795,7 +4996,7 @@ def main() -> int:
     check_mirror(doc, {"url", "country"})
     check_section_fields(doc, "desktop", {"audio", "autologin", "bluetooth",
                                           "display_manager", "printing"})
-    check_section_fields(doc, "installer", set())
+    on_finish, on_error = check_installer(doc)
     check_keymap(doc, {"console", "font", "layout", "variant"})
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -4821,7 +5022,11 @@ def main() -> int:
 
     # Fail closed *before* touching the machine, not after.
     check_raid_consumers(doc)
-    check_snapshots(doc, tools={"snapper"}, boot_menu=False)
+    check_boot_menu(doc)
+    # boot_menu is already answered, by check_boot_menu, with the reason that
+    # is true of NixOS specifically; the shared helper would state the outcome
+    # a second time in wording that fits nine distributions and cites none.
+    check_snapshots(doc, tools={"snapper"}, boot_menu=True)
     # honors_chroot: the shared helper carries one boundary default per applier
     # and this applier straddles the boundary — pre_install runs on the live
     # ISO, post_install runs inside the target during activation — so the flag
@@ -4837,13 +5042,22 @@ def main() -> int:
     # them a second time as "never read" says the applier overlooked something
     # it in fact turned down, and trains the reader to skim the channel the
     # real drops arrive on.
-    decided = {f"registration.{leaf}" for leaf in
-               _leaf_paths(raw.get("registration") or {})}
+    # installer.* is the same case: check_installer() answered every key, so
+    # the leaves are decided rather than overlooked. installer.unattended is
+    # read only under --apply, where it gates the wipe.
+    decided = {f"{section}.{leaf}" for section in ("registration", "installer")
+               for leaf in _leaf_paths(raw.get(section) or {})}
     check_unread(doc, ignore=APPLY_TIME_PATHS | decided
                  | {f"scripts.{stage}[].content" for stage in HOST_STAGES})
 
     if status := enforce(args.strict):
         return status
+
+    # Consent is checked outside enforce() on purpose: --lenient downgrades
+    # refusals to warnings, and a wipe nobody consented to must not be one of
+    # the things it can wave through (delivery.md §5).
+    if args.apply and check_consent(doc, args.file, args.confirm_destroy):
+        return 1
 
     if args.apply:
         import subprocess
@@ -4871,8 +5085,17 @@ def main() -> int:
         for stage in ("pre_install", "pre"):
             run_stage(stage)
         print(f"partitioning disks via disko: {disko_file}")
+        # `--mode disko` is the legacy alias of destroy,format,mount, and the
+        # legacy branch of the disko CLI runs the script directly, which is the
+        # one path that never sees --yes-wipe-all-disks (disko:180-187). Naming
+        # the mode in full puts the run back on the branch that has a safety
+        # check, and passes it only because check_consent() has already
+        # established the two keys. The nixpkgs fallback is disko 1.9.0, whose
+        # CLI accepts "format, mount or disko" and nothing else, so the alias
+        # stays there — it is reached only after the same consent check.
         disko = ("nix --extra-experimental-features 'nix-command flakes' "
-                 f"run github:nix-community/disko/latest -- --mode disko {disko_file}")
+                 "run github:nix-community/disko/latest -- "
+                 f"--mode destroy,format,mount --yes-wipe-all-disks {disko_file}")
         res = subprocess.run(disko, shell=True)
         if res.returncode != 0:
             res = subprocess.run(
