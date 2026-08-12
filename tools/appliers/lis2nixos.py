@@ -1114,7 +1114,7 @@ AS_USER_FN = """lis_as_user() {
 # ever consulted. A command in an `if` condition triggers neither.
 LIS_HOOK_FN = AS_USER_FN + """
 lis_hook() {
-  # $1 label  $2 interpreter  $3 user ('' = root)  $4 on_failure  $5 body(base64)
+  # $1 label  $2 interpreter  $3 user (empty for root)  $4 policy  $5 body(base64)
   _lbl=$1; _int=$2; _usr=$3; _pol=$4; _rc=0
   _f=$(mktemp /tmp/lis-hook-XXXXXX) || return 1
   printf '%s' "$5" | base64 -d > "$_f"
