@@ -20,6 +20,7 @@ import difflib
 import hashlib
 import ipaddress
 import os
+import shlex
 import json
 import pathlib
 import re
@@ -2697,14 +2698,7 @@ def render_wifi(wifi: list, manager: str, out: list[str]) -> None:
     document's `manager` decides and the other back-end is never emitted.
     """
     if manager == "iwd":
-        refuse("network.wifi with network.manager 'iwd': the NixOS iwd module "
-               "(services/networking/iwd.nix:36) exposes only `settings` for "
-               "main.conf and has no declarative network list — set "
-               "network.manager to networkmanager or systemd-networkd")
-        # The section is refused as a whole; leaving its leaves unread would add
-        # a second, weaker "never read" warning for the same decision.
-        for net in wifi:
-            consume(net)
+        render_iwd_networks(wifi, out)
         return
     # Only an entry with a PSK causes the secrets file to be written, and both
     # back-ends treat a named-but-missing secrets file as a hard error: naming
@@ -2766,6 +2760,96 @@ def render_wifi(wifi: list, manager: str, out: list[str]) -> None:
         out += ["    ipv4 = { method = \"auto\"; };",
                 "    ipv6 = { method = \"auto\"; };",
                 "  };"]
+
+
+def iwd_profile_name(ssid: str, extension: str) -> str:
+    """iwd's own file name for one SSID (iwd src/storage.c).
+
+    iwd stores a network as /var/lib/iwd/<ssid>.<security>, and falls back to
+    `=<hex>` whenever the SSID holds anything outside the printable set it is
+    willing to put in a file name.
+    """
+    if ssid and all(c.isalnum() or c in " -_" for c in ssid):
+        return f"{ssid}.{extension}"
+    return f"={ssid.encode().hex()}.{extension}"
+
+
+def render_iwd_networks(wifi: list, out: list[str]) -> None:
+    """network.wifi[] under `manager: iwd` → a unit that writes /var/lib/iwd.
+
+    services/networking/iwd.nix exposes only `settings`, which is main.conf —
+    the networks themselves live in /var/lib/iwd, outside any NixOS option and
+    outside the store, which is where the PSK has to stay anyway (SPEC §2.4).
+    So the profiles are written by a unit at boot rather than declared, and
+    that emulation is warned about rather than hidden.
+    """
+    seen: set[str] = set()
+    entries: list[tuple[int, dict]] = []
+    for index, net in enumerate(wifi):
+        ssid = net["ssid"]
+        if ssid in seen:
+            refuse(f"network.wifi[{index}].ssid {ssid!r} is declared twice; "
+                   "iwd keys its stored networks by SSID and the second entry "
+                   "would overwrite the first")
+            consume(net)
+            continue
+        if psk := net.get("psk_hash"):
+            if not re.fullmatch(r"[0-9a-fA-F]{64}", str(psk)):
+                refuse(f"network.wifi[{index}].psk_hash is not a 64-character "
+                       "hex PSK; iwd's [Security] PreSharedKey= is the "
+                       "pairwise master key, not a passphrase")
+                consume(net)
+                continue
+        seen.add(ssid)
+        entries.append((index, net))
+    if not entries:
+        return
+
+    secrets = any(net.get("psk_hash") for _, net in entries)
+    warn("network.wifi[] under network.manager 'iwd': iwd keeps its networks "
+         "in /var/lib/iwd, which services/networking/iwd.nix:36 does not "
+         "expose — `settings` is main.conf only. The profiles are written by a "
+         "boot-time unit (lis-iwd-networks) instead of being declared, so they "
+         "are re-created on every boot and local edits to them do not survive")
+
+    body = ["    set -eu", "    umask 077",
+            "    install -d -m 0700 /var/lib/iwd"]
+    if secrets:
+        body.append(f"    . {WIRELESS_SECRETS}")
+    for index, net in entries:
+        ssid = net["ssid"]
+        psk = net.get("psk_hash")
+        path = "/var/lib/iwd/" + iwd_profile_name(ssid, "psk" if psk else "open")
+        fmt, args = "", ""
+        if psk:
+            # %s and a quoted argument, not the variable inside the format: a
+            # shell single-quoted string does not expand, so interpolating the
+            # name would write the six characters "$LIS_…" as the key. The PSK
+            # itself reaches the file from the 0600 environment file at boot
+            # and never enters the Nix store.
+            fmt += "[Security]\\nPreSharedKey=%s\\n"
+            args = f' "${wireless_var(index)}"'
+        if net.get("hidden"):
+            fmt += "[Settings]\\nHidden=true\\n"
+        if not fmt:
+            # iwd needs the file to exist at all for an open network; a
+            # [Settings] section it already defaults to is the smallest one.
+            fmt = "[Settings]\\nAutoConnect=true\\n"
+        body.append(f"    printf '{fmt}'{args} > {shlex.quote(path)}")
+
+    out += ["  systemd.services.lis-iwd-networks = {",
+            "    description = \"LIS: write the declared wireless networks "
+            "into /var/lib/iwd\";",
+            "    wantedBy = [ \"multi-user.target\" ];",
+            "    before = [ \"iwd.service\" ];",
+            "    serviceConfig = { Type = \"oneshot\"; RemainAfterExit = true; };"]
+    if secrets:
+        # Without the secrets file the shell would write an empty
+        # PreSharedKey= and iwd would refuse to associate; skipping the unit
+        # leaves whatever is already stored, which is the safer of the two.
+        out.append("    unitConfig.ConditionPathExists = "
+                   f"{nix_str(WIRELESS_SECRETS)};")
+    out += ["    script = ''"] + body + ["    '';", "  };"]
 
 
 def write_wireless_secrets(doc: dict) -> None:
@@ -4042,8 +4126,20 @@ def render_users(doc: dict) -> list[str]:
     sshd = bool(((doc.get("network", {}) or {}).get("ssh", {}) or {}).get("enabled")) \
         or bool({"sshd", "ssh"} & set(((doc.get("software", {}) or {})
                                        .get("services", {}) or {}).get("enable", []) or []))
+    seen: set[str] = set()
     for user in doc.get("users", []) or []:
         name = user["name"]
+        if name in seen:
+            # Two entries become two `users.users.<name> = { … }` definitions
+            # in one attribute set, which is "attribute already defined" — an
+            # evaluation error, and under --apply one raised by nixos-install
+            # after disko has wiped the disks. The schema does not make the
+            # name unique, so nothing else catches it.
+            refuse(f"users[]: {name!r} is declared twice — one account cannot "
+                   "take two sets of fields, and the schema does not say which "
+                   "of the two would win")
+            continue
+        seen.add(name)
         out.append(f"  users.users.{nix_attr(name)} = {{")
         if name != "root":
             out.append("    isNormalUser = true;")
