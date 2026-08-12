@@ -1204,19 +1204,31 @@ LIS_HOOK_FN = AS_USER_FN + """
 lis_hook() {
   # $1 label  $2 interpreter  $3 user (empty for root)  $4 policy  $5 body(base64)
   _lbl=$1; _int=$2; _usr=$3; _pol=$4; _rc=0
-  _f=$(mktemp /tmp/lis-hook-XXXXXX) || return 1
-  printf '%s' "$5" | base64 -d > "$_f"
-  chmod 0700 "$_f"
-  if [ -n "$_usr" ]; then
-    chown "$_usr" "$_f"
-    _h=$(getent passwd "$_usr" | cut -d: -f6)
-    if setpriv --reuid="$_usr" --regid="$(id -gn "$_usr")" --init-groups \\
-         env HOME="$_h" USER="$_usr" LOGNAME="$_usr" "$_int" "$_f"; then :;
-    else _rc=$?; fi
+  # Not /tmp: NixOS makes /tmp from a later activation snippet, so inside
+  # nixos-install's `nixos-enter … activate` on a freshly formatted root
+  # `mktemp /tmp/…` is ENOENT and every hook is skipped with the marker still
+  # written. mkdir -p brings its own parents, so this needs nothing to exist
+  # first; 0755 because a per-user hook has to traverse it after setpriv has
+  # dropped privilege. Setup failure is a hook failure, not an early return:
+  # it goes through the same policy check below so the marker is withheld.
+  _d=/var/lib/lis/hooks
+  if mkdir -p "$_d" && chmod 0755 "$_d" && _f=$(mktemp "$_d/hook-XXXXXX"); then
+    printf '%s' "$5" | base64 -d > "$_f"
+    chmod 0700 "$_f"
+    if [ -n "$_usr" ]; then
+      chown "$_usr" "$_f"
+      _h=$(getent passwd "$_usr" | cut -d: -f6)
+      if setpriv --reuid="$_usr" --regid="$(id -gn "$_usr")" --init-groups \\
+           env HOME="$_h" USER="$_usr" LOGNAME="$_usr" "$_int" "$_f"; then :;
+      else _rc=$?; fi
+    else
+      if "$_int" "$_f"; then :; else _rc=$?; fi
+    fi
+    rm -f "$_f"
   else
-    if "$_int" "$_f"; then :; else _rc=$?; fi
+    echo "lis: $_lbl could not be written under $_d" >&2
+    _rc=1
   fi
-  rm -f "$_f"
   if [ "$_rc" -ne 0 ]; then
     echo "lis: $_lbl exited $_rc" >&2
     if [ "$_pol" != continue ]; then LIS_HOOK_FAILED=1; return "$_rc"; fi
