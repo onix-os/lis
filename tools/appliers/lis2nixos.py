@@ -16,6 +16,7 @@ reported as a warning; with --strict any dropped intent exits non-zero
 
 import argparse
 import base64
+import difflib
 import hashlib
 import json
 import pathlib
@@ -179,6 +180,15 @@ def partition_names(storage: dict) -> dict[int, tuple[str, str]]:
                          part.get("id") or f"{part.get('role', 'part')}{index[disk_id]}")
     _NAMED[id(storage)] = (storage, out)
     return out
+
+
+def spec_where(spec: dict, handle: str = "") -> str:
+    """How a diagnostic names the partition, array or volume it is about."""
+    if "level" in spec and "name" in spec:
+        return f"raid array {spec['name']!r}"
+    if "id" in spec or "role" in spec:
+        return f"partition {spec.get('id') or spec.get('role')!r}"
+    return f"volume {spec.get('name') or handle!r}"
 
 
 def partition_label(disk_id: str, name: str) -> str:
@@ -428,8 +438,7 @@ class Topology:
                 continue    # an aggregate or a pool owns it, directly or through luks
             if part.get("existing"):
                 continue    # refused where the layout is rendered
-            seen.append((f"partition {part.get('id') or part.get('role') or '?'!r}",
-                         part, self.mountpoint_of(part)))
+            seen.append((spec_where(part), part, self.mountpoint_of(part)))
         for group in self.lvm:
             for vol in group.get("volumes", []):
                 if self.owner_of(vol.get("name", "")) is not None:
@@ -566,7 +575,7 @@ class Topology:
             fs = self.fs_of(spec)
             fs_content(lines, pad, fs, mp, spec.get("mount_options", []),
                        spec.get("subvolumes", []), label=spec.get("label"),
-                       where=f"{spec.get('id') or spec.get('name') or handle!r}",
+                       where=spec_where(spec, handle),
                        extra_subvolumes=self.extra_subvolumes(spec, fs, mp))
 
     def extra_subvolumes(self, spec: dict, fs, mountpoint) -> tuple:
@@ -1505,10 +1514,60 @@ def snapshot_commands(doc: dict) -> list[str]:
             "chmod 750 /.snapshots"]
 
 
-def host_stage_bodies(doc: dict, stage: str) -> list[str]:
-    """The script bodies `--apply` runs on the installer host for one stage."""
+def host_stage_hooks(doc: dict, stage: str) -> list[tuple[str, str, str, bytes]]:
+    """One live-installer stage, resolved to (label, interpreter, policy, body).
+
+    The four leaves SPEC §13 gives a script entry are answered here as well as
+    in the generated configuration: a host-side hook has an `interpreter` and
+    an `on_failure` too, and `--apply` used to run every body through
+    `subprocess.run(..., shell=True, check=False)` — one shell for all of them
+    and no failure policy at all.
+    """
     scripts = doc.get("scripts", {}) or {}
-    return [s["content"] for s in scripts.get(stage, []) or [] if s.get("content")]
+    out: list[tuple[str, str, str, bytes]] = []
+    for index, item in enumerate(scripts.get(stage, []) or []):
+        label = f"scripts.{stage}[{index}]"
+        body = script_payload(item, label)
+        resolved = script_interpreter(item, label)
+        policy = script_policy(item, label)
+        if body is None or resolved is None:
+            continue
+        out.append((label, resolved[0], policy, body))
+    return out
+
+
+def run_host_stage(doc: dict, stage: str) -> int:
+    """Run one live-installer-environment stage on this host.
+
+    Returns the exit status the installation should take: non-zero only when a
+    hook failed and its `on_failure` is SPEC §13's default `fail`.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    for label, interpreter, policy, body in host_stage_hooks(doc, stage):
+        binary = interpreter if interpreter.startswith("/") \
+            else shutil.which(interpreter)
+        if not binary:
+            print(f"{label}: interpreter {interpreter!r} is not on this "
+                  "installer's PATH", file=sys.stderr)
+            if policy == "fail":
+                return 127
+            continue
+        print(f"running {label} on the installer host")
+        with tempfile.NamedTemporaryFile(suffix=".lis-hook") as handle:
+            handle.write(body)
+            handle.flush()
+            status = subprocess.run([binary, handle.name], check=False).returncode
+        if status and policy == "fail":
+            print(f"{label} exited {status} and its on_failure is 'fail' "
+                  "(SPEC §13) — aborting", file=sys.stderr)
+            return status
+        if status:
+            print(f"{label} exited {status}; on_failure is 'continue'",
+                  file=sys.stderr)
+    return 0
 
 
 def world_readable_store(mode: str | None) -> bool:
@@ -1645,30 +1704,50 @@ def render_script_hooks(doc: dict, file_cmds: list[str] | None = None) -> list[s
     """
     scripts = doc.get("scripts", {}) or {}
     out: list[str] = []
+    packages: list[str] = []
 
-    # files[] first: a post_install hook may well edit a file the document drops.
-    activation = list(file_cmds or [])
-    activation += [s["content"] for stage in ("post_install", "post")
-                   for s in scripts.get(stage, []) if s.get("content")]
+    def collect(items, stage: str, label: str, user: str = "") -> list[str]:
+        lines = []
+        for index, item in enumerate(items or []):
+            call = hook_call(item, f"{label}[{index}]", user)
+            if call is None:
+                continue
+            line, package = call
+            if package and package not in packages:
+                packages.append(package)
+            lines.append(line)
+        return lines
+
+    hooks: list[str] = []
+    for stage in ("post_install", "post"):
+        hooks += collect(scripts.get(stage), stage, f"scripts.{stage}")
     for user in doc.get("users", []) or []:
         # `post` after `post_install`, the ordering SPEC §13 gives the two
         # phases. The user-level `post` stage used to reach nothing at all here:
         # only `post_install` and `firstboot` were collected, so a document that
         # put its per-user work in `post` had it silently dropped.
         for stage in ("post_install", "post"):
-            for s in (user.get("scripts", {}) or {}).get(stage, []):
-                if c := s.get("content"):
-                    activation.append(as_user(user["name"], c))
+            hooks += collect((user.get("scripts", {}) or {}).get(stage), stage,
+                             f"users['{user['name']}'].scripts.{stage}",
+                             user["name"])
 
-    firstboot = [s["content"] for s in scripts.get("firstboot", []) if s.get("content")]
+    firstboot = collect(scripts.get("firstboot"), "firstboot", "scripts.firstboot")
     firstboot += snapshot_commands(doc)
     firstboot += dotfiles_commands(doc)
     firstboot += enrollment_commands(doc)
     firstboot += registration_commands(doc, "nixos")
     for user in doc.get("users", []) or []:
-        for s in (user.get("scripts", {}) or {}).get("firstboot", []):
-            if c := s.get("content"):
-                firstboot.append(as_user(user["name"], c))
+        firstboot += collect((user.get("scripts", {}) or {}).get("firstboot"),
+                             "firstboot",
+                             f"users['{user['name']}'].scripts.firstboot",
+                             user["name"])
+
+    # Resolved here rather than at apply time so that a bad interpreter, an
+    # unreadable `source` or an on_failure value SPEC §13 does not define is a
+    # refusal *before* disko touches a disk, not a surprise between the wipe
+    # and the install.
+    for stage in ("pre_install", "pre") + HOST_STAGES:
+        host_stage_hooks(doc, stage)
 
     for stage in ("pre_install", "pre"):
         if scripts.get(stage):
@@ -1688,10 +1767,12 @@ def render_script_hooks(doc: dict, file_cmds: list[str] | None = None) -> list[s
     # 0600, but the bytes are public long before that chmod runs.
     birth = base64.b64encode(
         json.dumps(redact_secrets(doc), separators=(",", ":")).encode()).decode()
+    activation = list(file_cmds or [])
     activation.append("install -d -m755 /var/lib/lis")
     activation.append(f"echo {birth} | base64 -d > /var/lib/lis/system.lis.json")
     activation.append("chmod 600 /var/lib/lis/system.lis.json")
 
+    path_expr = hook_path(doc, packages)
     # Activation scripts run with a deliberately minimal PATH, so a hook that
     # calls anything outside coreutils (su, systemctl, sed) dies with 127 and
     # NixOS only prints a one-line "snippet failed". Give hooks a real PATH.
@@ -1706,11 +1787,42 @@ def render_script_hooks(doc: dict, file_cmds: list[str] | None = None) -> list[s
                 # nix:15-19), so naming both is an ordering, not a cycle.
                 "    deps = [ \"users\" \"etc\" ];",
                 "    text ="
-                f"      \"export PATH=\\\"${{lib.makeBinPath {HOOK_PATH}}}:$PATH\\\"\\n\" +",
+                f"      \"export PATH=\\\"${{lib.makeBinPath {path_expr}}}:$PATH\\\"\\n\" +",
                 "      " + nix_script(AS_USER_FN + "\n" + "\n".join(activation)) + ";",
                 "  };"]
+    if hooks:
+        # SPEC §13's post_install is an install-stage hook — "runs after OS
+        # installation, package extraction, and file generation", once. The
+        # whole set used to sit in the same activation snippet as files[] and
+        # the birth certificate, which NixOS re-runs on every boot and every
+        # `nixos-rebuild switch`: a hook appending a line to a config file
+        # appended it forever. Its own snippet with its own marker restores
+        # the "once" half; the marker is written whatever the hooks returned,
+        # because a failed fail-policy hook has already made this activation
+        # exit non-zero and re-running a half-completed hook on the next boot
+        # is not a recovery.
+        #
+        # `switch-to-configuration boot` exits before the activation script
+        # (switch-to-configuration.pl:125), so nixos-install does not run this
+        # — the first activation is the target's own first boot, ahead of
+        # systemd and therefore ahead of lis-firstboot.
+        warn("scripts.post_install / scripts.post: NixOS has no install-stage "
+             "hook — nixos-install runs `switch-to-configuration boot`, which "
+             "exits before activation — so these run from an activation script "
+             "guarded by /var/lib/lis/.post-install-done, i.e. once, on the "
+             "target's first boot and before the first-boot unit")
+        body = ("if [ ! -e /var/lib/lis/.post-install-done ]; then\n"
+                + "\n".join(hooks)
+                + "\ninstall -d -m755 /var/lib/lis"
+                + "\ntouch /var/lib/lis/.post-install-done\nfi")
+        out += ["  system.activationScripts.lis-post-install = {",
+                "    deps = [ \"lis-hooks\" ];",
+                "    text ="
+                f"      \"export PATH=\\\"${{lib.makeBinPath {path_expr}}}:$PATH\\\"\\n\" +",
+                "      " + nix_script(LIS_HOOK_FN + "\n" + body) + ";",
+                "  };"]
     if firstboot:
-        body = ("install -d -m755 /var/lib/lis\n" + AS_USER_FN + "\n"
+        body = ("install -d -m755 /var/lib/lis\n" + LIS_HOOK_FN + "\n"
                 + "\n".join(firstboot)
                 + "\ntouch /var/lib/lis/.firstboot-done")
         out += ["  systemd.services.lis-firstboot = {",
@@ -1725,7 +1837,7 @@ def render_script_hooks(doc: dict, file_cmds: list[str] | None = None) -> list[s
                 # only when the document asks for snapshots: adding it
                 # unconditionally would put btrfs-progs in the closure of every
                 # system this translator emits.
-                f"    path = {hook_path(doc)};",
+                f"    path = {path_expr};",
                 "    script = " + nix_script(body) + ";",
                 "  };"]
     return out
@@ -2586,9 +2698,13 @@ def render_time(time_cfg: dict) -> list[str]:
         provider = None
 
     if ntp is False:
+        # timesyncd is stated unconditionally because NixOS starts it by
+        # default; a second daemon only when the document named one, and never
+        # twice for the same option — a repeat is `attribute already defined`.
         out.append("  services.timesyncd.enable = false;")
         if provider in TIME_PROVIDERS:
-            out.append(f"  {TIME_PROVIDERS[provider]} = false;")
+            if TIME_PROVIDERS[provider] != "services.timesyncd.enable":
+                out.append(f"  {TIME_PROVIDERS[provider]} = false;")
             warn(f"system.time.provider {provider!r} is not started: the same "
                  "document sets system.time.ntp false, and a daemon that is "
                  "not to synchronise the clock has nothing to do")
@@ -2721,6 +2837,18 @@ class NixOptions:
         """Record an option another renderer has already written out."""
         self.values[path] = value
 
+    def claim(self, lines: list[str]) -> None:
+        """Record every `  path = value;` an earlier section already emitted.
+
+        Only complete one-line definitions are claimed: a block opener
+        (`networking.interfaces."eth0" = {`) names an attribute set the
+        collector never writes to, so there is nothing to collide with.
+        """
+        for line in lines:
+            match = re.fullmatch(r"  ([A-Za-z0-9_.\"'-]+) = (.+);", line)
+            if match and not match.group(2).endswith("{"):
+                self.values.setdefault(match.group(1), match.group(2))
+
     def set(self, path: str, value: str, *, label: str = "") -> None:
         if path in self.values:
             if self.values[path] != value:
@@ -2817,7 +2945,82 @@ SERVICE_OPTIONS = {
     "cron": "services.cron.enable",
     "bluetooth": "hardware.bluetooth.enable",
     "nfs-server": "services.nfs.server.enable",
+    # Every option below returns OPTION on nixos-24.11 (the channel
+    # tools/e2e/iso.py:18 pins); a name that reached configuration.nix without
+    # one is an evaluation error inside nixos-install, after the wipe.
+    "acpid": "services.acpid.enable",
+    "atd": "services.atd.enable",
+    "auditd": "security.auditd.enable",
+    "bind": "services.bind.enable",
+    "chrony": "services.chrony.enable",
+    "chronyd": "services.chrony.enable",
+    "cloud-init": "services.cloud-init.enable",
+    "dnsmasq": "services.dnsmasq.enable",
+    "dovecot": "services.dovecot2.enable",
+    "earlyoom": "services.earlyoom.enable",
+    "fstrim": "services.fstrim.enable",
+    "fwupd": "services.fwupd.enable",
+    "gpm": "services.gpm.enable",
+    "haveged": "services.haveged.enable",
+    "httpd": "services.httpd.enable",
+    "incus": "virtualisation.incus.enable",
+    "irqbalance": "services.irqbalance.enable",
+    "iwd": "networking.wireless.iwd.enable",
+    "k3s": "services.k3s.enable",
+    "logrotate": "services.logrotate.enable",
+    "lvm2-monitor": "services.lvm.dmeventd.enable",
+    "lxd": "virtualisation.lxd.enable",
+    "mariadb": "services.mysql.enable",
+    "mysql": "services.mysql.enable",
+    "mysqld": "services.mysql.enable",
+    "named": "services.bind.enable",
+    "networkmanager": "networking.networkmanager.enable",
+    "nftables": "networking.nftables.enable",
+    "nginx": "services.nginx.enable",
+    "ntpd": "services.ntp.enable",
+    "openntpd": "services.openntpd.enable",
+    "pcscd": "services.pcscd.enable",
+    "postfix": "services.postfix.enable",
+    "postgresql": "services.postgresql.enable",
+    "power-profiles-daemon": "services.power-profiles-daemon.enable",
+    "qemu-guest-agent": "services.qemuGuest.enable",
+    "rpcbind": "services.rpcbind.enable",
+    "rsyncd": "services.rsyncd.enable",
+    "smartd": "services.smartd.enable",
+    "smbd": "services.samba.enable",
+    "spice-vdagentd": "services.spice-vdagentd.enable",
+    "sysstat": "services.sysstat.enable",
+    "syncthing": "services.syncthing.enable",
+    "systemd-networkd": "networking.useNetworkd",
+    "systemd-oomd": "systemd.oomd.enable",
+    "systemd-resolved": "services.resolved.enable",
+    "systemd-timesyncd": "services.timesyncd.enable",
+    "thermald": "services.thermald.enable",
+    "tlp": "services.tlp.enable",
+    "tor": "services.tor.enable",
+    "udisks2": "services.udisks2.enable",
+    "unbound": "services.unbound.enable",
+    "upower": "services.upower.enable",
+    "vsftpd": "services.vsftpd.enable",
+    "wpa_supplicant": "networking.wireless.enable",
+    "zerotierone": "services.zerotierone.enable",
 }
+
+
+def service_option(unit: str) -> str | None:
+    """A systemd unit name → the NixOS option that owns it, or None.
+
+    Matched case-insensitively and with the unit suffix optional, because a
+    systemd unit name is neither: the network manager's unit is
+    `NetworkManager.service`, and SPEC §11 asks for unit names rather than for
+    this table's spelling of them.
+    """
+    name = str(unit).strip()
+    for suffix in (".service", ".socket", ".timer", ".target", ".path"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    return SERVICE_OPTIONS.get(name.lower())
 
 FLATHUB_REPO = "https://dl.flathub.org/repo/flathub.flatpakrepo"
 
@@ -3058,17 +3261,20 @@ def render_software(doc: dict, opts: NixOptions) -> None:
         enabled = ((doc.get("network") or {}).get("ssh") or {})["enabled"]
         opts.taken("services.openssh.enable", str(bool(enabled)).lower())
     for unit in services.get("enable", []) or []:
-        if option := SERVICE_OPTIONS.get(unit):
+        if option := service_option(unit):
             opts.set(option, "true", label=f"software.services.enable {unit!r}")
         else:
+            near = difflib.get_close_matches(str(unit).lower(),
+                                             SERVICE_OPTIONS, n=3, cutoff=0.6)
             refuse(f"software.services.enable {unit!r}: NixOS builds its unit "
                    "set from modules, so enabling a unit no module declares is "
-                   "a no-op — this translator maps only the units that have an "
-                   f"option ({', '.join(sorted(SERVICE_OPTIONS))}); declare the "
-                   "rest in your own module")
+                   "a no-op — this translator maps the "
+                   f"{len(SERVICE_OPTIONS)} unit names that have an option"
+                   + (f" (did you mean {', '.join(near)}?)" if near else "")
+                   + "; declare the rest in your own module")
     suppressed: list[str] = []
     for unit in services.get("disable", []) or []:
-        if option := SERVICE_OPTIONS.get(unit):
+        if option := service_option(unit):
             opts.set(option, "false", label=f"software.services.disable {unit!r}")
         else:
             # systemd.suppressedSystemUnits removes the unit file from the
@@ -3892,6 +4098,13 @@ def render_configuration(doc: dict) -> str:
     # they are rendered through one collector that refuses a contradiction
     # instead of emitting the same attribute twice.
     opts = NixOptions()
+    # The sections above write plain lines rather than going through the
+    # collector, and several of the options they own are reachable from
+    # software.services[] too — networking.networkmanager.enable,
+    # services.timesyncd.enable, services.openssh.enable. Registering what has
+    # already been written turns "the same attribute twice", an evaluation
+    # error raised inside nixos-install, into a refusal raised here.
+    opts.claim(out)
     render_software(doc, opts)
     render_desktop(doc, opts)
     render_drivers(doc, opts)
@@ -4007,7 +4220,12 @@ def main() -> int:
     # and this applier straddles the boundary — pre_install runs on the live
     # ISO, post_install runs inside the target during activation — so the flag
     # is answered per stage by check_stage_chroot() instead.
-    check_script_fields(doc, honors_chroot=True)
+    # interpreter, source and on_failure are answered per entry by hook_call()
+    # and host_stage_hooks(); honors_chroot for the same reason one level down
+    # — this applier straddles the boundary, so check_stage_chroot() answers
+    # the flag per stage.
+    check_script_fields(doc, honors_chroot=True, honors_interpreter=True,
+                        honors_source=True, honors_on_failure=True)
     # registration is refused whole (SPEC §15: NixOS has no subscription
     # service to attach to), so its leaves have been decided about — reporting
     # them a second time as "never read" says the applier overlooked something
@@ -4029,11 +4247,12 @@ def main() -> int:
 
             The translation warns that these run here rather than reaching the
             generated configuration; running them is what keeps that warning a
-            statement of fact instead of a promise.
+            statement of fact instead of a promise. SPEC §13's default
+            `on_failure: fail` means abort the installation, which is what
+            run_host_stage's non-zero return says.
             """
-            for content in host_stage_bodies(doc, stage):
-                print(f"running scripts.{stage} on the installer host")
-                subprocess.run(content, shell=True, check=False)
+            if status := run_host_stage(doc, stage):
+                raise SystemExit(status)
 
         for stage in ("pre_install", "pre"):
             run_stage(stage)
