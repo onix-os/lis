@@ -450,8 +450,14 @@ class Topology:
         seen: list[tuple[str, dict, str | None]] = []
         for part in self.storage.get("partitions", []) or []:
             handle = part.get("id") or ""
-            if handle and (handle in self.spare_handles
-                           or self.owner_of(handle) is not None):
+            if handle and handle in self.spare_handles:
+                if part.get("fs") not in (None, "none") or part.get("mountpoint"):
+                    refuse(f"{spec_where(part)} is a hot spare of a raid array and "
+                           "also declares a filesystem or a mountpoint — `mdadm "
+                           "--add` writes the array superblock over whatever is "
+                           "there, so one of the two declarations cannot survive")
+                continue
+            if handle and self.owner_of(handle) is not None:
                 continue    # an aggregate or a pool owns it, directly or through luks
             if part.get("existing"):
                 continue    # refused where the layout is rendered
@@ -489,6 +495,20 @@ class Topology:
                        "Partition is vfat by definition (schema.md §6.1: "
                        "'esp → EF00 + vfat'), and firmware will not read "
                        f"{fs} from it")
+
+    def mount_options_of(self, spec: dict) -> list[str]:
+        """Mount options for one filesystem, role default included.
+
+        The ESP default lived in render_disko alone, so disko mounted the EFI
+        partition with umask=0077 during the install and the installed system
+        mounted the same partition with `defaults` — the boot loader's
+        configuration and any keys beside it were world-readable on the running
+        machine but not in the installer.
+        """
+        opts = list(spec.get("mount_options") or [])
+        if not opts and spec.get("role") == "esp":
+            return ["umask=0077"]
+        return opts
 
     def mountpoint_of(self, spec: dict) -> str | None:
         """Where this spec's filesystem goes, after the whole layout arbitrated.
@@ -590,7 +610,7 @@ class Topology:
         else:
             mp = self.mountpoint_of(spec)
             fs = self.fs_of(spec)
-            fs_content(lines, pad, fs, mp, spec.get("mount_options", []),
+            fs_content(lines, pad, fs, mp, self.mount_options_of(spec),
                        spec.get("subvolumes", []), label=spec.get("label"),
                        where=spec_where(spec, handle),
                        extra_subvolumes=self.extra_subvolumes(spec, fs, mp))
@@ -857,7 +877,7 @@ def render_disko(doc: dict) -> str:
                     # An ESP nothing mounts is a refusal above, not a partial
                     # attribute set: disko's filesystem type wants a real path.
                     out.append(f"                mountpoint = {nix_str(mp)};")
-                opts = list(part.get("mount_options") or []) or ["umask=0077"]
+                opts = topology.mount_options_of(part)
                 out += [f"                mountOptions = {nix_list(opts)};",
                         "              };"]
             else:
@@ -1070,7 +1090,7 @@ def mount_table(doc: dict) -> tuple[list[tuple[str, str, str, list[str]]], list[
             return
         if fs in (None, "none"):
             return
-        options = list(spec.get("mount_options", []))
+        options = topology.mount_options_of(spec)
         subvolumes = spec.get("subvolumes", []) or []
         if fs == "btrfs" and subvolumes:
             covered = any(s["mountpoint"] == mountpoint for s in subvolumes)
