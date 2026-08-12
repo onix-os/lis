@@ -621,6 +621,29 @@ def topology_for(doc: dict) -> Topology:
     return built
 
 
+# mdadm(8), "Create mode": a level needs at least this many active members, and
+# raid10 needs an even count on top of that. mdadm --create rejects the rest,
+# and disko runs it from the format script — i.e. with the table already gone.
+RAID_MIN_DEVICES = {0: 2, 1: 2, 5: 3, 6: 4, 10: 4}
+
+
+def check_raid_geometry(name: str, level, count: int) -> None:
+    """Refuse an array mdadm would not create."""
+    if level not in RAID_MIN_DEVICES:
+        refuse(f"raid {name!r}: level {level!r} is not one of 0, 1, 5, 6, 10 "
+               "(schema.md §6.4) — disko passes it to `mdadm --create --level=` "
+               "verbatim and the array would never be built")
+        return
+    minimum = RAID_MIN_DEVICES[level]
+    if count < minimum:
+        refuse(f"raid {name!r}: level {level} needs at least {minimum} active "
+               f"devices and {count} are declared (mdadm(8), Create mode); "
+               "spares do not count towards the array width")
+    elif level == 10 and count % 2:
+        refuse(f"raid {name!r}: level 10 needs an even number of active devices "
+               f"and {count} are declared")
+
+
 def render_mdadm(topology: Topology, out: list) -> None:
     """disko.devices.mdadm — one entry per LIS raid array."""
     if not topology.raid:
@@ -628,10 +651,18 @@ def render_mdadm(topology: Topology, out: list) -> None:
     out.append("    mdadm = {")
     for array in topology.raid:
         name = array["name"]
-        missing = [d for d in array.get("devices", []) if d not in topology.specs
+        devices = array.get("devices", []) or []
+        missing = [d for d in devices if d not in topology.specs
                    and d not in {c["id"] for c in topology.encryption}]
         for dev in missing:
-            warn(f"raid '{name}': device handle {dev!r} does not resolve to a partition")
+            # Not a warning any more: disko writes each resolved member into
+            # $disko_devices_dir/raid_<name> and hands the file to `mdadm
+            # --create`, so a handle that resolves to nothing builds a narrower
+            # array than the document asked for — silently, and only on the
+            # machine being installed.
+            refuse(f"raid {name!r}: device handle {dev!r} does not resolve to a "
+                   "partition or encryption container declared in this document")
+        check_raid_geometry(name, array.get("level"), len(devices))
         out += [f"      {nix_str(name)} = {{",
                 "        type = \"mdadm\";",
                 f"        level = {array['level']};"]
@@ -3060,6 +3091,33 @@ SERVICE_OPTIONS = {
 }
 
 
+def check_wireless_backends(opts: "NixOptions") -> None:
+    """Refuse the two wireless combinations nixos-24.11 asserts against.
+
+    Both are module *assertions*, not option-name errors, so nothing catches
+    them before nixos-install evaluates — by which time disko has already
+    wiped the disks. `network.manager` alone can no longer produce either
+    combination, but `software.services.enable` reaches the same three
+    switches by unit name, from a section that knows nothing about the first.
+    """
+    on = {path for path, value in opts.values.items() if value == "true"}
+    if {"networking.wireless.iwd.enable", "networking.wireless.enable"} <= on:
+        refuse("wpa_supplicant and iwd are both enabled: "
+               "services/networking/iwd.nix:57-62 asserts that "
+               "networking.wireless.enable and networking.wireless.iwd.enable "
+               "are mutually exclusive — only one wireless daemon may drive "
+               "the radio")
+    if ({"networking.networkmanager.enable", "networking.wireless.enable"} <= on
+            and opts.values.get("networking.networkmanager.unmanaged",
+                                "[ ]").strip() in ("[ ]", "[]")):
+        refuse("NetworkManager and wpa_supplicant are both enabled with no "
+               "unmanaged interface: services/networking/networkmanager.nix:"
+               "549-554 asserts networking.wireless.enable -> "
+               "networking.networkmanager.unmanaged != [ ]. Set "
+               "network.manager to systemd-networkd, or drop wpa_supplicant "
+               "from software.services.enable")
+
+
 def service_option(unit: str) -> str | None:
     """A systemd unit name → the NixOS option that owns it, or None.
 
@@ -3300,7 +3358,13 @@ def render_software(doc: dict, opts: NixOptions) -> None:
 
     terms = []
     if packages:
-        terms.append("(with pkgs; [ %s ])" % " ".join(map(nix_pkg_path, packages)))
+        # `pkgs.<name>` and not `with pkgs; [ <name> ]`: a package name that is
+        # not a bare Nix identifier (`1password`) has to be quoted, and inside
+        # a `with` list a quoted name is a *string* in the list rather than the
+        # package — environment.systemPackages is types.listOf package, so that
+        # is a type error at evaluation time, after the wipe.
+        terms.append("[ %s ]" % " ".join(f"pkgs.{nix_pkg_path(p)}"
+                                         for p in packages))
     if optional:
         terms.append(nix_optional_pkgs(optional))
     if terms:
@@ -3346,6 +3410,7 @@ def render_software(doc: dict, opts: NixOptions) -> None:
             suppressed.append(unit if "." in unit else unit + ".service")
     if suppressed:
         opts.set("systemd.suppressedSystemUnits", nix_list(suppressed))
+    check_wireless_backends(opts)
 
     if flatpaks or software.get("flatpak") is not None:
         opts.set("services.flatpak.enable", "true")
@@ -3694,14 +3759,52 @@ def check_keys(doc: dict) -> None:
                    "nothing")
             continue
         for purpose in purposes:
+            # One refusal per role, naming the thing that is missing. The old
+            # branch turned down five of SPEC §17.1's six roles with the same
+            # sentence — "neither of which has anywhere to consume a key for
+            # that role" — which was already wrong for user_pam_auth, where
+            # NixOS has two PAM modules, and told the reader nothing about the
+            # other four.
             if purpose not in KEY_PURPOSES:
                 refuse(f"keys['{kid}'].purpose {purpose!r} is not one of SPEC §17.1's "
                        f"roles ({', '.join(sorted(KEY_PURPOSES))})")
-            elif purpose != "disk_encryption":
-                refuse(f"keys['{kid}'].purpose {purpose!r}: this translator emits a "
-                       "NixOS configuration and a disko layout, neither of which has "
-                       "anywhere to consume a key for that role — only "
-                       "disk_encryption reaches the target")
+            elif purpose == "user_pam_auth" and ktype not in PAM_KEY_MODULES:
+                refuse(f"keys['{kid}'].purpose 'user_pam_auth' with type {ktype!r}: "
+                       "NixOS 24.11 has a PAM module for FIDO2 tokens "
+                       "(security.pam.u2f) and one for Yubico challenge-response "
+                       "(security.pam.yubico), and none that authenticates a "
+                       f"{ktype} — the account's PAM stack would be unchanged")
+            elif purpose == "user_ssh_key":
+                refuse(f"keys['{kid}'].purpose 'user_ssh_key': SPEC §17.2 binds a "
+                       "key to an account through users[].ssh_keys: "
+                       "[{from: 'key:…'}], which schema v0.1 does not carry — "
+                       "users[].ssh_authorized_keys is an array of literal key "
+                       "strings — so there is no account this key names and no "
+                       "authorized_keys file it would be written to")
+            elif purpose == "payload_decryption":
+                refuse(f"keys['{kid}'].purpose 'payload_decryption': that is SPEC "
+                       "§17's Phase 1, decrypting the payload before the document "
+                       "is read — this applier is handed an already-plain "
+                       "document and has no payload stage to give the key to")
+            elif purpose == "secret_decryption":
+                refuse(f"keys['{kid}'].purpose 'secret_decryption': nothing here "
+                       "decrypts a secret reference. SPEC §17.2's "
+                       "files[].content.decrypt_with is not in schema v0.1, and "
+                       "every seed: reference this applier resolves is read "
+                       "verbatim (lis_common.secret_ref)")
+            elif purpose == "remote_auth":
+                refuse(f"keys['{kid}'].purpose 'remote_auth': the only remote "
+                       "service LIS names is SPEC §15 registration, which this "
+                       "applier refuses whole — NixOS has no subscription client "
+                       "to hand a credential to")
+        if "user_pam_auth" in purposes and ktype in PAM_KEY_MODULES:
+            warn(f"keys['{kid}'].purpose user_pam_auth: "
+                 f"security.pam.{PAM_KEY_MODULES[ktype]} is enabled for every "
+                 "PAM service, but the token itself is not enrolled — pamu2fcfg "
+                 "and ykpamcfg both need the key physically present and touched, "
+                 "which no unattended install can do. The module is set "
+                 "`sufficient`, so password login still works until an operator "
+                 "enrolls the token")
         if "disk_encryption" not in purposes:
             continue
 
