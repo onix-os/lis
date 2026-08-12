@@ -2978,6 +2978,24 @@ def resolve_manager(network: dict, interfaces: list) -> str:
     return "networkmanager"
 
 
+def manager_note(network: dict) -> list[str]:
+    """A line in the file for a manager the document never named.
+
+    SPEC §10 makes an omitted `network` section mean "DHCP on everything
+    wired", which NetworkManager does — but so does the NixOS default of
+    dhcpcd, and the choice between them is the applier's. Said in the output
+    rather than through the warning channel: nothing was dropped, and a
+    document that names no manager should not have to read a warning.
+    """
+    if "manager" in network:
+        return []
+    return ["  # network.manager is unset: NetworkManager is this translator's "
+            "default,",
+            "  # which covers SPEC §10's \"DHCP on everything wired\". Name "
+            "systemd-networkd",
+            "  # in network.manager for a machine that should not carry it."]
+
+
 def proxy_env(doc: dict) -> dict[str, str]:
     """proxy.* → the environment variables the install run needs.
 
@@ -3018,6 +3036,7 @@ def render_network(doc: dict) -> list[str]:
     wifi = network.get("wifi", []) or []
     manager = resolve_manager(network, interfaces)
     if manager == "networkmanager":
+        out += manager_note(network)
         out.append("  networking.networkmanager.enable = true;")
     elif manager == "systemd-networkd":
         out.append("  networking.useNetworkd = true;")
