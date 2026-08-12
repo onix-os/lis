@@ -2794,7 +2794,8 @@ def render_wifi(wifi: list, manager: str, out: list[str]) -> None:
             if net.get("hidden"):
                 out.append(f"  networking.wireless.networks.{nix_str(ssid)}.hidden = true;")
         return
-    # networkmanager, and `auto` — which the manager block resolved to NM.
+    # networkmanager — `auto` never arrives here, resolve_manager() has already
+    # turned it into one of the three concrete back-ends.
     if secrets:
         out.append("  networking.networkmanager.ensureProfiles.environmentFiles = "
                    f"[ {nix_str(WIRELESS_SECRETS)} ];")
