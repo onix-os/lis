@@ -368,7 +368,7 @@ def install_void(target_disk, seed_disk, iso, ram, recipe, work):
 
 def install_from_live_shell(distro, target_disk, seed_disk, iso, ram, work,
                             *, applier, boot_hint, login=None, timeout=2400,
-                            bootstrap=None, become_root=False,
+                            bootstrap=None, become_root=False, applier_args="",
                             kernel=None, initrd=None, append=None, ready=None):
     """Boot a live ISO, mount the LIS seed, and let the applier drive the install.
 
@@ -434,7 +434,7 @@ def install_from_live_shell(distro, target_disk, seed_disk, iso, ram, work,
         child.sendline(bootstrap)
         child.expect(prompts, timeout=600)
     command = (f"python3 /run/lis/seed/appliers/{applier} "
-               "/run/lis/seed/recipes/system.lis.json --apply")
+               f"/run/lis/seed/recipes/system.lis.json --apply{applier_args}")
     if distro == "nixos":
         command = f"nix-shell -p python3 --run {command!r}"
     print(f"  [{TICK}] Running {applier} inside the live environment...")
@@ -487,7 +487,13 @@ def run_stage2_qemu_installer(distro: str, target_disk: pathlib.Path,
     elif distro == "nixos":
         install_from_live_shell(distro, target_disk, seed_disk, iso_path, ram, work,
                                 applier="lis2nixos.py", boot_hint=isolinux_serial,
-                                timeout=3600, become_root=True)
+                                timeout=3600, become_root=True,
+                                # lis-make-seed writes the channel half of the
+                                # two-key consent rule (delivery.md §5); the
+                                # recipes carry storage.wipe but no
+                                # installer.unattended, so the operator half is
+                                # supplied here rather than by editing them.
+                                applier_args=" --confirm-destroy")
     elif distro == "alpine":
         install_from_live_shell(distro, target_disk, seed_disk, iso_path, ram, work,
                                 applier="lis2alpine.py", boot_hint=lambda c: None,

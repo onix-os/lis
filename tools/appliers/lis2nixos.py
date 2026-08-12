@@ -4916,10 +4916,12 @@ def channel_consent(doc_path: pathlib.Path) -> str | None:
     # ISO's root filesystem grant consent for every document on the machine.
     here = doc_path.resolve().parent
     for root in (here, here.parent, pathlib.Path("/run/lis/seed")):
-        marker = root / "unattended"
         try:
-            if marker.is_file():
-                return f"the '{marker}' consent marker on the delivery channel"
+            # Case-insensitive: the seed is a FAT volume, where the name a
+            # mount presents depends on the driver's short/long-name handling.
+            for entry in root.iterdir():
+                if entry.name.lower() == "unattended" and entry.is_file():
+                    return f"the '{entry}' consent marker on the delivery channel"
         except OSError:
             continue
     try:
