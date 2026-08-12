@@ -16,6 +16,7 @@ reported as a warning; with --strict any dropped intent exits non-zero
 
 import argparse
 import base64
+import hashlib
 import json
 import pathlib
 import re
@@ -24,6 +25,7 @@ import sys
 from lis_common import (track, check_unread, luks_key_path, check_raid_consumers, registration_commands, enrollment_commands, resolve_disk_paths, check_snapshots, match_selectors, consume, password_field, secret_ref, APPLY_TIME_PATHS,ALL_SECTIONS, add_common_args, check_firmware,
                         check_encryption_emitted, resolve_mountpoints,
                         check_unhandled, check_section_fields, check_mirror, check_kernel_variant, check_user_sudo,
+                        ROLE_FS, role_fs,
                         check_boot_extras, check_keymap, check_version, enforce,
                         check_script_fields,
                         load_doc, refuse, report, warn)
@@ -49,15 +51,56 @@ def nix_list(items: list[str]) -> str:
     return "[ " + " ".join(nix_str(i) for i in items) + " ]"
 
 
-def disko_size(size: str) -> str:
+def disko_size(size, where: str, *, percent: bool = False) -> str:
+    """A LIS size as disko spells it, or a refusal saying why it cannot.
+
+    Two shapes the schema allows do not survive the trip and used to leave by
+    the back door. A malformed size raised ValueError and aborted with a Python
+    traceback instead of a refusal (SPEC §2.3 wants a stated reason). A
+    percentage other than 100% was passed straight through, and disko's GPT
+    partition size is `either (enum [ "100%" ]) (strMatching "[0-9]+[KMGTP]?")`
+    (disko lib/types/gpt.nix) — so `size: "50%"` produced a config that fails to
+    evaluate at apply time. LVM is the exception: disko rewrites a trailing '%'
+    to '%FREE' for lvcreate (lib/types/lvm_vg.nix:130-135), so percentages are
+    real there and `percent=True` lets them through.
+    """
+    if not isinstance(size, str):
+        refuse(f"{where}: size {size!r} is not a string")
+        return "100%"
     if size == "rest":
         return "100%"
     for unit, letter in (("MiB", "M"), ("GiB", "G"), ("TiB", "T")):
-        if size.endswith(unit):
+        if size.endswith(unit) and size[: -len(unit)].isdigit():
             return size[: -len(unit)] + letter
-    if size.endswith("%"):
-        return size
-    raise ValueError(f"unparseable size: {size}")
+    if re.fullmatch(r"[0-9]{1,3}%", size):
+        if percent or size == "100%":
+            return size
+        refuse(f"{where}: size {size!r} — a GPT partition cannot be sized as a "
+               "share of the disk: disko's size is `either (enum [ \"100%\" ]) "
+               "(strMatching \"[0-9]+[KMGTP]?\")` (lib/types/gpt.nix) and sgdisk "
+               "has no percentage form; use an absolute size or \"rest\"")
+        return "100%"
+    refuse(f"{where}: size {size!r} is not a LIS size — expected <n>MiB, <n>GiB, "
+           "<n>TiB, <n>% or \"rest\" (schema.md §6.1)")
+    return "100%"
+
+
+def size_mib(size, where: str) -> int | None:
+    """A LIS size in whole MiB, or None with a refusal recorded.
+
+    swapDevices[].size is measured in MiB (nixos/modules/config/swap.nix), and
+    the previous reader was `int(size[:-3]) if size.endswith("GiB") else 4` —
+    so every MiB and TiB spelling silently became a 4 GiB swap file.
+    """
+    if not isinstance(size, str):
+        refuse(f"{where}: size {size!r} is not a string")
+        return None
+    for unit, factor in (("MiB", 1), ("GiB", 1024), ("TiB", 1024 * 1024)):
+        if size.endswith(unit) and size[: -len(unit)].isdigit():
+            return int(size[: -len(unit)]) * factor
+    refuse(f"{where}: size {size!r} is not a LIS size — expected <n>MiB, <n>GiB "
+           "or <n>TiB (schema.md §6.5)")
+    return None
 
 
 # ── disko.nix ──────────────────────────────────────
@@ -106,6 +149,58 @@ def zfs_child(base: str, name: str) -> str:
 # second document translated in the same process.
 _ARBITRATED: dict[int, tuple[dict, dict[int, str | None]]] = {}
 
+_NAMED: dict[int, tuple[dict, dict[int, tuple[str, str]]]] = {}
+
+
+def partition_names(storage: dict) -> dict[int, tuple[str, str]]:
+    """id(partition) -> (disk id, the attribute name disko will give it).
+
+    One table, computed once, consumed by every pass. It used to be recomputed
+    three times from three slightly different loops — render_disko counted the
+    per-disk index *after* skipping adopted partitions while mount_table and
+    luks_initrd_devices counted every one — so a document with an `existing`
+    entry made disko.nix and hardware.nix disagree about which partition is
+    which, and hardware.nix named devices that were never created.
+    """
+    cached = _NAMED.get(id(storage))
+    if cached is not None and cached[0] is storage:
+        return cached[1]
+    index: dict[str, int] = {}
+    out: dict[int, tuple[str, str]] = {}
+    for position, part in enumerate(storage.get("partitions", []) or [], 1):
+        disk_id = part.get("disk")
+        if not disk_id:
+            refuse(f"partition {part.get('id') or position!r}: no 'disk' handle — "
+                   "storage.partitions[].disk is required (schema.md §6.1), and "
+                   "without it there is no disk to create the partition on")
+            disk_id = "main"
+        index[disk_id] = index.get(disk_id, 0) + 1
+        out[id(part)] = (disk_id,
+                         part.get("id") or f"{part.get('role', 'part')}{index[disk_id]}")
+    _NAMED[id(storage)] = (storage, out)
+    return out
+
+
+def partition_label(disk_id: str, name: str) -> str:
+    """The GPT name disko writes for a partition, character for character.
+
+    disko's default is `${parent.type}-${parent.name}-${partition.name}`, but a
+    GPT name is 72 bytes of UTF-16 so it caps at 36 characters and falls back to
+    `substring 0 36 (hashString "sha256" label)` past that (lib/types/gpt.nix:
+    139-151). hardware.nix derives /dev/disk/by-partlabel/… from this, so
+    reimplementing the truncation is the difference between a mountable root and
+    a device node that does not exist — for any document whose disk and
+    partition handles together run long.
+    """
+    label = f"disk-{disk_id}-{name}"
+    if len(label) > 36:
+        label = hashlib.sha256(label.encode()).hexdigest()[:36]
+    return label
+
+
+def partition_device(disk_id: str, name: str) -> str:
+    return f"/dev/disk/by-partlabel/{partition_label(disk_id, name)}"
+
 
 def partition_mountpoints(storage: dict) -> dict[int, str | None]:
     """Every declared partition's mountpoint, arbitrated, keyed by identity.
@@ -153,18 +248,69 @@ def partition_mountpoints(storage: dict) -> dict[int, str | None]:
     return out
 
 
-def fs_content(lines, pad, fs, mountpoint, mount_options, subvolumes):
+# mkfs spells "give this filesystem a name" differently per family, and each
+# one truncates or rejects past its own on-disk limit — a label mkfs refuses is
+# an install that dies after disko has already wiped the disk, so the length is
+# checked here rather than discovered there.
+LABEL_FLAG = {"ext2": "-L", "ext3": "-L", "ext4": "-L", "xfs": "-L",
+              "btrfs": "-L", "f2fs": "-l", "vfat": "-n", "swap": "-L"}
+LABEL_LIMIT = {"ext2": 16, "ext3": 16, "ext4": 16, "xfs": 12, "btrfs": 255,
+               "f2fs": 512, "vfat": 11, "swap": 15}
+LABEL_SAFE = re.compile(r"[A-Za-z0-9._+:-]+")
+
+
+def label_args(fs: str, label, where: str) -> list[str]:
+    """The mkfs arguments that name a filesystem, or [] with a refusal.
+
+    disko has no `label` of its own; it hands `content.extraArgs` to mkfs
+    (lib/types/filesystem.nix:23,55-60, btrfs :83,155, swap :40), so the flag is
+    per-filesystem. btrfs interpolates them unquoted (`mkfs.btrfs "$dev"
+    ${toString extraArgs}`), which is why the character set is checked too.
+    """
+    if not isinstance(label, str) or not label:
+        refuse(f"{where}: label {label!r} is not a non-empty string")
+        return []
+    flag = LABEL_FLAG.get(fs)
+    if not flag:
+        refuse(f"{where}: label {label!r} on filesystem {fs!r} — mkfs.{fs} has no "
+               "label option this translator knows, so the name would not reach "
+               "the disk")
+        return []
+    if not LABEL_SAFE.fullmatch(label):
+        refuse(f"{where}: label {label!r} — disko interpolates mkfs arguments into "
+               "its create script unquoted (lib/types/btrfs.nix:155), so a label "
+               "is restricted to letters, digits and ._+:-")
+        return []
+    limit = LABEL_LIMIT[fs]
+    if len(label) > limit:
+        refuse(f"{where}: label {label!r} is {len(label)} characters but a {fs} "
+               f"label holds {limit} — mkfs would reject it after disko had "
+               "already partitioned the disk")
+        return []
+    return [flag, label]
+
+
+def fs_content(lines, pad, fs, mountpoint, mount_options, subvolumes,
+               label=None, where="filesystem", extra_subvolumes=()):
     """Emit the `content = { … }` block for a plain filesystem or swap area."""
     if fs in (None, "none"):
         return
+    extra = label_args(fs, label, where) if label is not None else []
     if fs == "swap":
-        lines += [f"{pad}content = {{", f"{pad}  type = \"swap\";", f"{pad}}};"]
+        lines += [f"{pad}content = {{", f"{pad}  type = \"swap\";"]
+        if extra:
+            lines.append(f"{pad}  extraArgs = {nix_list(extra)};")
+        lines.append(f"{pad}}};")
         return
-    if fs == "btrfs" and subvolumes:
+    if fs == "btrfs" and (subvolumes or extra_subvolumes):
         lines += [f"{pad}content = {{",
                   f"{pad}  type = \"btrfs\";",
-                  f"{pad}  extraArgs = [ \"-f\" ];",
+                  f"{pad}  extraArgs = {nix_list(['-f'] + extra)};",
                   f"{pad}  subvolumes = {{"]
+        for name in extra_subvolumes:
+            # mountpoint is omitted deliberately: disko creates the subvolume at
+            # format time and leaves it unmounted (lib/types/btrfs.nix:120,193).
+            lines.append(f"{pad}    {nix_str(name)} = {{ }};")
         covered = any(s["mountpoint"] == mountpoint for s in subvolumes)
         if mountpoint and not covered:
             # Not a rename: nothing in the document covers this mount, and a
@@ -184,6 +330,8 @@ def fs_content(lines, pad, fs, mountpoint, mount_options, subvolumes):
     lines += [f"{pad}content = {{",
               f"{pad}  type = \"filesystem\";",
               f"{pad}  format = {nix_str('vfat' if fs == 'vfat' else fs)};"]
+    if extra:
+        lines.append(f"{pad}  extraArgs = {nix_list(extra)};")
     if mountpoint:
         lines.append(f"{pad}  mountpoint = {nix_str(mountpoint)};")
     if mount_options:
@@ -214,12 +362,22 @@ class Topology:
         self.specs: dict[str, dict] = {}   # handle -> the LIS object declaring it
         self.part_mounts = partition_mountpoints(storage)
 
+        # Spares are deliberately not consumers. disko's mdadm create passes
+        # `--raid-devices="$(wc -l "$disko_devices_dir"/raid_<name>)"`
+        # (lib/types/mdadm.nix:65-68) — it counts every member file — so folding
+        # the spares in turned a 2-disk RAID1 plus a hot spare into a 3-way
+        # RAID1. They are added after the array exists instead; see
+        # render_mdadm's postCreateHook.
+        self.raid_spares: dict[str, list[str]] = {}
         for group in self.lvm:
             for dev in group.get("devices", []):
                 self.consumer[dev] = ("lvm_pv", group["name"])
         for array in self.raid:
-            for dev in array.get("devices", []) + (array.get("spares", []) or []):
+            for dev in array.get("devices", []):
                 self.consumer[dev] = ("mdraid", array["name"])
+            if spares := (array.get("spares") or []):
+                self.raid_spares[array["name"]] = list(spares)
+        self.spare_handles = {h for spares in self.raid_spares.values() for h in spares}
 
         for part in storage.get("partitions", []) or []:
             if handle := part.get("id"):
@@ -240,6 +398,71 @@ class Topology:
                 if vol.get("fs") == "zfs":
                     warn(f"lvm volume '{vol['name']}': fs zfs on a logical volume is "
                          "unusual; a zpool over the physical volumes is preferred")
+        self.check_filesystems()
+
+    def fs_of(self, spec: dict) -> str | None:
+        """The filesystem a partition or volume resolves to, role default included.
+
+        The single reader of that rule. There used to be three: emit_layer
+        inferred a default for `role: swap` alone, mount_table used its own
+        `{esp, swap, root}` table, and the shared ROLE_FS (which also knows
+        `boot`) was consulted by neither. `role: boot` therefore reached disko
+        with no content block at all and hardware.nix still mounted it, and a
+        `role: root` with no `fs` produced an unformatted partition that
+        hardware.nix declared to be btrfs.
+        """
+        return role_fs(spec)
+
+    def check_filesystems(self) -> None:
+        """Refuse any mount whose filesystem nothing will create.
+
+        A partition with a mountpoint and no resolvable filesystem is the
+        wipe-then-fail case: disko partitions the disk, creates nothing on it,
+        and `nixos-install` cannot mount /. Fail-closed here instead (§2.3).
+        """
+        seen: list[tuple[str, dict, str | None]] = []
+        for part in self.storage.get("partitions", []) or []:
+            handle = part.get("id") or ""
+            if handle and (handle in self.spare_handles
+                           or self.owner_of(handle) is not None):
+                continue    # an aggregate or a pool owns it, directly or through luks
+            if part.get("existing"):
+                continue    # refused where the layout is rendered
+            seen.append((f"partition {part.get('id') or part.get('role') or '?'!r}",
+                         part, self.mountpoint_of(part)))
+        for group in self.lvm:
+            for vol in group.get("volumes", []):
+                if self.owner_of(vol.get("name", "")) is not None:
+                    continue
+                seen.append((f"lvm volume {group['name']}/{vol.get('name')!r}",
+                             vol, vol.get("mountpoint")))
+        for array in self.raid:
+            if self.owner_of(array["name"]) is not None:
+                continue
+            seen.append((f"raid array {array['name']!r}", array,
+                         self.mountpoint_of(array)))
+
+        for where, spec, mountpoint in seen:
+            fs = self.fs_of(spec)
+            if fs in (None, "none") and mountpoint:
+                refuse(f"{where}: mountpoint {mountpoint} but no filesystem — "
+                       f"role {spec.get('role')!r} implies none (schema.md §6.1 "
+                       "lists a default only for esp, boot, root and swap) and "
+                       "`fs` is not declared, so disko would create the partition "
+                       "and format nothing while the installed system was told to "
+                       "mount it; declare storage.…fs")
+            elif fs in (None, "none") and spec.get("role") not in ("raw", None):
+                warn(f"{where}: role {spec.get('role')!r} with no `fs` — the "
+                     "partition is created but never formatted and nothing mounts "
+                     "it; declare fs: none to say so deliberately")
+            if fs == "vfat" and (spec.get("subvolumes") or []):
+                refuse(f"{where}: subvolumes are declared on a {fs} filesystem, "
+                       "which has none")
+            if spec.get("role") == "esp" and fs != "vfat":
+                refuse(f"{where}: role 'esp' with fs {fs!r} — an EFI System "
+                       "Partition is vfat by definition (schema.md §6.1: "
+                       "'esp → EF00 + vfat'), and firmware will not read "
+                       f"{fs} from it")
 
     def mountpoint_of(self, spec: dict) -> str | None:
         """Where this spec's filesystem goes, after the whole layout arbitrated.
@@ -250,6 +473,32 @@ class Topology:
         if id(spec) in self.part_mounts:
             return self.part_mounts[id(spec)]
         return spec.get("mountpoint") or ("/" if spec.get("role") == "root" else None)
+
+    def device_of(self, handle: str) -> str | None:
+        """The device node a document handle names once disko has run."""
+        names = partition_names(self.storage)
+        for part in self.storage.get("partitions", []) or []:
+            if part.get("id") == handle:
+                return partition_device(*names[id(part)])
+        for array in self.raid:
+            if array["name"] == handle:
+                return f"/dev/md/{handle}"
+        for crypt in self.encryption:
+            if crypt["id"] == handle:
+                return f"/dev/mapper/{handle}"
+        for group in self.lvm:
+            for vol in group.get("volumes", []):
+                if vol.get("name") == handle:
+                    return lv_device(group["name"], vol["name"])
+        return None
+
+    def spare_device(self, handle: str) -> str:
+        device = self.device_of(handle)
+        if device is None:
+            refuse(f"raid spare {handle!r} does not resolve to a partition, array, "
+                   "container or logical volume declared in this document")
+            return "/dev/null"
+        return device
 
     def owner_of(self, handle: str) -> tuple[str, str] | None:
         """The consumer of a handle, following an encryption container if present."""
@@ -314,9 +563,52 @@ class Topology:
                       f"{pad}}};"]
         else:
             mp = self.mountpoint_of(spec)
-            fs = spec.get("fs") or ("swap" if spec.get("role") == "swap" else None)
+            fs = self.fs_of(spec)
             fs_content(lines, pad, fs, mp, spec.get("mount_options", []),
-                       spec.get("subvolumes", []))
+                       spec.get("subvolumes", []), label=spec.get("label"),
+                       where=f"{spec.get('id') or spec.get('name') or handle!r}",
+                       extra_subvolumes=self.extra_subvolumes(spec, fs, mp))
+
+    def extra_subvolumes(self, spec: dict, fs, mountpoint) -> tuple:
+        """Subvolumes disko must create that no `subvolumes[]` entry declares.
+
+        snapper stores its history in a subvolume named .snapshots under the
+        configured path and its NixOS module never creates one (services/misc/
+        snapper.nix:50-52). It used to be made by a firstboot shell command, so
+        the first timeline tick before that unit ran had nowhere to write;
+        disko can create it at format time instead (lib/types/btrfs.nix:120,
+        which accepts a subvolume with no mountpoint).
+        """
+        if fs != "btrfs" or mountpoint != "/":
+            return ()
+        if not ((self.storage.get("snapshots") or {}).get("enabled")):
+            return ()
+        subvolumes = spec.get("subvolumes") or []
+        # Whatever ends up mounted at / is where snapper looks; fs_content
+        # invents '@' when nothing covers the path, so mirror that choice.
+        root = next((s["name"] for s in subvolumes if s.get("mountpoint") == "/"), "@")
+        wanted = f"{root}/.snapshots"
+        declared = {s.get("name") for s in subvolumes}
+        return () if wanted in declared else (wanted,)
+
+
+_TOPOLOGY: dict[int, tuple[dict, "Topology"]] = {}
+
+
+def topology_for(doc: dict) -> Topology:
+    """The one Topology for this document.
+
+    render_disko, mount_table and luks_initrd_devices each used to build their
+    own, so every diagnostic Topology raises was printed three times and the
+    three passes could reach different conclusions from the same document.
+    """
+    storage = doc.get("storage", {}) or {}
+    cached = _TOPOLOGY.get(id(storage))
+    if cached is not None and cached[0] is storage:
+        return cached[1]
+    built = Topology(storage, doc)
+    _TOPOLOGY[id(storage)] = (storage, built)
+    return built
 
 
 def render_mdadm(topology: Topology, out: list) -> None:
@@ -333,9 +625,25 @@ def render_mdadm(topology: Topology, out: list) -> None:
         out += [f"      {nix_str(name)} = {{",
                 "        type = \"mdadm\";",
                 f"        level = {array['level']};"]
-        if spares := array.get("spares"):
-            out.append(f"        # {len(spares)} spare(s) declared: "
-                       f"{', '.join(spares)} — disko marks them by device order")
+        if spares := topology.raid_spares.get(name):
+            # A spare cannot be declared inline: disko sizes the array with
+            # `--raid-devices="$(wc -l "$disko_devices_dir"/raid_<name>)"`
+            # (lib/types/mdadm.nix:65-68), which counts every member it was
+            # given, so listing the spare there built a wider array instead of
+            # a narrower one with a hot spare. `mdadm --add` after creation is
+            # the documented way to attach one (mdadm(8), "Grow mode … --add"),
+            # and disko exposes postCreateHook on every node
+            # (lib/default.nix:438-441) to run it in the right place.
+            adds = [f"mdadm --add /dev/md/{name} "
+                    f"{topology.spare_device(handle)}" for handle in spares]
+            body = "\n".join(f"          {cmd}" for cmd in adds)
+            out += ["        postCreateHook = ''",
+                    body,
+                    "        '';"]
+            warn(f"raid '{name}': {len(spares)} hot spare(s) are attached with "
+                 "`mdadm --add` from a disko postCreateHook after the array is "
+                 "created, not declared as part of it — disko counts every "
+                 "declared member as active (lib/types/mdadm.nix:65-68)")
         topology.emit_content(out, "        ", name, array)
         out.append("      };")
     out.append("    };")
@@ -397,7 +705,8 @@ def render_disko(doc: dict) -> str:
         raise SystemExit("error: document has no storage section — nothing to generate")
     partitions = storage.get("partitions", [])
     lvm = storage.get("lvm", []) or []
-    topology = Topology(storage, doc)
+    topology = topology_for(doc)
+    names = partition_names(storage)
 
     if not storage.get("wipe", False):
         # --apply runs `disko --mode destroy,format,mount`; disko recreates the
@@ -444,28 +753,51 @@ def render_disko(doc: dict) -> str:
                     "              type = \"EF02\";",
                     "              priority = 1;",
                     "            };"]
-        index = 0
-        for part in [p for p in partitions if p["disk"] == disk["id"]]:
+        for part in [p for p in partitions if p.get("disk") == disk["id"]]:
+            where = f"partition {part.get('id') or part.get('role') or '?'!r}"
             if part.get("existing"):
-                warn(f"partition adoption ('existing') on disk '{disk['id']}' "
-                     "is not supported by the default translator")
+                # Was a warn() and a `continue`, which is the silent drop §2.3
+                # forbids twice over: the adopted partition disappeared from
+                # disko.nix while hardware.nix still mounted a device nobody
+                # created, and because the per-disk index was counted after the
+                # skip the *remaining* partitions were renamed too. Nothing in
+                # this translator resizes or adopts, so the honest answer is to
+                # say no. disko can express it — explicit `start`/`end`/`uuid`
+                # on a gpt partition (lib/types/gpt.nix:126,139,185,190),
+                # `--mode format,mount` to leave the table alone, and
+                # preCreateHook for the resize — so this is a gap to close, not
+                # a hard limit.
+                refuse(f"{where}: storage.partitions[].existing (adoption) is not "
+                       "implemented by this translator — it runs disko with "
+                       "destroy,format,mount, which recreates the whole table, "
+                       "so an adopted partition would be destroyed rather than "
+                       "kept (schema.md §6.2)")
                 continue
-            index += 1
-            name = part.get("id") or f"{part.get('role', 'part')}{index}"
+            disk_id, name = names[id(part)]
             out.append(f"            {nix_str(name)} = {{")
             if part.get("size"):
-                out.append(f"              size = {nix_str(disko_size(part['size']))};")
+                out.append("              size = "
+                           f"{nix_str(disko_size(part['size'], where))};")
+            # The GPT name is stated rather than left to disko's default,
+            # because hardware.nix derives /dev/disk/by-partlabel/… from it and
+            # the two must agree even when the default would have been hashed.
+            out.append(f"              label = "
+                       f"{nix_str(partition_label(disk_id, name))};")
             if part.get("role") == "esp":
                 mp = topology.mountpoint_of(part)
                 out += ["              type = \"EF00\";",
                         "              content = {",
                         "                type = \"filesystem\";",
                         "                format = \"vfat\";"]
+                if label := part.get("label"):
+                    if args := label_args("vfat", label, where):
+                        out.append(f"                extraArgs = {nix_list(args)};")
                 if mp:
                     # An ESP nothing mounts is a refusal above, not a partial
                     # attribute set: disko's filesystem type wants a real path.
                     out.append(f"                mountpoint = {nix_str(mp)};")
-                out += ["                mountOptions = [ \"umask=0077\" ];",
+                opts = list(part.get("mount_options") or []) or ["umask=0077"]
+                out += [f"                mountOptions = {nix_list(opts)};",
                         "              };"]
             else:
                 topology.emit_content(out, "              ",
@@ -482,10 +814,18 @@ def render_disko(doc: dict) -> str:
             out += [f"      {nix_str(group['name'])} = {{",
                     "        type = \"lvm_vg\";", "        lvs = {"]
             for vol in group.get("volumes", []):
+                where = f"lvm volume {group['name']}/{vol.get('name')!r}"
                 out.append(f"          {nix_str(vol['name'])} = {{")
-                out.append(f"            size = {nix_str(disko_size(vol.get('size', 'rest')))};")
-                fs_content(out, "            ", vol.get("fs"), vol.get("mountpoint"),
-                           vol.get("mount_options", []), vol.get("subvolumes", []))
+                # percent=True: lvcreate takes a share of the group, which
+                # disko spells by appending FREE (lib/types/lvm_vg.nix:130-135).
+                out.append("            size = "
+                           f"{nix_str(disko_size(vol.get('size', 'rest'), where, percent=True))};")
+                vol_fs = vol.get("fs")
+                fs_content(out, "            ", vol_fs, vol.get("mountpoint"),
+                           vol.get("mount_options", []), vol.get("subvolumes", []),
+                           label=vol.get("label"), where=where,
+                           extra_subvolumes=topology.extra_subvolumes(
+                               vol, vol_fs, vol.get("mountpoint")))
                 out.append("          };")
             out += ["        };", "      };"]
         out.append("    };")
@@ -505,18 +845,27 @@ def render_hardware(doc: dict) -> str:
     arch = (doc.get("target", {}) or {}).get("arch", "x86_64")
 
     initrd = ["ahci", "xhci_pci", "nvme", "usb_storage", "sd_mod", "virtio_pci", "virtio_blk", "virtio_scsi", "btrfs", "vfat", "nls_cp437", "nls_iso8859_1"]
-    for module in initramfs.get("include_modules", []):
-        if module not in initrd:
-            initrd.append(module)
+    # SPEC §7: include_modules are "always embedded". availableKernelModules is
+    # the conditional list — a module in it is carried in the initrd but only
+    # loaded if something asks for it, which is exactly the case this field
+    # exists for (hardware the auto-detector did not see). kernelModules is the
+    # always list, so that is where a named module goes.
+    always = ["virtio_pci", "virtio_blk", "btrfs", "vfat"]
+    for module in boot_str_list(initramfs.get("include_modules"),
+                                "boot.initramfs.include_modules"):
+        if module not in always:
+            always.append(module)
 
     out = ["# Generated from a LIS document by lis2nixos (default translator).",
            "{ config, lib, pkgs, modulesPath, ... }:", "", "{",
            "  imports = [ (modulesPath + \"/installer/scan/not-detected.nix\") ];", "",
            f"  boot.initrd.availableKernelModules = {nix_list(initrd)};",
-           "  boot.initrd.kernelModules = [ \"virtio_pci\" \"virtio_blk\" \"btrfs\" \"vfat\" ];",
-           f"  boot.kernelModules = {nix_list(kernel.get('modules', []))};"]
+           f"  boot.initrd.kernelModules = {nix_list(always)};",
+           "  boot.kernelModules = "
+           f"{nix_list(boot_str_list(kernel.get('modules'), 'boot.kernel.modules'))};"]
     if kernel.get("blacklist"):
-        out.append(f"  boot.blacklistedKernelModules = {nix_list(kernel['blacklist'])};")
+        out.append("  boot.blacklistedKernelModules = "
+                   f"{nix_list(boot_str_list(kernel['blacklist'], 'boot.kernel.blacklist'))};")
     # boot.kernelParams belongs to render_boot alone. Stating it here as well
     # was not a redundancy: list options merge by concatenation, so every
     # declared parameter reached the kernel command line twice.
@@ -570,29 +919,21 @@ def luks_initrd_devices(doc: dict) -> list[tuple[str, str, str | None]]:
     types it at boot, and the seed that holds it is not attached by then.
     """
     storage = doc.get("storage", {}) or {}
-    topology = Topology(storage, doc)
+    topology = topology_for(doc)
     if not topology.encryption:
         return []
-    disks = storage.get("disks", []) or (doc.get("target", {}) or {}).get("disks", [])
-    disk_ids = [d["id"] for d in disks]
-
-    # Same naming as mount_table: disko labels a partition `disk-<disk>-<id>`.
-    backing: dict[str, str] = {}
-    index: dict[str, int] = {}
-    for part in storage.get("partitions", []) or []:
-        disk_id = part.get("disk") or (disk_ids[0] if disk_ids else "main")
-        index[disk_id] = index.get(disk_id, 0) + 1
-        name = part.get("id") or f"{part.get('role', 'part')}{index[disk_id]}"
-        backing[part.get("id") or name] = f"/dev/disk/by-partlabel/disk-{disk_id}-{name}"
-    for array in storage.get("raid", []) or []:
-        backing[array["name"]] = f"/dev/md/{array['name']}"
 
     devices = []
     for crypt in topology.encryption:
-        device = backing.get(crypt["over"])
+        # One naming table for the whole translator; this pass used to count
+        # partition indices for itself, so an adopted partition earlier in the
+        # list moved the container onto a device that was never created.
+        device = topology.device_of(crypt["over"])
         if not device:
-            warn(f"encryption '{crypt['id']}': over {crypt['over']!r} does not resolve "
-                 "to a partition or array; the booted system will not unlock it")
+            refuse(f"encryption '{crypt['id']}': over {crypt['over']!r} does not "
+                   "resolve to a partition, array or logical volume declared in "
+                   "this document — the installed system would have no device to "
+                   "unlock and stage 1 would stall waiting for it")
             continue
         devices.append((crypt["id"], device,
                         (crypt.get("key", {}) or {}).get("keyfile")))
@@ -630,13 +971,8 @@ def mount_table(doc: dict) -> tuple[list[tuple[str, str, str, list[str]]], list[
     guessed.
     """
     storage = doc.get("storage", {}) or {}
-    topology = Topology(storage, doc)
-    disks = storage.get("disks", []) or (doc.get("target", {}) or {}).get("disks", [])
-    disk_of = {}
-    for disk in disks:
-        for part in storage.get("partitions", []) or []:
-            if part.get("disk") == disk["id"]:
-                disk_of[id(part)] = disk["id"]
+    topology = topology_for(doc)
+    names = partition_names(storage)
 
     mounts: list[tuple[str, str, str, list[str]]] = []
     swaps: list[str] = []
@@ -645,8 +981,9 @@ def mount_table(doc: dict) -> tuple[list[tuple[str, str, str, list[str]]], list[
         # The mountpoint is decided by the caller, not rediscovered here: the
         # partitions come from one arbitration over the whole layout, so the
         # fstab this builds cannot disagree with the disko config that made it.
-        role = spec.get("role")
-        fs = spec.get("fs") or {"esp": "vfat", "swap": "swap", "root": "btrfs"}.get(role)
+        # One role→fs rule, shared with the disko pass through Topology.fs_of;
+        # this used to carry a private table that knew nothing about `boot`.
+        fs = topology.fs_of(spec)
         if fs == "swap":
             swaps.append(device)
             return
@@ -751,10 +1088,47 @@ AS_USER_FN = """lis_as_user() {
 # Absolute shell paths a document may name, mapped to the package NixOS needs.
 SHELL_PATHS = {
     "/bin/bash": "bashInteractive", "/usr/bin/bash": "bashInteractive",
-    "/bin/sh": "bashInteractive",
     "/bin/zsh": "zsh", "/usr/bin/zsh": "zsh",
     "/bin/fish": "fish", "/usr/bin/fish": "fish",
+    "/bin/dash": "dash", "/usr/bin/dash": "dash",
+    "/bin/ksh": "ksh", "/usr/bin/ksh": "ksh",
+    "/bin/tcsh": "tcsh", "/usr/bin/tcsh": "tcsh",
+    "/bin/nu": "nushell", "/usr/bin/nu": "nushell",
+    "/bin/elvish": "elvish", "/usr/bin/elvish": "elvish",
+    "/bin/xonsh": "xonsh", "/usr/bin/xonsh": "xonsh",
 }
+
+# SPEC §9's intent names for a login shell. Every attribute here carries a
+# `shellPath`, which is what users.users.<n>.shell's shellPackage type checks
+# for and what config/users-groups.nix turns into the /etc/passwd field; the
+# package also lands in environment.systemPackages and /etc/shells, which is
+# the "intent names oblige the applier to install the shell" half of §9.
+# Verified as attributes with a shellPath on nixos-24.11.
+SHELL_INTENT = {
+    "bash": "bashInteractive", "zsh": "zsh", "fish": "fish", "dash": "dash",
+    "ksh": "ksh", "tcsh": "tcsh", "nushell": "nushell", "nu": "nushell",
+    "elvish": "elvish", "xonsh": "xonsh",
+}
+
+# Shells whose package is not enough: their NixOS module is what writes the
+# system-wide rc file the login shell sources.
+PROGRAMS_MODULE = {"zsh": "zsh", "fish": "fish"}
+
+# "give this account no shell". shadow is in every NixOS system's default
+# profile (config/system-path.nix), so the path resolves on the installed
+# machine; nologin has no shellPath, so it is a path and not a package here.
+NOLOGIN = "/run/current-system/sw/bin/nologin"
+NOLOGIN_PATHS = {"nologin", "/sbin/nologin", "/usr/sbin/nologin",
+                 "/bin/false", "/usr/bin/false"}
+
+# useradd(8)'s NAME_REGEX. A group name outside it is rejected by groupadd on
+# the installed machine, long after this translation reported success.
+GROUP_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}\$?")
+
+
+def nix_attr(name: str) -> str:
+    """An attribute-set key, bare where Nix's identifier syntax allows it."""
+    return name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_'-]*", name) else nix_str(name)
 
 # Packages put on PATH for LIS script hooks, on both activation and first boot.
 # pkgs.shadow splits su into its own output, so pkgs.shadow alone yields
@@ -969,6 +1343,16 @@ def host_stage_bodies(doc: dict, stage: str) -> list[str]:
     return [s["content"] for s in scripts.get(stage, []) or [] if s.get("content")]
 
 
+def world_readable_store(mode: str | None) -> bool:
+    """True when `mode` denies world read, i.e. the store copy contradicts it."""
+    if not mode:
+        return False
+    try:
+        return not int(mode, 8) & 0o004
+    except ValueError:
+        return False
+
+
 def render_files(doc: dict) -> tuple[list[str], list[str]]:
     """files[] → environment.etc under /etc, activation elsewhere.
 
@@ -999,6 +1383,17 @@ def render_files(doc: dict) -> tuple[list[str], list[str]]:
                    "to say once what the file contains")
             continue
         seen.add(entry["path"])
+        if entry.get("mode") is not None:
+            try:
+                int(entry["mode"], 8)
+            except ValueError:
+                # environment.etc.<n>.mode is a bare string handed to install(1)
+                # during activation, so a mode that is not octal is not caught
+                # by evaluation — it fails on the installed machine, at a point
+                # where the file exists with whatever mode install fell back to.
+                refuse(f"files[] entry {entry['path']!r}: mode "
+                       f"{entry['mode']!r} is not an octal permission string")
+                continue
         raw = entry["content"]
         blob = base64.b64decode(raw) if entry.get("encoding") == "base64" \
             else raw.encode()
@@ -1014,6 +1409,20 @@ def render_files(doc: dict) -> tuple[list[str], list[str]]:
 
         if path.startswith("/etc/") and text is not None:
             rest = path[len("/etc/"):]
+            # environment.etc gets the /etc permissions right and the store
+            # copy wrong: `.text` becomes a world-readable file in /nix/store
+            # that the /etc entry is copied from, so a mode denying world read
+            # confines the copy and not the content. Nothing in NixOS can keep
+            # a declaratively-written file out of the store — an activation
+            # script would carry the same bytes in a store-resident script —
+            # so the honest answer is to say so rather than let the mode read
+            # as a confidentiality guarantee it is not.
+            if world_readable_store(mode):
+                warn(f"files[] entry {path!r} asks for mode {mode!r}, which "
+                     "denies world read: /etc gets that mode, but the content "
+                     "is copied from a world-readable /nix/store path, so it "
+                     "is not confidential on the installed machine (SPEC §2.4 "
+                     "— put secrets on the seed, not in files[])")
             out.append(f"  environment.etc.{nix_str(rest)}.text = {nix_str(text)};")
             # uid/gid and mode only take effect when the entry is *copied*:
             # etc.nix:49-52 skips them when mode is the "symlink" default, so an
@@ -1038,6 +1447,16 @@ def render_files(doc: dict) -> tuple[list[str], list[str]]:
                  "declarative option for an arbitrary path, so it is written by "
                  "an activation script on every activation instead of being "
                  "managed by the store")
+        if world_readable_store(mode):
+            # The activation script is itself a store path, and the content
+            # travels inside it base64-encoded. The written file gets the mode
+            # asked for; the bytes are readable by anyone who can read the
+            # store, which on a NixOS machine is everyone.
+            warn(f"files[] entry {path!r} asks for mode {mode!r}, which denies "
+                 "world read: the file is written with that mode, but its "
+                 "content is embedded in a world-readable /nix/store "
+                 "activation script, so it is not confidential (SPEC §2.4 — "
+                 "put secrets on the seed, not in files[])")
         quoted = shlex.quote(path)
         b64 = base64.b64encode(blob).decode()
         cmds.append(f"install -D -m {shlex.quote(mode or '0644')} /dev/null {quoted}")
@@ -1163,6 +1582,42 @@ KERNEL_PACKAGES = {
 }
 
 
+# nixpkgs 24.11 marks the ZFS kernel module broken against kernels newer than
+# the series it supports, and `zen` is one of them: with `fs: zfs` in the
+# document and this variant, evaluation dies with "Package zfs-kernel-2.2.7-
+# 6.15.2 … is marked as broken" (pkgs/os-specific/linux/zfs/generic.nix:309) —
+# inside nixos-install, after disko has wiped the disks. lts, hardened and
+# realtime all track a series ZFS still builds against and were evaluated
+# clean.
+ZFS_BROKEN_VARIANTS = {"zen"}
+
+
+def declares_zfs(doc: dict) -> bool:
+    """Whether any filesystem in the document is ZFS."""
+    storage = doc.get("storage", {}) or {}
+    if any(part.get("fs") == "zfs" for part in storage.get("partitions", []) or []):
+        return True
+    if any(vol.get("fs") == "zfs" for group in storage.get("lvm", []) or []
+           for vol in group.get("volumes", []) or []):
+        return True
+    return any(array.get("fs") == "zfs" for array in storage.get("raid", []) or [])
+
+
+def boot_str_list(value, path: str) -> list[str]:
+    """A `boot.*` list of strings, refused rather than crashed on.
+
+    nix_str() raises AttributeError on anything that is not a string, so a
+    number in kernel.params aborted the translation with a Python traceback
+    instead of the stated reason SPEC §2.3 asks for.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        refuse(f"{path} must be a list of strings (SPEC §7)")
+        return []
+    return list(value)
+
+
 def serial_console_ttys(params: list[str]) -> list[str]:
     """The serial lines named by console= parameters, in document order."""
     ttys = []
@@ -1206,24 +1661,49 @@ def render_boot(doc: dict) -> list[str]:
     kernel = boot.get("kernel", {}) or {}
     target = doc.get("target", {}) or {}
     firmware = target.get("firmware", "uefi")
+    declared_auto = "loader" in boot and boot.get("loader") == "auto"
     loader = boot.get("loader", "auto")
     os_prober = boot.get("os_prober")
     pwhash = boot.get("password_hash")
     serial = (boot.get("console", {}) or {}).get("serial")
     out: list[str] = []
 
+    # Shape first. A value of the wrong type is a document error, not an
+    # unsupported request, and every one of these reaches a generated Nix file:
+    # `os_prober: "yes"` is truthy and would enable a probe the document did not
+    # ask for, and a non-string hash or console name crashes nix_str().
+    if os_prober is not None and not isinstance(os_prober, bool):
+        refuse(f"boot.os_prober {os_prober!r} is not a boolean (SPEC §7)")
+        os_prober = None
+    if pwhash is not None and not isinstance(pwhash, str):
+        refuse(f"boot.password_hash {pwhash!r} is not a string (SPEC §7)")
+        pwhash = None
+    if serial is not None and not isinstance(serial, str):
+        refuse(f"boot.console.serial {serial!r} is not a string (SPEC §7)")
+        serial = None
+
     # `auto` is the translator's choice, so it is made against the rest of the
     # document: two of these fields exist only in GRUB, and picking
     # systemd-boot for a document that asks for them would turn an honorable
     # translation into a refusal for no reason.
+    resolution_reported = False
     if loader == "auto" and firmware != "bios" and (pwhash or os_prober):
         asked = " and ".join(n for n, v in (("boot.password_hash", pwhash),
                                             ("boot.os_prober", os_prober)) if v)
         warn(f"boot.loader auto resolves to grub, not systemd-boot: {asked} "
              "has no systemd-boot equivalent in NixOS")
         loader = "grub"
+        resolution_reported = True
 
     on_systemd_boot = loader in ("auto", "systemd-boot") and firmware != "bios"
+    # A document that says `auto` asked the applier to choose; SPEC §2.3 wants
+    # the choice reported, §19 records it as a substitution. A document that
+    # omitted `loader` asked for the distro default (SPEC §3) and is not a
+    # substitution, so it stays quiet.
+    if declared_auto and not resolution_reported:
+        warn(f"boot.loader auto resolves to "
+             f"{'systemd-boot' if on_systemd_boot else 'grub'} on "
+             f"{firmware} firmware (SPEC §2.3 substitution)")
     if on_systemd_boot:
         out += ["  boot.loader.systemd-boot.enable = true;",
                 "  boot.loader.efi.canTouchEfiVariables = true;"]
@@ -1231,6 +1711,9 @@ def render_boot(doc: dict) -> list[str]:
             refuse("boot.os_prober: only GRUB detects other operating systems on "
                    "NixOS (boot.loader.grub.useOSProber, grub.nix:485); systemd-boot "
                    "has no equivalent option — set boot.loader to grub")
+        elif os_prober is False:
+            out.append("  # boot.os_prober: false — systemd-boot lists only the "
+                       "entries NixOS writes, so there is nothing to turn off.")
         if pwhash:
             refuse("boot.password_hash: NixOS protects boot entries through "
                    "boot.loader.grub.users (grub.nix:211), which systemd-boot has no "
@@ -1273,8 +1756,13 @@ def render_boot(doc: dict) -> list[str]:
                     # exclusive with canTouchEfiVariables (grub.nix:871), which
                     # is why that option is not set on this branch.
                     "  boot.loader.grub.efiInstallAsRemovable = true;"]
-        if os_prober:
-            out.append("  boot.loader.grub.useOSProber = true;")
+        if os_prober is not None:
+            # Stated in both directions. `false` used to emit nothing and lean
+            # on the NixOS default, which reads the same in the generated file
+            # as a document that never mentioned os-prober — and leaves the
+            # answer to whatever a later `imports =` decides.
+            out.append("  boot.loader.grub.useOSProber = "
+                       f"{str(os_prober).lower()};")
         if pwhash:
             # A crypt(3) hash here is not a weaker password, it is no password:
             # GRUB only understands its own PBKDF2 format and rejects the rest,
@@ -1299,37 +1787,89 @@ def render_boot(doc: dict) -> list[str]:
              "NixOS, so the boot menu stays on the firmware console; the kernel "
              "and the getty do use the serial line")
 
-    if boot.get("timeout") is not None:
-        out.append(f"  boot.loader.timeout = {boot['timeout']};")
+    timeout = boot.get("timeout")
+    if timeout is not None:
+        # An unquoted value straight from the document: a string reaches
+        # boot.loader.timeout as a bare token and fails to *parse*, which under
+        # --apply happens inside nixos-install, after disko has wiped the disks.
+        if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 0:
+            refuse(f"boot.timeout {timeout!r} is not a non-negative integer (SPEC §7)")
+        else:
+            out.append(f"  boot.loader.timeout = {timeout};")
 
     # boot.console.serial is the intent "give me a serial console"; the console=
     # parameter is one of the two halves the spec says it expands to (§7).
-    params = list(kernel.get("params", []) or [])
+    params = boot_str_list(kernel.get("params"), "boot.kernel.params")
     if serial and f"console={serial}" not in params:
         params.append(f"console={serial}")
     if params:
         out.append(f"  boot.kernelParams = {nix_list(params)};")
-    for tty in serial_console_ttys(params):
+    ttys = serial_console_ttys(params)
+    for tty in ttys:
         out.append(f"  systemd.services.\"serial-getty@{tty}\".enable = true;")
+    if serial and not serial_console_ttys([f"console={serial}"]):
+        # The other half of §7's obligation, and the half that goes missing in
+        # silence: getty.nix:153 only instantiates serial-getty@ for a tty
+        # something names, and this name is not one this translator recognises.
+        warn(f"boot.console.serial {serial!r}: not a serial line NixOS starts a "
+             "getty on (ttyS<n>, ttyUSB<n>, ttyAMA<n>, hvc<n>) — the console= "
+             "kernel parameter is set, but no serial-getty unit is enabled")
 
+    variant = kernel.get("variant")
     if kernel_set := check_kernel_variant(doc, KERNEL_PACKAGES, "NixOS"):
         # Dashes are legal in a Nix identifier, so linuxPackages-rt needs no
         # quoting; it is still an attribute name, not an option path.
         out.append(f"  boot.kernelPackages = pkgs.{kernel_set};")
+        if variant in ZFS_BROKEN_VARIANTS and declares_zfs(doc):
+            refuse(f"boot.kernel.variant {variant!r} with a zfs filesystem: nixpkgs "
+                   "24.11 marks the ZFS kernel module broken against this kernel "
+                   "series ('Package zfs-kernel-2.2.7-6.15.2 … is marked as broken', "
+                   "pkgs/os-specific/linux/zfs/generic.nix:309), so the two cannot be "
+                   "installed together — nixos-install would fail to evaluate after "
+                   "disko has already wiped the disks; use default, lts, hardened or "
+                   "realtime with zfs")
 
-    if boot.get("uki"):
+    uki = boot.get("uki")
+    if uki is True:
         refuse("boot.uki: NixOS 24.11 can build a UKI (system.build.uki, "
                "modules/system/boot/uki.nix:108) but no bootloader module installs one "
                "— the single in-tree consumer is the disk-image builder "
                "modules/image/repart-verity-store.nix:169, and there is no "
                "boot.uki.enable; a UKI install needs the out-of-tree lanzaboote module")
-    if boot.get("secure_boot") is True:
+    elif uki is False:
+        out.append("  # boot.uki: false — the loader above manages a kernel and an "
+                   "initrd as a pair, which is what this asks for.")
+    elif uki is not None:
+        refuse(f"boot.uki {uki!r} is not a boolean (SPEC §7)")
+
+    # `is True` alone let the *string* "true" through with no option, no
+    # refusal and no diagnostic: a document asking for Secure Boot installed an
+    # unsigned system that claimed to honor it. Both booleans and `auto` are
+    # answered here, and anything else is a document error.
+    secure = boot.get("secure_boot")
+    if secure is True:
         refuse("boot.secure_boot: NixOS 24.11 signs nothing — no module in "
                "nixos/modules installs a shim or a signed loader (the tree's only "
                "'secureBoot' is virtualisation.useSecureBoot, a guest-firmware switch "
                "for test VMs); Secure Boot needs the out-of-tree lanzaboote module")
+    elif secure is False:
+        out.append("  # boot.secure_boot: false — nothing here signs a loader or "
+                   "enrolls a key, so the request is met as written.")
+    elif secure == "auto":
+        warn("boot.secure_boot auto resolves to off: NixOS 24.11 ships no shim and "
+             "no signed loader, so the machine boots with Secure Boot disabled "
+             "(SPEC §2.3 substitution)")
+        out.append("  # boot.secure_boot: auto — resolved to off; NixOS 24.11 has "
+                   "no in-tree shim or signed loader to enable it with.")
+    elif secure is not None:
+        refuse(f"boot.secure_boot {secure!r} is not a value SPEC §7 defines "
+               "(auto | true | false)")
+
     generator = (boot.get("initramfs", {}) or {}).get("generator")
-    if generator not in (None, "auto"):
+    if generator == "auto":
+        out.append("  # boot.initramfs.generator: auto — NixOS builds its own "
+                   "initrd from the module list below.")
+    elif generator is not None:
         refuse(f"boot.initramfs.generator {generator!r}: NixOS builds its own initrd "
                "(optionally the systemd one via boot.initrd.systemd.enable); dracut, "
                "mkinitcpio and booster appear nowhere in nixos/modules")
@@ -1407,6 +1947,85 @@ def nix_addr_list(addrs: list[tuple[str, int]]) -> str:
     return f"[ {items} ]"
 
 
+# firewalld's shipped service definitions are the lingua franca the rest of
+# this tree already hands `allow_services` to — lis_common.py:1215 shells out
+# to `firewall-cmd --permanent --add-service=<name>` and lis2kickstart.py:389
+# writes `firewall --service=<name>`. NixOS has no service database at all:
+# networking.firewall.allowed*Ports are lists of integers. So the same names
+# resolve here, applier-side, to the ports firewalld's own
+# /usr/lib/firewalld/services/<name>.xml opens. Values are `allow_ports[]`
+# syntax so both inputs go through one parser.
+FIREWALL_SERVICES: dict[str, tuple[str, ...]] = {
+    "amqp": ("5672/tcp",),
+    "bitcoin": ("8333/tcp",),
+    "cockpit": ("9090/tcp",),
+    "dhcp": ("67/udp",),
+    "dhcpv6": ("547/udp",),
+    "dhcpv6-client": ("546/udp",),
+    "dns": ("53/tcp", "53/udp"),
+    "dns-over-tls": ("853/tcp",),
+    "docker-registry": ("5000/tcp",),
+    "elasticsearch": ("9200/tcp", "9300/tcp"),
+    "ftp": ("21/tcp",),
+    "git": ("9418/tcp",),
+    "grafana": ("3000/tcp",),
+    "http": ("80/tcp",),
+    "https": ("443/tcp",),
+    "imap": ("143/tcp",),
+    "imaps": ("993/tcp",),
+    "influxdb": ("8086/tcp",),
+    "ipp": ("631/tcp",),
+    "ipp-client": ("631/udp",),
+    "ipsec": ("500/udp", "4500/udp"),
+    "iscsi-target": ("3260/tcp",),
+    "kerberos": ("88/tcp", "88/udp"),
+    "kube-apiserver": ("6443/tcp",),
+    "ldap": ("389/tcp",),
+    "ldaps": ("636/tcp",),
+    "memcached": ("11211/tcp",),
+    "mdns": ("5353/udp",),
+    "mongodb": ("27017/tcp",),
+    "mosh": ("60000-61000/udp",),
+    "mqtt": ("1883/tcp",),
+    "mysql": ("3306/tcp",),
+    "nfs": ("2049/tcp",),
+    "nfs3": ("111/tcp", "111/udp", "2049/tcp", "2049/udp",
+             "20048/tcp", "20048/udp"),
+    "nrpe": ("5666/tcp",),
+    "ntp": ("123/udp",),
+    "openvpn": ("1194/udp",),
+    "pop3": ("110/tcp",),
+    "pop3s": ("995/tcp",),
+    "postgresql": ("5432/tcp",),
+    "prometheus": ("9090/tcp",),
+    "ptp": ("319/udp", "320/udp"),
+    "rdp": ("3389/tcp",),
+    "redis": ("6379/tcp",),
+    "rpc-bind": ("111/tcp", "111/udp"),
+    "rsyncd": ("873/tcp",),
+    "samba": ("137/udp", "138/udp", "139/tcp", "445/tcp"),
+    "samba-client": ("137/udp", "138/udp"),
+    "smtp": ("25/tcp",),
+    "smtps": ("465/tcp",),
+    "snmp": ("161/udp",),
+    "snmptrap": ("162/udp",),
+    "squid": ("3128/tcp",),
+    "ssh": ("22/tcp",),
+    "submission": ("587/tcp",),
+    "svn": ("3690/tcp",),
+    "syslog": ("514/udp",),
+    "syslog-tls": ("6514/tcp",),
+    "telnet": ("23/tcp",),
+    "tftp": ("69/udp",),
+    "tor-socks": ("9050/tcp",),
+    "transmission-client": ("51413/tcp", "51413/udp"),
+    "upnp-client": ("1900/udp",),
+    "vnc-server": ("5900-5903/tcp",),
+    "wireguard": ("51820/udp",),
+    "ws-discovery": ("3702/udp",),
+}
+
+
 def render_firewall(firewall: dict, out: list[str]) -> None:
     """network.firewall → networking.firewall.*.
 
@@ -1415,30 +2034,46 @@ def render_firewall(firewall: dict, out: list[str]) -> None:
     and not even parseable Nix — and under --apply the disks are already gone by
     the time the evaluation fails.
     """
-    if services := firewall.get("allow_services"):
-        refuse(f"network.firewall.allow_services {services!r}: NixOS has no "
-               "service-name to port table — networking.firewall only takes "
-               "numbers (allowedTCPPorts/allowedTCPPortRanges); name the ports "
-               "in network.firewall.allow_ports instead")
     enabled = firewall.get("enabled")
     if enabled is not None:
         out.append(f"  networking.firewall.enable = {str(enabled).lower()};")
+    # (spec, where it came from) — allow_services[] is expanded into the same
+    # syntax allow_ports[] uses so one parser and one refusal path serve both.
+    specs: list[tuple[str, str]] = []
+    for service in firewall.get("allow_services", []) or []:
+        opened = FIREWALL_SERVICES.get(str(service).strip().lower())
+        if opened is None:
+            refuse(f"network.firewall.allow_services {service!r} is not a "
+                   "service name this translator can resolve to ports: NixOS "
+                   "has no service database (networking.firewall.allowed*Ports "
+                   "are lists of integers), so the name is resolved here "
+                   "against firewalld's service definitions — "
+                   f"{len(FIREWALL_SERVICES)} names, from 'amqp' to "
+                   "'ws-discovery'. Name the ports in "
+                   "network.firewall.allow_ports instead")
+            continue
+        specs += [(spec, f"network.firewall.allow_services {service!r}")
+                  for spec in opened]
+    specs += [(str(spec), "network.firewall.allow_ports")
+              for spec in firewall.get("allow_ports", []) or []]
+
     ports: dict[str, list[int]] = {"tcp": [], "udp": []}
     ranges: dict[str, list[tuple[int, int]]] = {"tcp": [], "udp": []}
-    for spec in firewall.get("allow_ports", []) or []:
-        port, _, proto = str(spec).partition("/")
+    for spec, source in specs:
+        port, _, proto = spec.partition("/")
         low, dash, high = port.partition("-")
         if proto not in ports or not low.isdigit() or (dash and not high.isdigit()):
-            refuse(f"network.firewall.allow_ports {spec!r} is not <port>[-<port>]/<tcp|udp>")
+            refuse(f"{source} {spec!r} is not <port>[-<port>]/<tcp|udp>")
             continue
         if dash:
-            ranges[proto].append((int(low), int(high)))
-        else:
+            if (int(low), int(high)) not in ranges[proto]:
+                ranges[proto].append((int(low), int(high)))
+        elif int(low) not in ports[proto]:
             ports[proto].append(int(low))
     if enabled is False and (any(ports.values()) or any(ranges.values())):
-        warn("network.firewall.allow_ports is not emitted: the same document sets "
-             "network.firewall.enabled false, and networking.firewall ignores its "
-             "allow lists when disabled")
+        warn("network.firewall.allow_ports / allow_services are not emitted: the "
+             "same document sets network.firewall.enabled false, and "
+             "networking.firewall ignores its allow lists when disabled")
         return
     for proto, opt in (("tcp", "TCP"), ("udp", "UDP")):
         if ports[proto]:
@@ -1449,13 +2084,102 @@ def render_firewall(firewall: dict, out: list[str]) -> None:
             out.append(f"  networking.firewall.allowed{opt}PortRanges = [ {listed} ];")
 
 
+def is_glob(name: str | None) -> bool:
+    """Whether a match.name is a pattern rather than one interface name.
+
+    SPEC §10's own example is `{"match": {"name": "en*"}}`, and
+    `networking.interfaces.<name>` is keyed by the literal name — an attribute
+    called `en*` matches nothing and configures nothing. Only systemd-networkd
+    matches patterns (`.network` MatchConfig Name, systemd.network(5)), which
+    is why the manager is resolved before the interfaces are rendered.
+    """
+    return bool(name) and any(c in name for c in "*?[")
+
+
+def networkd_dhcp(dhcp4: bool | None, dhcp6: bool | None) -> str:
+    """dhcp4/dhcp6 → the .network DHCP= value.
+
+    networkd states the two families separately ("ipv4"/"ipv6"/"yes"/"no",
+    systemd.network(5)), so a pattern-matched interface can honour a document
+    that sets them to different values — which `networking.interfaces.<n>.
+    useDHCP`, one flag for both, cannot.
+    """
+    if dhcp4 and dhcp6:
+        return "yes"
+    if dhcp4:
+        return "ipv4"
+    if dhcp6:
+        return "ipv6"
+    return "no"
+
+
+def render_glob_interface(index: int, iface: dict, name: str, mac: str | None,
+                          manager: str, out: list[str]) -> bool:
+    """A `match.name` pattern → systemd.network.networks."80-lis<n>".
+
+    The file name decides precedence, and networkd takes the first `.network`
+    that matches in lexical order: NixOS writes `40-<name>` for every
+    `networking.interfaces` entry and `99-ethernet-default-dhcp` /
+    `99-wireless-client-dhcp` for its blanket fallbacks
+    (network-interfaces-systemd.nix:59,80,106). `80-` therefore loses to an
+    exact-name entry in the same document and wins over the fallback, which is
+    the precedence the document states by naming a pattern at all.
+    """
+    if manager != "systemd-networkd":
+        refuse(f"network.interfaces[{index}].match.name {name!r} is a pattern, "
+               f"and network.manager is {manager!r}: only systemd-networkd "
+               "matches interface patterns (the .network [Match] Name= field). "
+               "networking.interfaces is an attribute set keyed by the literal "
+               f"interface name, so an attribute called {name} would match no "
+               "device and configure nothing. Set network.manager to "
+               "systemd-networkd, or name one interface exactly")
+        consume(iface)
+        return False
+
+    dhcp4, dhcp6 = iface.get("dhcp4"), iface.get("dhcp6")
+    addresses: list[str] = []
+    for addr in iface.get("addresses", []) or []:
+        if cidr(addr) is None:
+            refuse(f"network.interfaces[{index}].addresses {addr!r} is not "
+                   "<address>/<prefix>; systemd.network.networks.<n>.address "
+                   "takes CIDR notation")
+            continue
+        addresses.append(addr)
+    gateway = iface.get("gateway")
+    if dhcp4 is None and dhcp6 is None and not addresses and not gateway:
+        warn(f"network.interfaces[{index}].match.name {name!r} carries no "
+             "addressing (no dhcp4, no dhcp6, no addresses, no gateway), so "
+             "nothing is emitted for it — a .network file with no DHCP= would "
+             "switch the matched devices off rather than leave them alone")
+        consume(iface)
+        return False
+
+    lines = [f"  systemd.network.networks.\"80-lis{index}\" = {{",
+             f"    matchConfig.Name = {nix_str(name)};"]
+    if mac:
+        # [Match] conditions are ANDed (systemd.network(5)), so a document that
+        # states both a pattern and a MAC gets both, not one of them.
+        lines.append(f"    matchConfig.MACAddress = {nix_str(mac)};")
+    if dhcp4 is not None or dhcp6 is not None or addresses:
+        lines.append(f"    DHCP = {nix_str(networkd_dhcp(dhcp4, dhcp6))};")
+    if addresses:
+        lines.append(f"    address = {nix_list(addresses)};")
+    if gateway:
+        lines.append(f"    routes = [ {{ Gateway = {nix_str(gateway)}; }} ];")
+    lines.append("  };")
+    out += lines
+    return True
+
+
 def render_interfaces(interfaces: list, manager: str, out: list[str]) -> list[str]:
     """network.interfaces[] → networking.interfaces.<name> and friends.
 
     Returns the interface names configured here so the caller can hand them to
     NetworkManager as `unmanaged`: NixOS assigns the addresses through its own
     units, and NM left to itself would start a second, contradictory DHCP on the
-    very interface the document pinned.
+    very interface the document pinned. A pattern match takes the other route —
+    `systemd.network.networks` — and is not in that list, because networkd is
+    then the manager and there is no NetworkManager to hold off.
     """
     names: list[str] = []
     nameservers: list[str] = []
@@ -1467,6 +2191,12 @@ def render_interfaces(interfaces: list, manager: str, out: list[str]) -> list[st
         if not name and not mac:
             refuse(f"network.interfaces[{index}].match names neither an interface "
                    "nor a MAC address; nothing to key networking.interfaces on")
+            continue
+        if is_glob(name):
+            if render_glob_interface(index, iface, name, mac, manager, out):
+                if dns := iface.get("dns"):
+                    dns_sources += 1
+                    nameservers += [d for d in dns if d not in nameservers]
             continue
         if not name:
             # networking.interfaces is keyed by name, so a MAC-only match needs a
@@ -1516,6 +2246,10 @@ def render_interfaces(interfaces: list, manager: str, out: list[str]) -> list[st
             out.append(f"  networking.interfaces.{nix_str(name)} = {{")
             out += settings
             out.append("  };")
+        elif not iface.get("gateway") and not iface.get("dns"):
+            warn(f"network.interfaces[{index}].match.name {name!r} carries no "
+                 "addressing (no dhcp4, no dhcp6, no addresses, no gateway, no "
+                 "dns), so no networking.interfaces entry is emitted for it")
 
         if gw := iface.get("gateway"):
             family = 6 if ":" in gw else 4
@@ -1635,14 +2369,106 @@ def write_wireless_secrets(doc: dict) -> None:
         print(f"warning: could not write wireless secrets: {err}", file=sys.stderr)
 
 
+# SPEC §8's four `system.time.provider` values → the NixOS switch that starts
+# that daemon. All three modules take their server list from
+# `networking.timeServers` by default (chrony.nix, openntpd.nix, timesyncd.nix
+# each default `servers` to it), so `system.time.servers[]` is emitted once and
+# reaches whichever one is running.
+TIME_PROVIDERS = {
+    "chrony": "services.chrony.enable",
+    "openntpd": "services.openntpd.enable",
+    "systemd-timesyncd": "services.timesyncd.enable",
+}
+
+
+def render_time(time_cfg: dict) -> list[str]:
+    """system.time.* → the time-synchronisation daemon and its servers.
+
+    `ntp` and `provider` are answered together because they contradict each
+    other when `ntp` is false: NixOS starts systemd-timesyncd by default
+    (timesyncd.nix), so "do not synchronise" is an option that has to be
+    written down, not a default that can be left alone.
+    """
+    out: list[str] = []
+    provider = time_cfg.get("provider")
+    ntp = time_cfg.get("ntp")
+    servers = time_cfg.get("servers")
+    if provider is not None and provider != "auto" and provider not in TIME_PROVIDERS:
+        refuse(f"system.time.provider {provider!r} is not a value SPEC §8 "
+               f"defines (auto | {' | '.join(sorted(TIME_PROVIDERS))})")
+        provider = None
+
+    if ntp is False:
+        out.append("  services.timesyncd.enable = false;")
+        if provider in TIME_PROVIDERS:
+            out.append(f"  {TIME_PROVIDERS[provider]} = false;")
+            warn(f"system.time.provider {provider!r} is not started: the same "
+                 "document sets system.time.ntp false, and a daemon that is "
+                 "not to synchronise the clock has nothing to do")
+        if servers:
+            warn("system.time.servers[] is not emitted: the same document sets "
+                 "system.time.ntp false, so no daemon reads networking.timeServers")
+        return out
+
+    if servers:
+        out.append(f"  networking.timeServers = {nix_list(servers)};")
+    if ntp is None and provider is None:
+        return out
+    if provider in (None, "auto"):
+        # Not a silent default: SPEC §2.3 wants the resolution of `auto` stated.
+        # timesyncd is what a NixOS system runs unless a module displaces it,
+        # and it is the only one of the three in the base closure.
+        warn(f"system.time.provider {provider or '(unset)'} is resolved to "
+             "systemd-timesyncd (services.timesyncd.enable), the NTP client a "
+             "NixOS system runs by default")
+        provider = "systemd-timesyncd"
+    out.append(f"  {TIME_PROVIDERS[provider]} = true;")
+    return out
+
+
+NETWORK_MANAGERS = ("auto", "networkmanager", "systemd-networkd", "iwd")
+
+
+def resolve_manager(network: dict, interfaces: list) -> str:
+    """network.manager → the back-end everything else in this section renders for.
+
+    Resolved before a single line is emitted, because the choice decides the
+    shape of the interface, wifi and address blocks rather than adding one line
+    of its own. `auto` picks NetworkManager — the NixOS default for a machine
+    with a desktop — except when an interface is matched by *pattern*, which
+    only systemd-networkd can do (see render_glob_interface).
+    """
+    manager = network.get("manager", "auto")
+    if manager not in NETWORK_MANAGERS:
+        refuse(f"network.manager {manager!r} is not a value SPEC §10 defines "
+               f"({' | '.join(NETWORK_MANAGERS)})")
+        return "networkmanager"
+    globbed = [i for i, iface in enumerate(interfaces)
+               if is_glob(((iface.get("match") or {}).get("name")))]
+    if manager != "auto":
+        return manager
+    if globbed:
+        warn("network.manager 'auto' is resolved to systemd-networkd because "
+             f"network.interfaces[{globbed[0]}].match.name is a pattern, and "
+             "networking.interfaces is keyed by literal interface name — "
+             "NetworkManager, which 'auto' otherwise picks, would leave the "
+             "pattern unmatched")
+        return "systemd-networkd"
+    if "manager" in network:
+        warn("network.manager 'auto' is resolved to networkmanager "
+             "(networking.networkmanager.enable), the back-end a NixOS system "
+             "with a graphical session is normally installed with")
+    return "networkmanager"
+
+
 def render_network(doc: dict) -> list[str]:
     network = doc.get("network", {}) or {}
     out: list[str] = []
 
     interfaces = network.get("interfaces", []) or []
     wifi = network.get("wifi", []) or []
-    manager = network.get("manager", "auto")
-    if manager in ("auto", "networkmanager"):
+    manager = resolve_manager(network, interfaces)
+    if manager == "networkmanager":
         out.append("  networking.networkmanager.enable = true;")
     elif manager == "systemd-networkd":
         out.append("  networking.useNetworkd = true;")
@@ -1650,7 +2476,7 @@ def render_network(doc: dict) -> list[str]:
         out.append("  networking.wireless.iwd.enable = true;")
 
     static = render_interfaces(interfaces, manager, out)
-    if static and manager in ("auto", "networkmanager"):
+    if static and manager == "networkmanager":
         out.append(f"  networking.networkmanager.unmanaged = {nix_list(static)};")
     if wifi:
         render_wifi(wifi, manager, out)
@@ -1761,6 +2587,23 @@ MINIMAL_PROFILE = [
 # against nixos-24.11: the default evaluates to exactly these three.
 DEFAULT_PACKAGES = ("perl", "rsync", "strace")
 
+# `software.role: server` — NixOS has no server package set, so the only thing
+# the role can say here is the one thing it means on a distro whose base
+# closure is already headless. Stated rather than left to the default so the
+# generated file records the role, and so a greeter asking for X contradicts it.
+SERVER_PROFILE = [("services.xserver.enable", "false")]
+
+# `software.exclude[]` on a desktop role. Each desktop module builds its own
+# package list and offers exactly one subtraction hook; verified present on
+# nixos-24.11 (environment.gnome/plasma6/xfce.excludePackages => OPTION). sway
+# and hyprland have no equivalent — programs.sway.extraPackages is a list to
+# replace, not a set to subtract from — so they are refused by name below.
+DE_EXCLUDE_OPTION = {
+    "desktop:gnome": "environment.gnome.excludePackages",
+    "desktop:kde": "environment.plasma6.excludePackages",
+    "desktop:xfce": "environment.xfce.excludePackages",
+}
+
 # systemd unit names (SPEC §11: "services uses systemd unit names as the
 # lingua franca") → the NixOS option that owns the unit. Enabling a unit no
 # module declares does nothing on NixOS, so only names with a real option are
@@ -1793,6 +2636,34 @@ APP_SOURCE_REFUSALS = {
                 "which contradicts the seed/offline model every LIS "
                 "applier installs under",
 }
+
+
+def nix_pkg_path(name: str) -> str:
+    """A package name as a Nix attribute path, quoting what is not an identifier.
+
+    `1password` and `python3.11` are both legal package names and only one of
+    them is a legal bare Nix attribute path: the other is a syntax error in the
+    generated file, raised by nixos-install after disko has wiped the disks.
+    Dots stay attribute separators (`python3.11` selects `11` out of `python3`);
+    everything else is quoted.
+    """
+    parts = []
+    for part in name.split("."):
+        parts.append(part if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_'-]*", part)
+                     else nix_str(part))
+    return ".".join(parts)
+
+
+def nix_optional_pkgs(names: list[str]) -> str:
+    """A package list where a name nixpkgs does not have drops out, not throws.
+
+    `pkgs.foo or null` is Nix's own "if the attribute is there"; filtering the
+    nulls turns a missing attribute into an absent package instead of an
+    evaluation error. That is the severity SPEC §11 gives `apps[]` and
+    `exclude[]`, and the only one that cannot fail after the wipe.
+    """
+    items = " ".join(f"(pkgs.{nix_pkg_path(n)} or null)" for n in names)
+    return f"(builtins.filter (p: p != null) [ {items} ])"
 
 
 def resolve_app(app: dict) -> tuple[str | None, str | None]:
@@ -1891,27 +2762,55 @@ def render_software(doc: dict, opts: NixOptions) -> None:
         for path, value in MINIMAL_PROFILE:
             opts.set(path, value, label="software.role 'minimal'")
     elif role == "server":
-        # No refusal and no silence: NixOS genuinely has no server package
-        # set, and saying so is the difference between "we chose not to" and
-        # the silent drop this line used to be.
-        warn("software.role 'server': NixOS ships no server metapackage — its "
-             "base closure is already headless, so the role adds nothing. Name "
-             "what the server needs in software.packages[] and "
+        # NixOS ships no server metapackage, but the role is not therefore
+        # unprovidable: what "server" means on a distro whose base closure is
+        # already headless is *headless*, and that is a statement the file can
+        # make. Emitting it also gives NixOptions something to catch a
+        # contradiction against — role 'server' plus a greeter that turns the
+        # X server on is now a refusal instead of a silently graphical server.
+        for path, value in SERVER_PROFILE:
+            opts.set(path, value, label="software.role 'server'")
+        warn("software.role 'server': NixOS has no server package set to "
+             "install — the role is honored as 'headless' "
+             "(services.xserver.enable = false) and nothing more. Name what "
+             "the server needs in software.packages[] and "
              "software.services.enable[]")
     elif role:
         refuse(f"software.role {role!r} has no default-translator mapping")
 
-    # software.exclude[] — the only subtractable packages in a NixOS closure.
+    # software.exclude[] — environment.defaultPackages is the only subtraction
+    # a bare NixOS closure offers, but a desktop role adds a second one: each
+    # desktop module carries its own excludePackages list, which is exactly the
+    # "removes packages a role would otherwise pull in" of SPEC §11.
     excluded = list(software.get("exclude", []) or [])
-    for name in excluded:
-        if name not in DEFAULT_PACKAGES:
-            refuse(f"software.exclude {name!r}: NixOS builds a closure rather "
-                   "than installing into one, so a package cannot be removed "
-                   "after the fact — the only subtractable set is "
-                   "environment.defaultPackages "
-                   "(nixos/modules/config/system-path.nix), which holds exactly "
-                   f"{', '.join(DEFAULT_PACKAGES)}. Anything else arrives "
-                   "because a module pulls it in; turn that module off instead")
+    declared = set(software.get("packages", []) or [])
+    from_role = [n for n in excluded if n not in DEFAULT_PACKAGES]
+    for name in from_role:
+        if name in declared:
+            refuse(f"software.exclude {name!r} names a package "
+                   "software.packages[] asks to install; the document has to "
+                   "say once whether the machine gets it")
+    if from_role and (option := DE_EXCLUDE_OPTION.get(role)):
+        opts.set(option, nix_optional_pkgs(from_role),
+                 label=f"software.exclude under {role!r}")
+        warn(f"software.exclude {', '.join(from_role)}: subtracted from the "
+             f"{role.split(':')[1]} session through {option}, which matches by "
+             "package name — a name that session does not pull in is dropped "
+             "silently there (SPEC §11: excluding what no role provides is not "
+             "an error)")
+    elif from_role and role in ("desktop:sway", "desktop:hyprland"):
+        refuse(f"software.exclude {', '.join(from_role)} under {role!r}: the "
+               "sway and hyprland modules expose no excludePackages — "
+               "programs.sway.extraPackages is a list to replace wholesale, "
+               "not a set to subtract from — so the exclusion cannot be "
+               "expressed. Set the module's own package list instead")
+    elif from_role:
+        warn(f"software.exclude {', '.join(from_role)}: software.role "
+             f"{role or 'unset'!r} pulls in nothing by those names, and the "
+             "only subtractable set in a bare NixOS closure is "
+             "environment.defaultPackages "
+             f"(nixos/modules/config/system-path.nix: {', '.join(DEFAULT_PACKAGES)}) "
+             "— nothing to remove, which SPEC §11 calls not an error")
     if role == "minimal":
         opts.set("environment.defaultPackages", "lib.mkForce [ ]")
     elif excluded:
@@ -1919,23 +2818,43 @@ def render_software(doc: dict, opts: NixOptions) -> None:
         keep_expr = f"(with pkgs; [ {' '.join(keep)} ])" if keep else "[ ]"
         opts.set("environment.defaultPackages", f"lib.mkForce {keep_expr}")
 
+    # Two severities, because SPEC §11 states two: a `packages[]` name the
+    # applier cannot resolve "MUST fail (not skip)", while an unresolvable
+    # `apps[]` item "emit[s] a non-fatal warning … rather than aborting
+    # installation". Both used to be spliced into one `with pkgs; [ … ]`, which
+    # gave apps[] the packages[] severity — and gave it at the worst moment,
+    # since an undefined attribute is an eval error nixos-install raises after
+    # disko has already wiped the disks.
     packages = list(software.get("packages", []) or [])
+    optional: list[str] = []
     flatpaks = list(software.get("flatpak", []) or [])
     for app in software.get("apps", []) or []:
         if isinstance(app, str):
-            packages.append(app)
+            optional.append(app)
             continue
         source, value = resolve_app(app)
         if source == "native":
-            packages.append(value)
+            optional.append(value)
         elif source == "flatpak":
             flatpaks.append(value)
 
+    terms = []
     if packages:
-        opts.raw("  # Package names pass through verbatim; "
-                 "unresolvable names fail the build.")
-        opts.set("environment.systemPackages",
-                 f"with pkgs; [ {' '.join(packages)} ]")
+        terms.append("(with pkgs; [ %s ])" % " ".join(map(nix_pkg_path, packages)))
+    if optional:
+        terms.append(nix_optional_pkgs(optional))
+    if terms:
+        if packages:
+            opts.raw("  # software.packages[]: names pass through verbatim, and "
+                     "an unresolvable one fails the build (SPEC §11).")
+        if optional:
+            opts.raw("  # software.apps[]: an item nixpkgs has no attribute for "
+                     "is dropped, not fatal (SPEC §11).")
+            warn("software.apps[]: application names are resolved against "
+                 "nixpkgs at build time and an item with no attribute of that "
+                 "name is dropped — SPEC §11 makes that non-fatal, so the "
+                 "install will not say which ones went missing")
+        opts.set("environment.systemPackages", " ++ ".join(terms))
 
     services = software.get("services", {}) or {}
     # network.ssh writes services.openssh itself; read it so that asking for
@@ -2069,14 +2988,32 @@ def render_desktop(doc: dict, opts: NixOptions) -> None:
              "start it by hand")
 
     if autologin := desktop.get("autologin"):
-        declared = {user["name"] for user in doc.get("users", []) or []}
-        if autologin not in declared:
+        accounts = {user["name"]: user for user in doc.get("users", []) or []}
+        locked = ((accounts.get(autologin) or {}).get("password") or {}).get("locked")
+        if autologin not in accounts:
             refuse(f"desktop.autologin {autologin!r} names an account this "
                    "document does not declare (schema.md §12: autologin must "
                    "name an existing user)")
+        elif locked:
+            # schema.md §12 names this one outright: "combining it with a
+            # locked user is a validation error". NixOS would not catch it —
+            # autoLogin.user takes any string — so the machine would come up
+            # trying to start a session as an account that cannot authenticate.
+            refuse(f"desktop.autologin {autologin!r} names a user whose "
+                   "password is locked; schema.md §12 makes that combination a "
+                   "validation error")
         elif manager is None:
-            refuse("desktop.autologin needs a greeter to log in through, and "
-                   "desktop.display_manager resolved to none")
+            # A greeter is one way to log a user in and not the only one:
+            # services.getty.autologinUser is the console's own, and it is what
+            # "log this user in automatically, no display manager" means on a
+            # machine with no greeter. Verified on nixos-24.11 (=> OPTION).
+            opts.set("services.getty.autologinUser", nix_str(autologin),
+                     label="desktop.autologin")
+            warn(f"desktop.autologin {autologin!r} with "
+                 "desktop.display_manager resolved to none: there is no "
+                 "greeter to log in through, so it is honored on the console "
+                 "instead (services.getty.autologinUser) — tty1 comes up "
+                 "logged in and no graphical session is started")
         elif manager == "ly":
             refuse("desktop.autologin with ly: the ly module asserts "
                    "!services.displayManager.autoLogin.enable "
@@ -2129,6 +3066,20 @@ def render_desktop(doc: dict, opts: NixOptions) -> None:
     if desktop.get("printing") is not None:
         opts.set("services.printing.enable",
                  str(bool(desktop["printing"])).lower(), label="desktop.printing")
+        # CUPS on its own finds a USB printer and nothing on the network: every
+        # driverless (IPP Everywhere) printer is discovered over mDNS, which on
+        # NixOS is avahi plus the nsswitch entry that resolves .local. Skipped
+        # when the document already stated its own answer for avahi through
+        # software.services, so "printing yes, mDNS no" stays sayable.
+        if desktop["printing"] and "services.avahi.enable" not in opts.values:
+            opts.set("services.avahi.enable", "true")
+            opts.set("services.avahi.nssmdns4", "true")
+            opts.set("services.avahi.openFirewall", "true")
+            warn("desktop.printing: CUPS discovers network printers over mDNS, "
+                 "so avahi is enabled alongside it with nssmdns4 and "
+                 "services.avahi.openFirewall = true (UDP 5353 inbound). Put "
+                 "'avahi-daemon' in software.services.disable[] to keep "
+                 "printing local-only")
 
 
 # The session name each role registers, for services.displayManager.defaultSession.
@@ -2154,8 +3105,49 @@ def render_drivers(doc: dict, opts: NixOptions) -> None:
         # with "Package 'nvidia-x11' has an unfree license", which under
         # --apply lands after disko has already wiped the disks.
         opts.set("nixpkgs.config.allowUnfree", "true")
-    elif gpu not in (None, "auto", "none"):
+    elif gpu == "auto":
+        # Read and answered rather than read and dropped. Leaving
+        # services.xserver.videoDrivers unset *is* the automatic choice on
+        # NixOS: xserver.nix defaults it to [ "modesetting" "fbdev" ], the
+        # kernel binds the DRM driver for whatever card is present, and
+        # hardware.enableRedistributableFirmware (hardware.nix) supplies the
+        # blobs. SPEC §19 wants that resolution recorded, not assumed.
+        opts.raw("  # drivers.gpu: auto — no vendor driver is pinned; "
+                 "services.xserver.videoDrivers keeps its default of "
+                 "[ \"modesetting\" \"fbdev\" ] and the kernel's own DRM "
+                 "driver binds the card.")
+    elif gpu == "none":
+        opts.raw("  # drivers.gpu: none — no vendor driver package is "
+                 "installed; the kernel's in-tree modesetting driver is all "
+                 "the machine gets.")
+    elif gpu is not None:
         refuse(f"drivers.gpu {gpu!r} has no NixOS mapping")
+
+    # hardware.nix writes hardware.cpu.<vendor>.updateMicrocode for an explicit
+    # `intel` or `amd`; `auto` and `none` were read by nothing at all. Both
+    # options default to false on 24.11 (hardware/cpu/intel-microcode.nix:13),
+    # so `auto` was silently installing no microcode — the opposite of what it
+    # asks for — and `none` was right only by accident.
+    microcode = drivers.get("microcode")
+    if microcode == "auto":
+        # Both blobs, because the vendor is not known until the machine boots
+        # and a CPU ignores the other vendor's update. This is what
+        # nixos-generate-config writes when it cannot tell either.
+        opts.set("hardware.cpu.intel.updateMicrocode", "true",
+                 label="drivers.microcode 'auto'")
+        opts.set("hardware.cpu.amd.updateMicrocode", "true",
+                 label="drivers.microcode 'auto'")
+        warn("drivers.microcode 'auto': the target CPU vendor is not known at "
+             "translate time, so both the Intel and the AMD microcode images "
+             "are prepended to the initrd — a CPU applies only its own. Name "
+             "the vendor to carry one")
+    elif microcode == "none":
+        opts.set("hardware.cpu.intel.updateMicrocode", "false",
+                 label="drivers.microcode 'none'")
+        opts.set("hardware.cpu.amd.updateMicrocode", "false",
+                 label="drivers.microcode 'none'")
+    elif microcode not in (None, "intel", "amd"):
+        refuse(f"drivers.microcode {microcode!r} has no NixOS mapping")
 
     # `auto` and `none` are already answered in hardware.nix, which writes
     # hardware.enableRedistributableFirmware for every document. Only "all"
@@ -2344,9 +3336,11 @@ def render_security(doc: dict) -> list[str]:
 
 
 def render_users(doc: dict) -> list[str]:
-    """users[] → users.users.<name>, per-user sudo rules and login shells."""
+    """users[] → users.users.<name>, the groups they name, sudo and shells."""
     out: list[str] = []
     nopasswd: list[str] = []
+    withpasswd: list[str] = []
+    declared: list[str] = []
     # An authorized_keys file on a machine with no sshd authorises nothing.
     # Both spellings count: network.ssh.enabled and software.services.enable
     # reach the same services.openssh.enable (see render_software).
@@ -2355,16 +3349,32 @@ def render_users(doc: dict) -> list[str]:
                                        .get("services", {}) or {}).get("enable", []) or []))
     for user in doc.get("users", []) or []:
         name = user["name"]
-        out.append(f"  users.users.{name} = {{")
+        out.append(f"  users.users.{nix_attr(name)} = {{")
         if name != "root":
             out.append("    isNormalUser = true;")
         if user.get("uid") is not None:
-            out.append(f"    uid = {user['uid']};")
+            if name == "root" and user["uid"] != 0:
+                # users.users.root.uid defaults to 0 and update-users-groups.pl
+                # keys the account by name, so a foreign uid here produces a
+                # /etc/passwd whose root line is not uid 0 — an unbootable
+                # system, and one the evaluation does not object to.
+                refuse(f"user 'root': uid {user['uid']} — the superuser is uid 0 "
+                       "by definition (SPEC §9 configures the root account, it "
+                       "does not renumber it)")
+            else:
+                out.append(f"    uid = {user['uid']};")
         if user.get("comment"):
             out.append(f"    description = {nix_str(user['comment'])};")
         groups = list(user.get("groups", []))
         if user.get("admin") and "wheel" not in groups:
             groups.insert(0, "wheel")
+        for group in groups:
+            if not GROUP_NAME.fullmatch(group):
+                refuse(f"user '{name}': group {group!r} is not a usable group "
+                       "name — useradd/groupadd accept "
+                       "[a-z_][a-z0-9_-]* with an optional trailing '$'")
+            elif group not in declared:
+                declared.append(group)
         if groups:
             # No longer skipped for root. users.users.root is an ordinary entry
             # of the same submodule (config/users-groups.nix:702-719 documents
@@ -2396,29 +3406,76 @@ def render_users(doc: dict) -> list[str]:
                      "starts an sshd (network.ssh.enabled, or sshd in "
                      "software.services.enable), so the keys authorise nothing")
         shell = user.get("shell")
-        if shell in ("zsh", "fish"):
-            out.append(f"    shell = pkgs.{shell};")
-        elif shell == "bash":
-            out.append("    shell = pkgs.bashInteractive;")
+        package = None
+        if shell in ("sh", "/bin/sh"):
+            # NixOS builds /bin/sh itself (system/build.binsh), so this one
+            # path needs no package and no substitution: it is exactly the
+            # shell the document named.
+            out.append("    shell = \"/bin/sh\";")
+        elif shell in SHELL_INTENT:
+            # SPEC §9: an intent name "obliges the applier to install the
+            # shell". users.users.<n>.shell being a package is what does that —
+            # config/users-groups.nix puts every shell package it is given into
+            # environment.systemPackages and /etc/shells.
+            package = SHELL_INTENT[shell]
         elif shell in SHELL_PATHS:
             # NixOS has no /bin/bash: outside the store only /bin/sh and
             # /usr/bin/env exist, so a literal path would produce an account
             # whose login fails with "Cannot execute". Map to the package that
             # the path names.
-            out.append(f"    shell = pkgs.{SHELL_PATHS[shell]};")
-        elif shell and shell.startswith("/nix/store/"):
+            package = SHELL_PATHS[shell]
+        elif shell in NOLOGIN_PATHS:
+            # Not a shell package: shadow's nologin has no shellPath, so the
+            # option takes it as a plain path. pkgs.shadow is in every NixOS
+            # system's default profile, so the path exists.
+            out.append(f"    shell = {nix_str(NOLOGIN)};")
+        elif shell and (shell.startswith("/nix/store/")
+                        or shell.startswith("/run/current-system/sw/bin/")):
             out.append(f"    shell = {nix_str(shell)};")
         elif shell and shell.startswith("/"):
             refuse(f"user '{name}': shell {shell!r} is an absolute path "
-                   "that does not exist on NixOS outside the store")
+                   "that does not exist on NixOS outside the store — name the "
+                   "shell by intent (" + " | ".join(sorted(SHELL_INTENT))
+                   + ") and it is installed for the account")
         elif shell:
-            refuse(f"user '{name}': shell {shell!r} has no pkgs attribute")
+            refuse(f"user '{name}': shell {shell!r} is neither a SPEC §9 intent "
+                   "name this applier installs (" + " | ".join(sorted(SHELL_INTENT))
+                   + ") nor an absolute path")
+        if package:
+            out.append(f"    shell = pkgs.{package};")
         out.append("  };")
         if user.get("sudo") == "nopasswd":
             nopasswd.append(name)
-        if shell in ("zsh", "fish"):
-            out.append(f"  programs.{shell}.enable = true;")
-    if nopasswd:
+        elif user.get("sudo") == "default" and not user.get("admin"):
+            # `sudo` is the *mode* of an escalation grant, so an account that
+            # names it and is not admin still asked to be able to sudo. Only
+            # the nopasswd half used to be emitted, which left `sudo: default`
+            # on a non-admin account as a silent drop: no wheel membership, no
+            # rule, no diagnostic, and an account that cannot escalate at all.
+            withpasswd.append(name)
+        elif user.get("sudo") is not None and user.get("sudo") not in ("default",
+                                                                      "nopasswd"):
+            refuse(f"user '{name}': sudo {user['sudo']!r} is not one of SPEC §9's "
+                   "values (default | nopasswd)")
+        if package in PROGRAMS_MODULE:
+            # zsh and fish need their NixOS module, not just the package: the
+            # module writes /etc/zshrc and /etc/fish/config.fish, without which
+            # the account gets a shell with no system environment at all.
+            out.append(f"  programs.{PROGRAMS_MODULE[package]}.enable = true;")
+    if declared:
+        # SPEC §9: "the applier MUST create groups that do not exist."
+        # extraGroups on its own does not — update-users-groups.pl drops a
+        # membership naming a group nothing defined, with one line in the
+        # journal and a zero exit. Defining the group with an empty submodule
+        # merges cleanly with the ones NixOS already declares (video keeps
+        # gid 26) and allocates a gid for the ones it does not.
+        out.append("  # SPEC §9: groups the document names are created, not "
+                   "assumed; an empty")
+        out.append("  # definition merges with any NixOS already declares and "
+                   "keeps its gid.")
+        for group in declared:
+            out.append(f"  users.groups.{nix_attr(group)} = {{ }};")
+    if nopasswd or withpasswd:
         # Per account, not per wheel. The old line was
         # `security.sudo.wheelNeedsPassword = false`, which hands passwordless
         # root to every member of wheel — including accounts the document
@@ -2427,8 +3484,13 @@ def render_users(doc: dict) -> list[str]:
         # (security/sudo.nix:90-205); our definitions carry the default
         # priority 1000 and so land after the built-in wheel rule at
         # mkOrder 600 (sudo.nix:252-264), which is what makes them win —
-        # sudoers takes the last matching rule.
+        # sudoers takes the last matching rule. One list, not two: a second
+        # `security.sudo.extraRules = …` in the same attribute set is a
+        # duplicate-attribute error, not a merge.
         out.append("  security.sudo.extraRules = [")
+        for name in withpasswd:
+            out.append(f"    {{ users = [ {nix_str(name)} ]; commands = "
+                       "[ { command = \"ALL\"; options = [ \"SETENV\" ]; } ]; }")
         for name in nopasswd:
             out.append(f"    {{ users = [ {nix_str(name)} ]; commands = "
                        "[ { command = \"ALL\"; options = [ \"NOPASSWD\" ]; } ]; }")
@@ -2452,10 +3514,38 @@ def render_configuration(doc: dict) -> str:
     out += render_boot(doc)
     out.append("")
 
-    if system.get("hostname"):
-        out.append(f"  networking.hostName = {nix_str(system['hostname'])};")
-    if system.get("domain"):
-        out.append(f"  networking.domain = {nix_str(system['domain'])};")
+    # networking.hostName is types.strMatching
+    # "^$|^[[:alnum:]]([[:alnum:]_-]{0,61}[[:alnum:]])?$" on 24.11: a dotted
+    # name is not a hostname there, it is an evaluation error — and under
+    # --apply one raised after disko has wiped the disks. An FQDN in
+    # system.hostname is the ordinary way to write this, so it is split at the
+    # first dot rather than refused, and only refused when the two halves would
+    # contradict a system.domain the document also states.
+    hostname, domain = system.get("hostname"), system.get("domain")
+    if hostname and "." in hostname:
+        short, _, rest = hostname.partition(".")
+        if domain and domain != rest:
+            refuse(f"system.hostname {hostname!r} carries the domain {rest!r} "
+                   f"while system.domain says {domain!r}; the document has to "
+                   "say once what the machine's domain is")
+            hostname = short
+        else:
+            warn(f"system.hostname {hostname!r} is a fully-qualified name, "
+                 "which networking.hostName cannot hold (it is types.strMatching "
+                 "on a single label) — split into networking.hostName = "
+                 f"{short!r} and networking.domain = {rest!r}")
+            hostname, domain = short, domain or rest
+    if hostname and not re.fullmatch(r"[A-Za-z0-9]([A-Za-z0-9_-]{0,61}[A-Za-z0-9])?",
+                                     hostname):
+        refuse(f"system.hostname {hostname!r} is not a label networking.hostName "
+               "accepts (types.strMatching "
+               "\"^$|^[[:alnum:]]([[:alnum:]_-]{0,61}[[:alnum:]])?$\"); the "
+               "generated configuration would not evaluate")
+        hostname = None
+    if hostname:
+        out.append(f"  networking.hostName = {nix_str(hostname)};")
+    if domain:
+        out.append(f"  networking.domain = {nix_str(domain)};")
     if system.get("timezone"):
         out.append(f"  time.timeZone = {nix_str(system['timezone'])};")
     hwclock = system.get("hwclock")
@@ -2495,15 +3585,16 @@ def render_configuration(doc: dict) -> str:
         # is a variant of the distro default layout — which is exactly what a
         # document that leaves the layout unstated is asking for.
         out.append(f"  services.xserver.xkb.variant = {nix_str(keymap['variant'])};")
-    time_cfg = system.get("time", {}) or {}
-    if time_cfg.get("servers"):
-        out.append(f"  networking.timeServers = {nix_list(time_cfg['servers'])};")
-    if time_cfg.get("provider") == "chrony":
-        out.append("  services.chrony.enable = true;")
-    elif time_cfg.get("provider") == "openntpd":
-        out.append("  services.openntpd.enable = true;")
-    if time_cfg.get("ntp") is False:
-        out.append("  services.timesyncd.enable = false;")
+    if (keymap.get("layout") or keymap.get("variant")) and not keymap.get("console"):
+        # An X layout on a machine with no X reached nothing. console.keyMap
+        # defaults to `mkIf config.console.useXkbConfig (…)` (config/console.nix),
+        # so this is the switch that compiles the xkb layout into a console
+        # keymap — the console follows the layout the document did state
+        # instead of staying on the us default it did not. Only when the
+        # document left console unset: an explicit console.keyMap wins anyway,
+        # and saying both would read as a contradiction rather than a fallback.
+        out.append("  console.useXkbConfig = true;")
+    out += render_time(system.get("time", {}) or {})
     if system.get("init") not in (None, "systemd", "auto"):
         refuse("system.init: NixOS is systemd-only")
     telemetry = system.get("telemetry")
@@ -2562,8 +3653,26 @@ def render_configuration(doc: dict) -> str:
         locales = list(dict.fromkeys(supported(l) for l in wanted))
         out.append(f"  i18n.supportedLocales = {nix_list(locales)};")
 
-    if mirror_url := (doc.get("mirror", {}) or {}).get("url"):
+    mirror = doc.get("mirror", {}) or {}
+    if mirror_url := mirror.get("url"):
         out.append(f"  nix.settings.substituters = [ {nix_str(mirror_url)} ];")
+    if country := mirror.get("country"):
+        # Read and answered instead of read by nobody. NixOS has no mirror list
+        # to pick a nearby entry from: nix.settings.substituters defaults to
+        # the single https://cache.nixos.org, which is one geo-routed CDN
+        # origin rather than a country's mirror. SPEC §14's "pick nearby
+        # mirrors" therefore has no selection to make here — the substituter
+        # already resolves to the nearest edge — and mirror.url is the field
+        # that pins a different one.
+        out.append(f"  # mirror.country: {country} — NixOS has one binary "
+                   "cache, cache.nixos.org, served from a geo-routed CDN, so "
+                   "there is no per-country mirror to select. Use mirror.url "
+                   "to pin a different substituter.")
+        warn(f"mirror.country {country!r}: NixOS keeps no mirror list — "
+             "nix.settings.substituters is the single geo-routed "
+             "cache.nixos.org — so no nearby mirror is selected. Set "
+             "mirror.url to pin a substituter explicitly (SPEC §19: recorded "
+             "as a substitution, not a drop)")
     proxy = doc.get("proxy", {}) or {}
     if proxy.get("http"):
         # `default` rather than `httpProxy`: config/networking.nix:88-133 makes
@@ -2654,7 +3763,7 @@ def main() -> int:
     check_boot_extras(doc, {"kernel", "variant", "params", "modules", "blacklist",
                             "loader", "timeout", "os_prober", "password_hash",
                             "console", "secure_boot", "uki", "initramfs"})
-    check_mirror(doc, {"url"})
+    check_mirror(doc, {"url", "country"})
     check_section_fields(doc, "desktop", {"audio", "autologin", "bluetooth",
                                           "display_manager", "printing"})
     check_section_fields(doc, "installer", set())
