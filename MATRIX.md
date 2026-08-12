@@ -1874,11 +1874,16 @@ Spec §15: an applier for an unregistered distro MUST fail on this section.
 
 ¹ **SILENT**: formatted into the `pro attach` template as `org=…`, but the Ubuntu template has no
 `{org}` placeholder. The value is consumed (so no tracker warning) and discarded.
-² No subscription service on this distro; the whole section refuses, as §15 requires. On NixOS
-the section's leaves are additionally passed to `check_unread`'s ignore set, so a refused
-section is not *also* reported three times as intent nobody looked at — a refusal is a decision,
-and listing it again under "never read" trains the reader to skim the channel the real drops
-arrive on.
+² No subscription service on this distro; the whole section refuses, as §15 requires. The message
+now names the declared leaves and cites §15 and §2.3 instead of saying only "this distro".
+**NixOS** additionally states the absence in its own terms: nixos-24.11's module tree matches
+nothing for `subscription-manager`, `SUSEConnect`, `rhsm` or `ubuntu-advantage`
+(`grep -rli` over `nixos/modules` → 0 files), and packages come from
+`nix.settings.substituters`, whose 24.11 default is the single unauthenticated
+`[ "https://cache.nixos.org/" ]` — there is no entitlement for a token to buy. On NixOS the
+section's leaves are also passed to `check_unread`'s ignore set, so a refused section is not
+*also* reported three times as intent nobody looked at — a refusal is a decision, and listing it
+again under "never read" trains the reader to skim the channel the real drops arrive on.
 ³ Used as the subscription **org id**, not as a URL.
 ⁴ Read into a template that has no `{org}` slot; silently discarded.
 ⁵ Seed path, never inlined into the output.
@@ -1951,20 +1956,23 @@ that never sees `--yes-wipe-all-disks`, onto `--mode destroy,format,mount --yes-
 
 | Field | Ubuntu | Debian | Fedora | SUSE | Arch | NixOS | Alpine | Void | Gentoo |
 |---|---|---|---|---|---|---|---|---|---|
-| `x-<name>` | ⛔¹ | ⛔¹ | ⛔² | ⛔³ | ⛔⁴ | ⛔⁵ | ⛔¹ | ⛔¹ | ⛔¹ |
+| `x-<name>` | –¹ | –¹ | –¹ | ✅² | ✅³ | –⁴ | –¹ | –¹ | –¹ |
 
-¹ `check_unhandled` (`lis_common.py:175-181`) refuses **any** `x-*` section — including the
-applier's own namespace. This directly contradicts spec §2.2/§18, which says an applier MUST
-ignore extensions it does not understand. Verified unchanged on Void and Gentoo: `x-void` refuses
-under `lis2void.py` and `x-gentoo` under `lis2gentoo.py`.
-² Non-empty `x-*` refuses; an empty object (`{}`) passes silently.
-³ `x-suse.product` is read at `lis2agama.py:237` and `:610`, and the same document is then refused
-by `check_unhandled`. Without it the two SUSE outputs disagree by default (Agama targets
-Tumbleweed, AutoYaST targets Leap).
-⁴ Even `x-arch.packages`, which the applier itself reads at `:880`, refuses. Works only with
-`--lenient`.
-⁵ Even `x-nixos.*` — **the repository's own examples (`server-btrfs.lis.json`,
-`server-lvm-pool.lis.json`) are refused by the NixOS applier.**
+¹ Ignored, as spec §2.2 requires of an applier that does not recognise the namespace: `is_extension`
+(`lis_common.py`) matches `schema.json`'s own top-level pattern `^x-[a-z0-9-]+$`, and both
+`check_unhandled` and `check_unread` skip what it matches. Anything spelled otherwise (`x-Foo`,
+a bare `x-`) is not a valid extension under `additionalProperties: false`, so it still refuses —
+verified by probe: `x-Foo` refuses under `lis2archinstall.py`, `x-arch` does not.
+² `x-suse.product` is read at `lis2agama.py:237` and `:610` and reaches the profile. Without it
+the two SUSE outputs disagree by default (Agama targets Tumbleweed, AutoYaST targets Leap).
+³ `x-arch.aur_helper` / `x-arch.aur_packages` are read at `lis2archinstall.py:880`.
+⁴ `lis2nixos.py` implements no `x-nixos` key, so the namespace is ignored — but its own namespace
+is reported once (`check_extensions(doc, "x-nixos", set())`), naming the keys that reached
+nothing, because the author wrote them expecting *this* applier to read them. A foreign namespace
+(`x-arch` under `lis2nixos.py`) is silent. The document is still recorded verbatim in the birth
+certificate, `x-*` included. Previously `⛔`: the repository's own examples
+(`server-btrfs.lis.json`, `server-lvm-pool.lis.json`) were refused by every one of the nine
+appliers.
 
 ---
 
@@ -1977,7 +1985,7 @@ Each rule below is stated so a generator can implement it as a pre-flight check.
 
 | # | Rule | Consequence |
 |---|---|---|
-| C-1 | If any `x-*` key is present → the document is **refused by all nine appliers**. | Never emit `x-*` unless the user has explicitly accepted `--lenient`. Includes the applier's own namespace. |
+| C-1 | An `x-*` key spelled as `schema.json` allows (`^x-[a-z0-9-]+$`) is ignored by all nine appliers, per spec §2.2. Any other spelling is refused by all nine. | Emit `x-*` freely in the blessed spelling. Only `lis2agama.py` (`x-suse.product`) and `lis2archinstall.py` (`x-arch.*`) act on one; `lis2nixos.py` names the ignored `x-nixos` keys in a warning. |
 | C-2 | A `keys[]` entry does something only if `storage.encryption` exists **and** `purpose` contains `disk_encryption` **and** `type` ∈ {keyfile, gpg, age} (material) or {tpm2, fido2} (enrollment). | Otherwise the entry is a fully silent no-op — no warning, because iteration counts as a read. |
 | C-3 | If a C-2-qualifying `keys[]` entry exists → `storage.encryption[].key.keyfile` and `key.passphrase` are **shadowed and unread** (`lis_common.py:846-856`). | Do not emit both. On Alpine the shadowing is broken and emits `--key-file None` (rule C-30). |
 | C-4 | A disk with no `match.path` refuses on Debian, Fedora, SUSE, Arch, NixOS, Alpine and Gentoo in translate-only mode; the other `match.*` selectors are resolved only under `--apply`. | Ubuntu is the exception: it emits a real match spec, but only when `path` is **absent**. **Void is the other exception, in the opposite direction**: it has no `--apply` path at all, so `match.path` is mandatory and every other selector reaches nothing under any flag. |
