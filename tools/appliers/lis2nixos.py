@@ -1339,6 +1339,11 @@ def script_payload(item: dict, label: str) -> bytes | None:
     ref = item.get("source")
     content = item.get("content")
     if ref is None:
+        if content is None:
+            refuse(f"{label}: neither content nor source — SPEC §13 gives a "
+                   "script entry its body through one of the two, and an entry "
+                   "with neither is a hook the document asked for and nothing "
+                   "would run")
         return None if content is None else content.encode()
     if content is not None:
         refuse(f"{label}: content and source both name the script body — "
@@ -1347,7 +1352,8 @@ def script_payload(item: dict, label: str) -> bytes | None:
         return None
     path = secret_ref(ref)
     if path is None:
-        refuse(f"{label}.source {ref!r}: this applier resolves seed: and file: "
+        named = ref.get("from") if isinstance(ref, dict) else ref
+        refuse(f"{label}.source {named!r}: this applier resolves seed: and file: "
                "references against the running installer's filesystem; https: "
                "is not fetched and env:/key: name secret material rather than "
                "a script (SPEC §2.4)")
