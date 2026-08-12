@@ -800,12 +800,15 @@ def refuse_adoption(part: dict, where: str) -> None:
            "nothing. It renders the whole table and runs disko in "
            "destroy,format,mount, which clears the disk before anything "
            "could be kept. That mode is this translator's choice, not a "
-           "disko limit — but disko addresses a partition by GPT index "
-           "alone (lib/types/gpt.nix _create: --new=<index>:<start>:<end>, "
-           "--change-name=<index>:<label>), so existing.match by partition "
-           "number, label, uuid or fs first needs an apply-time probe of "
-           "the live disk, and this translator performs none (schema.md "
-           "§6.2, §20.8: a match MUST resolve to exactly one partition)")
+           "disko limit — but disko places a partition by GPT index and a "
+           "start of 0, the first free sector (realised format,mount "
+           "script: `sgdisk --new=<index>:0:+<size>`, falling back to "
+           "`--change-name=<index> --typecode --partition-guid` over "
+           "whatever already sits at that index when the create fails). "
+           "existing.match by partition number, label, uuid or fs "
+           "therefore needs an apply-time probe of the live disk first, "
+           "and this translator performs none (schema.md §6.2, §20.8: a "
+           "match MUST resolve to exactly one partition)")
     if existing.get("format"):
         refuse(f"{where}: storage.partitions[].existing.format: true — disko "
                "guards every mkfs with `if ! (blkid <dev> | grep -q "
@@ -4907,9 +4910,12 @@ def channel_consent(doc_path: pathlib.Path) -> str | None:
     (delivery.md §1) or `lis.unattended=1` on the kernel command line, which is
     the network-delivery form (delivery.md §7).
     """
-    roots = [doc_path.resolve().parent, *doc_path.resolve().parents,
-             pathlib.Path("/run/lis/seed")]
-    for root in roots:
+    # Only where delivery.md puts it: the volume root, which is either the
+    # document's own directory or its parent when the document sits in
+    # recipes/. Walking further up would let a stray /unattended on the live
+    # ISO's root filesystem grant consent for every document on the machine.
+    here = doc_path.resolve().parent
+    for root in (here, here.parent, pathlib.Path("/run/lis/seed")):
         marker = root / "unattended"
         try:
             if marker.is_file():
@@ -5122,10 +5128,43 @@ def main() -> int:
             write_wireless_secrets(doc)
             run_stage("on_success")
             run_stage("pre_reboot")
+            finish_run(on_finish)
         else:
+            # SPEC §16 on_error: 'fail' is the only value check_installer lets
+            # through, and this is it — the on_error hooks run and the non-zero
+            # status is returned rather than swallowed.
+            print(f"installation failed; installer.on_error is {on_error!r}",
+                  file=sys.stderr)
             run_stage("on_error")
         return res.returncode
     return 0
+
+
+def finish_run(on_finish: str) -> None:
+    """Carry out SPEC §16 installer.on_finish once the target is installed.
+
+    `stay` is the section's default and was already the behavior: main()
+    returns and the live environment is left as it is. The other two were
+    dropped silently — a document asking for `reboot` got a shell prompt.
+    """
+    import subprocess
+
+    if on_finish == "stay":
+        print("installer.on_finish 'stay': leaving the live environment up")
+        return
+    # Target is unmounted first: disko mounts it at /mnt and systemd's own
+    # shutdown does not always flush a filesystem it did not mount, so a
+    # reboot straight after nixos-install can lose the last writes.
+    subprocess.run("umount -R /mnt", shell=True, check=False)
+    subprocess.run("swapoff -a", shell=True, check=False)
+    command = "systemctl reboot" if on_finish == "reboot" else "systemctl poweroff"
+    print(f"installer.on_finish {on_finish!r}: {command}")
+    if subprocess.run(command, shell=True).returncode != 0:
+        # A live ISO shell is not always talking to a running systemd (a
+        # chroot, a rescue shell), where systemctl exits non-zero and the
+        # machine simply stays up against the document's instruction.
+        subprocess.run("reboot -f" if on_finish == "reboot" else "poweroff -f",
+                       shell=True, check=False)
 
 
 def write_birth_certificate(doc: dict) -> None:

@@ -265,7 +265,7 @@ refuses (`lis2void.py:180-183`).
 | `storage.swap.file.size` | ⚙⁶² | ⚙⁶² | ❌ | ❌ | ❌ | ✅⁶³ | ❌ | ⛔⁸⁵ | ⛔⁸⁶ |
 | `storage.snapshots.enabled` | ⚙⁶⁴ | ⚙⁶⁴ | ⚙⁶⁴ | ◐⁶⁵ | ⚙⁶⁴ | ✅⁶⁶ | ⛔ | ⛔⁸⁷ | ⛔⁸⁷ |
 | `storage.snapshots.tool` | ◐⁶⁷ | ◐⁶⁷ | ◐⁶⁷ | ◐⁶⁷ | ◐⁶⁷ | ◐⁶⁷ | ⛔ | ⛔⁸⁷ | ⛔⁸⁷ |
-| `storage.snapshots.boot_menu` | ⚙⁶⁸ | ⚙⁶⁸ | ⛔ | ◐⁶⁹ | ⚙⁷⁰ | ⛔ | ⛔ | ⛔⁸⁷ | ⛔⁸⁷ |
+| `storage.snapshots.boot_menu` | ⚙⁶⁸ | ⚙⁶⁸ | ⛔ | ◐⁶⁹ | ⚙⁷⁰ | ⛔⁸⁹ | ⛔ | ⛔⁸⁷ | ⛔⁸⁷ |
 
 ¹ `true` is correct. `false` emits `wipe: preserve` on the disk — **not a valid curtin value** —
 while child partitions carry `preserve: false`. Every repo example sets `true`, so this path is
@@ -320,10 +320,20 @@ unattended installers.
 ²⁸ **NixOS now refuses with the rest.** It used to skip adoption and warn the leaves as unread —
 a dual-boot document silently became a fresh-install document — and, worse, the skipped partition
 still advanced the per-disk index, so `disko.nix` created `root1` while `hardware.nix` mounted
-`disk-main-root2`: devices that were never created, exit 0. The applier runs disko with
-`destroy,format,mount`, which recreates the whole table, so an adopted partition would be
-destroyed rather than kept (schema.md §6.2). The refusal names the disko primitives an
-implementation would need (`start`/`end`/`uuid`/`label`, `preCreateHook`, `--mode format,mount`).
+`disk-main-root2`: devices that were never created, exit 0. The refusal no longer blames disko
+for the applier's own choice of `--mode destroy,format,mount`. Read out of the **realised**
+`format,mount` script (`nix-build disko/cli.nix --argstr mode format,mount`), that mode does
+leave an existing table alone — `sgdisk --clear` runs only `if ! blkid "$device"` — but it places
+every declared partition by GPT index at start 0 (`sgdisk --new=<index>:0:+<size>`), and when the
+create fails because the index is taken it falls back to `--change-name=<index> --typecode
+--partition-guid` over whatever already sits there. Adoption therefore also needs an apply-time
+probe to turn `existing.match` by label/uuid/fs into an index, which this applier does not
+perform. The three leaves now refuse under their own names: `format: true` would need the
+signature wiped from a `preCreateHook` first, because disko guards every `mkfs` with `if !
+(blkid <dev> | grep -q 'TYPE=')`; and `resize` has no disko implementation at all — `resize2fs`,
+`ntfsresize` and `xfs_growfs` occur nowhere in its `lib/` (schema.md §6.2 makes that a MUST
+fail). One more hole is closed with them: `"existing": {}` was falsy, so a malformed adoption
+was created and formatted with no diagnostic; membership decides it now.
 ²⁹ Drives the key path and the wiring, but the mapper name stays whatever partman chooses.
 ³⁰ Must name a partition handle. `over` a RAID array or an LV refuses via
 `check_encryption_emitted`.
@@ -477,7 +487,16 @@ name is separate and is now stated explicitly in `disko.nix`, computed with disk
 because the applier previously predicted `/dev/disk/by-partlabel/disk-<disk>-<id>` for a long name
 while disko created the hashed one, leaving `hardware.nix` pointing at a device node that never
 existed. Verified byte-for-byte against disko's expression.
-⁸⁹ *(unused)*
+⁸⁹ **NixOS.** The refusal is correct and is now cited from the channel rather than from the
+shared helper's nine-distribution wording. `nixos-24.11` has no `grub-btrfs` as a package — the
+channel's whole btrfs attribute set is `btrfs-assistant`, `btrfs-auto-snapshot`, `btrfs-heatmap`,
+`btrfs-progs`, `btrfs-snap`, `ntfs2btrfs` — and none as a module: nothing under `nixos/modules`
+names it, so nothing would regenerate the menu when a snapshot is taken. Both loaders this
+applier installs enumerate system *generations*, and their one escape hatch
+(`boot.loader.grub.extraEntries`, `boot.loader.systemd-boot.extraEntries`, both `=> OPTION`) is a
+fixed string written at rebuild time that no later snapshot can appear in. Emitted by
+`check_boot_menu()` in `lis2nixos.py`; the shared `check_snapshots` is then called with
+`boot_menu=True` so the field is answered once, not twice.
 ⁹⁰ **NixOS, new.** The size used to be read by nothing, so zram came up at the module's own
 default. A `%` value becomes `zramSwap.memoryPercent` (verified `zramSwap.memoryPercent = 50`);
 an absolute size becomes `zramSwap.memoryMax` with `memoryPercent = 100`, because 24.11's module
