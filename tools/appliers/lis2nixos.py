@@ -18,6 +18,7 @@ import argparse
 import base64
 import difflib
 import hashlib
+import ipaddress
 import os
 import json
 import pathlib
@@ -51,6 +52,20 @@ def nix_list(items: list[str]) -> str:
     if not items:
         return "[ ]"
     return "[ " + " ".join(nix_str(i) for i in items) + " ]"
+
+
+def nix_bool(value, where: str) -> str | None:
+    """A Nix boolean literal, or None once the value has been refused.
+
+    `str(value).lower()` is not a converter: a document that writes "yes"
+    becomes the bare token `yes`, which does not even *parse* — and under
+    --apply the parse happens inside nixos-install, after disko has wiped the
+    disks. JSON's own `true`/`false` are the only values that survive.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    refuse(f"{where} {value!r} is not a boolean (true or false)")
+    return None
 
 
 def disko_size(size, where: str, *, percent: bool = False) -> str:
@@ -1183,7 +1198,7 @@ lis_hook() {
   rm -f "$_f"
   if [ "$_rc" -ne 0 ]; then
     echo "lis: $_lbl exited $_rc" >&2
-    if [ "$_pol" != continue ]; then return "$_rc"; fi
+    if [ "$_pol" != continue ]; then LIS_HOOK_FAILED=1; return "$_rc"; fi
   fi
   return 0
 }"""
@@ -1845,28 +1860,29 @@ def render_script_hooks(doc: dict, file_cmds: list[str] | None = None) -> list[s
     if hooks:
         # SPEC §13's post_install is an install-stage hook — "runs after OS
         # installation, package extraction, and file generation", once. The
-        # whole set used to sit in the same activation snippet as files[] and
-        # the birth certificate, which NixOS re-runs on every boot and every
-        # `nixos-rebuild switch`: a hook appending a line to a config file
-        # appended it forever. Its own snippet with its own marker restores
-        # the "once" half; the marker is written whatever the hooks returned,
-        # because a failed fail-policy hook has already made this activation
-        # exit non-zero and re-running a half-completed hook on the next boot
-        # is not a recovery.
-        #
-        # `switch-to-configuration boot` exits before the activation script
-        # (switch-to-configuration.pl:125), so nixos-install does not run this
-        # — the first activation is the target's own first boot, ahead of
-        # systemd and therefore ahead of lis-firstboot.
-        warn("scripts.post_install / scripts.post: NixOS has no install-stage "
-             "hook — nixos-install runs `switch-to-configuration boot`, which "
-             "exits before activation — so these run from an activation script "
-             "guarded by /var/lib/lis/.post-install-done, i.e. once, on the "
-             "target's first boot and before the first-boot unit")
+        # stage does land there: nixos-enter runs the target's `activate`
+        # before the command it was given (nixos-enter.sh:103), and that is
+        # what nixos-install calls. What it did not do is stop: the whole set
+        # used to sit in the same snippet as files[] and the birth
+        # certificate, which NixOS re-runs on every boot and every
+        # `nixos-rebuild switch`, so a hook appending a line to a config file
+        # appended it forever. Its own snippet with its own marker is the
+        # "once" half, and the marker is withheld when a hook whose
+        # on_failure is `fail` failed, so the next activation retries it
+        # instead of recording work that did not happen.
+        warn("scripts.post_install / scripts.post run from an activation "
+             "script, guarded by /var/lib/lis/.post-install-done so they run "
+             "once: nixos-install reaches them through nixos-enter's `activate` "
+             "call (nixos-enter.sh:103), which is wrapped in `|| true` — so a "
+             "hook whose on_failure is 'fail' marks the activation failed and "
+             "is retried on the next boot, but does not abort nixos-install "
+             "itself")
         body = ("if [ ! -e /var/lib/lis/.post-install-done ]; then\n"
+                "LIS_HOOK_FAILED=0\n"
                 + "\n".join(hooks)
                 + "\ninstall -d -m755 /var/lib/lis"
-                + "\ntouch /var/lib/lis/.post-install-done\nfi")
+                + "\nif [ \"$LIS_HOOK_FAILED\" -eq 0 ]; then"
+                " touch /var/lib/lis/.post-install-done; fi\nfi")
         out += ["  system.activationScripts.lis-post-install = {",
                 "    deps = [ \"lis-hooks\" ];",
                 "    text ="
@@ -2264,13 +2280,22 @@ def wireless_var(index: int) -> str:
 def cidr(addr: str) -> tuple[str, int, int] | None:
     """'10.0.0.5/24' → ('10.0.0.5', 24, 4). None when it is not a CIDR."""
     host, sep, mask = addr.partition("/")
-    if not sep or not mask.isdigit() or not host:
+    if not sep or not mask.isdigit() or not valid_address(host):
         return None
     family = 6 if ":" in host else 4
     prefix = int(mask)
     if prefix > (128 if family == 6 else 32):
         return None
     return host, prefix, family
+
+
+def valid_address(value: str) -> bool:
+    """Whether a bare IPv4 or IPv6 address, with no prefix and no port."""
+    try:
+        ipaddress.ip_address(str(value))
+    except ValueError:
+        return False
+    return True
 
 
 def nix_addr_list(addrs: list[tuple[str, int]]) -> str:
@@ -2368,7 +2393,10 @@ def render_firewall(firewall: dict, out: list[str]) -> None:
     """
     enabled = firewall.get("enabled")
     if enabled is not None:
-        out.append(f"  networking.firewall.enable = {str(enabled).lower()};")
+        if (literal := nix_bool(enabled, "network.firewall.enabled")) is None:
+            enabled = None
+        else:
+            out.append(f"  networking.firewall.enable = {literal};")
     # (spec, where it came from) — allow_services[] is expanded into the same
     # syntax allow_ports[] uses so one parser and one refusal path serve both.
     specs: list[tuple[str, str]] = []
@@ -2397,7 +2425,21 @@ def render_firewall(firewall: dict, out: list[str]) -> None:
         if proto not in ports or not low.isdigit() or (dash and not high.isdigit()):
             refuse(f"{source} {spec!r} is not <port>[-<port>]/<tcp|udp>")
             continue
+        # networking.firewall.allowed*Ports is types.port — 0..65535 — and
+        # types.port rejects anything outside it at evaluation time, which
+        # under --apply is inside nixos-install with the disks already gone.
+        bounds = [int(low)] + ([int(high)] if dash else [])
+        if any(not 0 <= b <= 65535 for b in bounds):
+            refuse(f"{source} {spec!r} is outside 0-65535; "
+                   "networking.firewall.allowedTCPPorts is typed types.port")
+            continue
         if dash:
+            if int(low) > int(high):
+                refuse(f"{source} {spec!r} counts down; "
+                       "networking.firewall.allowed*PortRanges takes "
+                       "{ from = <low>; to = <high>; } and opens nothing when "
+                       "from exceeds to")
+                continue
             if (int(low), int(high)) not in ranges[proto]:
                 ranges[proto].append((int(low), int(high)))
         elif int(low) not in ports[proto]:
@@ -2426,6 +2468,24 @@ def is_glob(name: str | None) -> bool:
     is why the manager is resolved before the interfaces are rendered.
     """
     return bool(name) and any(c in name for c in "*?[")
+
+
+def iface_dhcp(index: int, iface: dict) -> tuple[bool | None, bool | None]:
+    """dhcp4/dhcp6 as booleans; anything else is refused and read as unset.
+
+    Both leaves are emitted as bare Nix tokens (`useDHCP = true;`,
+    `DHCP = "ipv4";`), so a string slipping through is a parse error or a
+    silently inverted flag rather than a bad value.
+    """
+    flags: list[bool | None] = []
+    for leaf in ("dhcp4", "dhcp6"):
+        value = iface.get(leaf)
+        if value is not None and not isinstance(value, bool):
+            refuse(f"network.interfaces[{index}].{leaf} {value!r} is not a "
+                   "boolean (true or false)")
+            value = None
+        flags.append(value)
+    return flags[0], flags[1]
 
 
 def networkd_dhcp(dhcp4: bool | None, dhcp6: bool | None) -> str:
@@ -2468,7 +2528,7 @@ def render_glob_interface(index: int, iface: dict, name: str, mac: str | None,
         consume(iface)
         return False
 
-    dhcp4, dhcp6 = iface.get("dhcp4"), iface.get("dhcp6")
+    dhcp4, dhcp6 = iface_dhcp(index, iface)
     addresses: list[str] = []
     for addr in iface.get("addresses", []) or []:
         if cidr(addr) is None:
@@ -2478,6 +2538,11 @@ def render_glob_interface(index: int, iface: dict, name: str, mac: str | None,
             continue
         addresses.append(addr)
     gateway = iface.get("gateway")
+    if gateway and not valid_address(gateway):
+        refuse(f"network.interfaces[{index}].gateway {gateway!r} is not an IP "
+               "address; a .network [Route] Gateway= takes an address, and "
+               "networkd drops a route it cannot parse")
+        gateway = None
     if dhcp4 is None and dhcp6 is None and not addresses and not gateway:
         warn(f"network.interfaces[{index}].match.name {name!r} carries no "
              "addressing (no dhcp4, no dhcp6, no addresses, no gateway), so "
@@ -2555,7 +2620,7 @@ def render_interfaces(interfaces: list, manager: str, out: list[str]) -> list[st
         names.append(name)
 
         settings: list[str] = []
-        dhcp4, dhcp6 = iface.get("dhcp4"), iface.get("dhcp6")
+        dhcp4, dhcp6 = iface_dhcp(index, iface)
         if dhcp4 is not None and dhcp6 is not None and dhcp4 != dhcp6:
             refuse(f"network.interfaces[{index}] asks for dhcp4={dhcp4} and "
                    f"dhcp6={dhcp6}: networking.interfaces.<n>.useDHCP "
@@ -2593,6 +2658,12 @@ def render_interfaces(interfaces: list, manager: str, out: list[str]) -> list[st
                  "dns), so no networking.interfaces entry is emitted for it")
 
         if gw := iface.get("gateway"):
+            if not valid_address(gw):
+                refuse(f"network.interfaces[{index}].gateway {gw!r} is not an "
+                       "IP address; networking.defaultGateway.address is "
+                       "types.str, so a hostname or a CIDR reaches the routing "
+                       "table verbatim and the route is never installed")
+                continue
             family = 6 if ":" in gw else 4
             if family in gateways and gateways[family] != (gw, name):
                 refuse(f"network.interfaces[{index}].gateway {gw!r}: NixOS has one "
@@ -2748,6 +2819,8 @@ def render_time(time_cfg: dict) -> list[str]:
         refuse(f"system.time.provider {provider!r} is not a value SPEC §8 "
                f"defines (auto | {' | '.join(sorted(TIME_PROVIDERS))})")
         provider = None
+    if ntp is not None and nix_bool(ntp, "system.time.ntp") is None:
+        ntp = None
 
     if ntp is False:
         # timesyncd is stated unconditionally because NixOS starts it by
@@ -2873,7 +2946,13 @@ def render_network(doc: dict) -> list[str]:
     # IP are `error: attribute already defined` — which under --apply is raised
     # by nixos-install, with the disks already wiped.
     host_names: dict[str, list[str]] = {}
-    for entry in network.get("hosts", []) or []:
+    for index, entry in enumerate(network.get("hosts", []) or []):
+        if not valid_address(entry["ip"]):
+            refuse(f"network.hosts[{index}].ip {entry['ip']!r} is not an IP "
+                   "address; networking.hosts is keyed by address and a name "
+                   "there produces an /etc/hosts line nothing resolves")
+            consume(entry)
+            continue
         names_for = host_names.setdefault(entry["ip"], [])
         names_for += [n for n in entry["names"] if n not in names_for]
     for ip, host_list in host_names.items():
@@ -2883,21 +2962,31 @@ def render_network(doc: dict) -> list[str]:
         render_firewall(firewall, out)
 
     ssh = network.get("ssh", {}) or {}
-    if ssh.get("enabled"):
-        out.append("  services.openssh.enable = true;")
-    elif "enabled" in ssh:
-        # Emitted rather than left to the default: `false` is intent, and a role
-        # or a later module turning sshd on must lose to it, not silently win.
-        out.append("  services.openssh.enable = false;")
-        if "password_auth" in ssh or ssh.get("permit_root"):
+    if "enabled" in ssh and (literal := nix_bool(ssh["enabled"],
+                                                 "network.ssh.enabled")):
+        # Emitted in both directions: `false` is intent, and a role or a later
+        # module turning sshd on must lose to it, not silently win.
+        out.append(f"  services.openssh.enable = {literal};")
+        if literal == "false" and ("password_auth" in ssh or ssh.get("permit_root")):
             warn("network.ssh.password_auth / permit_root have no effect: the same "
                  "document sets network.ssh.enabled false")
     if "password_auth" in ssh:
-        out.append("  services.openssh.settings.PasswordAuthentication = "
-                   f"{str(ssh['password_auth']).lower()};")
-    if ssh.get("permit_root"):
-        out.append("  services.openssh.settings.PermitRootLogin = "
-                   f"{nix_str(ssh['permit_root'])};")
+        if literal := nix_bool(ssh["password_auth"], "network.ssh.password_auth"):
+            out.append("  services.openssh.settings.PasswordAuthentication = "
+                       f"{literal};")
+    if permit_root := ssh.get("permit_root"):
+        # SPEC §10's three values are all inside the NixOS enum
+        # (services/networking/ssh/sshd.nix settings.PermitRootLogin), so the
+        # check is against the spec's list — a value outside it is a type error
+        # raised by nixos-install, after disko has wiped.
+        if permit_root not in ("no", "prohibit-password", "yes"):
+            refuse(f"network.ssh.permit_root {permit_root!r} is not a value "
+                   "SPEC §10 defines (no | prohibit-password | yes); "
+                   "services.openssh.settings.PermitRootLogin is typed as an "
+                   "enum and rejects anything else")
+        else:
+            out.append("  services.openssh.settings.PermitRootLogin = "
+                       f"{nix_str(permit_root)};")
     return out
 
 
