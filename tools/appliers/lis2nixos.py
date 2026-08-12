@@ -3530,9 +3530,12 @@ APP_SOURCES = ("native", "flatpak", "snap", "appimage")
 APP_SOURCE_REFUSALS = {
     "snap": "snapd is not part of NixOS and the store has no writable "
             "/snap; software.snap[] refuses for the same reason",
-    "appimage": "an AppImage is fetched from the network at install time, "
-                "which contradicts the seed/offline model every LIS "
-                "applier installs under",
+    "appimage": "installing one would mean fetching it from the network at "
+                "install time, which contradicts the seed/offline model every "
+                "LIS applier installs under — nixos-24.11's programs.appimage "
+                "only installs the appimage-run wrapper and its binfmt "
+                "registrations (nixos/modules/programs/appimage.nix), which "
+                "run an AppImage already on disk and fetch none",
 }
 
 

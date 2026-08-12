@@ -1390,7 +1390,11 @@ surviving source for an app; when `preference[]` names an alternative this appli
 unusable source is skipped with a warning naming it (footnote 45). snapd needs a writable `/snap`
 and FHS mount namespaces the store does not provide, and nixpkgs ships no snapd service module; an
 AppImage is fetched from the network at install time, which contradicts the seed/offline model
-every LIS applier installs under.
+every LIS applier installs under. 24.11 *does* carry `programs.appimage`
+(`nixos/modules/programs/appimage.nix`), but it only installs the `appimage-run` wrapper and its
+two binfmt registrations — it runs an AppImage that is already on disk and fetches none, so it is
+not a route by which a *named* app could arrive. The refusal now says so rather than implying the
+channel has nothing.
 ⁴⁵ **NixOS is the first applier to arbitrate on `preference[]` instead of hardcoding native-first.**
 The list is walked in order; a source this applier cannot provide is skipped **with a warning** as
 long as a later one works, and refuses only when nothing in the list survives. A declared source
