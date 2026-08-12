@@ -224,21 +224,21 @@ refuses (`lis2void.py:180-183`).
 | `storage.wipe` | ◐¹ | ◐² | ◐³ | ✅ | ✅⁴ | ◐³ | ◐⁵ | ⛔⁷¹ | ◐⁷² |
 | `storage.partitions[].disk` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ◐⁶ | ❌⁷³ | ✅ |
 | `storage.partitions[].id` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ◐⁶ | ❌⁷³ | ◐⁷⁴ |
-| `storage.partitions[].role` | ◐⁷ | ✅ | ✅ | ✅ | ✅ | ◐⁸ | ◐⁶ | ✅⁷⁵ | ✅⁷⁵ |
+| `storage.partitions[].role` | ◐⁷ | ✅ | ✅ | ✅ | ✅ | ✅⁸ | ◐⁶ | ✅⁷⁵ | ✅⁷⁵ |
 | `storage.partitions[].size` | ◐⁹ | ◐⁹ | ◐¹⁰ | ◐⁹ | ◐¹¹ | ✅ | ◐¹² | ◐⁷⁶ | ◐⁷⁷ |
 | `storage.partitions[].fs` | ◐¹³ | ◐¹⁴ | ?¹⁵ | ◐¹⁴ | ◐¹⁶ | ✅¹⁷ | ◐¹⁸ | ◐⁷⁸ | ◐⁷⁹ |
-| `storage.partitions[].label` | ✅ | ❌ | ◐¹⁹ | ❌ | ❌ | ❌ | ❌ | ✅⁸⁰ | ✅⁸⁰ |
+| `storage.partitions[].label` | ✅ | ❌ | ◐¹⁹ | ❌ | ❌ | ✅⁸⁸ | ❌ | ✅⁸⁰ | ✅⁸⁰ |
 | `storage.partitions[].mountpoint` | ◐²⁰ | ✅ | ✅ | ✅ | ✅ | ✅ | ◐²¹ | ◐⁸¹ | ✅ |
 | `storage.partitions[].mount_options[]` | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ✅⁸² | ✅⁸² |
 | `…partitions[].subvolumes[].name` | ⚙²² | ⚙²³ | ✅ | ◐²⁴ | ✅ | ✅ | ◐²⁵ | ✅⁸³ | ✅⁸³ |
 | `…partitions[].subvolumes[].mountpoint` | ⚙²² | ⚙²³ | ✅ | ✅ | ✅ | ✅ | ◐²⁵ | ✅⁸³ | ✅⁸³ |
 | `…partitions[].subvolumes[].mount_options[]` | ⚙²² | ◐²⁶ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅⁸² | ✅⁸² |
-| `…partitions[].existing.match.partition` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ❌²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
-| `…partitions[].existing.match.label` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ❌²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
-| `…partitions[].existing.match.uuid` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ❌²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
-| `…partitions[].existing.match.fs` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ❌²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
-| `…partitions[].existing.format` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ❌²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
-| `…partitions[].existing.resize` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ❌²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
+| `…partitions[].existing.match.partition` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
+| `…partitions[].existing.match.label` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
+| `…partitions[].existing.match.uuid` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
+| `…partitions[].existing.match.fs` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
+| `…partitions[].existing.format` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
+| `…partitions[].existing.resize` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
 | `storage.encryption[].id` | ✅ | ◐²⁹ | ✅ | ✅ | ✅ | ✅ | ✅ | ⛔⁸⁵ | ⛔⁸⁶ |
 | `storage.encryption[].over` | ✅ | ✅ | ✅ | ◐³⁰ | ✅ | ✅ | ◐³¹ | ⛔⁸⁵ | ⛔⁸⁶ |
 | `storage.encryption[].type` | ◐³² | ❌³³ | ❌³³ | ✅ | ❌³³ | ✅³⁴ | ❌³³ | ⛔⁸⁵ | ⛔⁸⁶ |
@@ -250,7 +250,7 @@ refuses (`lis2void.py:180-183`).
 | `storage.lvm[].volumes[].name` | ✅ | ✅ | ✅ | ◐⁴⁵ | ✅ | ✅ | ✅ | ⛔⁸⁵ | ⛔⁸⁶ |
 | `storage.lvm[].volumes[].size` | ◐⁹ | ◐⁹ | ◐¹⁰ | ◐⁹ | ◐¹¹ | ✅ | ◐⁴⁶ | ⛔⁸⁵ | ⛔⁸⁶ |
 | `storage.lvm[].volumes[].fs` | ◐⁴⁷ | ◐¹⁴ | ✅⁴⁸ | ◐⁴⁵ | ◐⁴⁹ | ✅ | ◐⁵⁰ | ⛔⁸⁵ | ⛔⁸⁶ |
-| `storage.lvm[].volumes[].label` | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ⛔⁸⁵ | ⛔⁸⁶ |
+| `storage.lvm[].volumes[].label` | ✅ | ❌ | ❌ | ❌ | ❌ | ✅⁸⁸ | ❌ | ⛔⁸⁵ | ⛔⁸⁶ |
 | `storage.lvm[].volumes[].mountpoint` | ✅ | ✅ | ✅ | ◐⁴⁵ | ✅ | ✅ | ◐²¹ | ⛔⁸⁵ | ⛔⁸⁶ |
 | `storage.lvm[].volumes[].mount_options[]` | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ⛔⁸⁵ | ⛔⁸⁶ |
 | `…lvm[].volumes[].subvolumes[].name` | ⚙²² | ⚙²³ | ✅ | ◐⁴⁵ | ✅ | ✅ | ◐⁵¹ | ⛔⁸⁵ | ⛔⁸⁶ |
@@ -259,10 +259,10 @@ refuses (`lis2void.py:180-183`).
 | `storage.raid[].name` | ✅ | ◐⁵² | ✅ | ◐⁵³ | ⚙⁵⁴ | ✅ | ✅ | ⛔⁸⁵ | ⛔⁸⁶ |
 | `storage.raid[].level` | ✅ | ✅ | ✅ | ◐⁵³ | ⚙⁵⁵ | ✅ | ✅ | ⛔⁸⁵ | ⛔⁸⁶ |
 | `storage.raid[].devices[]` | ✅ | ✅ | ✅ | ◐⁵³ | ⚙⁵⁴ | ✅ | ✅ | ⛔⁸⁵ | ⛔⁸⁶ |
-| `storage.raid[].spares[]` | ✅ | ✅ | ◐⁵⁶ | ❌ | ❌⁵⁷ | ❌⁵⁸ | ❌ | ⛔⁸⁵ | ⛔⁸⁶ |
-| `storage.swap.zram.size` | ❌⁵⁹ | ❌⁵⁹ | ❌⁵⁹ | ❌⁵⁹ | ❌⁵⁹ | ❌⁵⁹ | ❌⁶⁰ | ⛔⁸⁵ | ⛔⁸⁶ |
+| `storage.raid[].spares[]` | ✅ | ✅ | ◐⁵⁶ | ❌ | ❌⁵⁷ | ⚙⁵⁸ | ❌ | ⛔⁸⁵ | ⛔⁸⁶ |
+| `storage.swap.zram.size` | ❌⁵⁹ | ❌⁵⁹ | ❌⁵⁹ | ❌⁵⁹ | ❌⁵⁹ | ✅⁹⁰ | ❌⁶⁰ | ⛔⁸⁵ | ⛔⁸⁶ |
 | `storage.swap.file.path` | ⚙⁶¹ | ⚙⁶¹ | ❌ | ❌ | ❌ | ✅ | ❌ | ⛔⁸⁵ | ⛔⁸⁶ |
-| `storage.swap.file.size` | ⚙⁶² | ⚙⁶² | ❌ | ❌ | ❌ | ◐⁶³ | ❌ | ⛔⁸⁵ | ⛔⁸⁶ |
+| `storage.swap.file.size` | ⚙⁶² | ⚙⁶² | ❌ | ❌ | ❌ | ✅⁶³ | ❌ | ⛔⁸⁵ | ⛔⁸⁶ |
 | `storage.snapshots.enabled` | ⚙⁶⁴ | ⚙⁶⁴ | ⚙⁶⁴ | ◐⁶⁵ | ⚙⁶⁴ | ✅⁶⁶ | ⛔ | ⛔⁸⁷ | ⛔⁸⁷ |
 | `storage.snapshots.tool` | ◐⁶⁷ | ◐⁶⁷ | ◐⁶⁷ | ◐⁶⁷ | ◐⁶⁷ | ◐⁶⁷ | ⛔ | ⛔⁸⁷ | ⛔⁸⁷ |
 | `storage.snapshots.boot_menu` | ⚙⁶⁸ | ⚙⁶⁸ | ⛔ | ◐⁶⁹ | ⚙⁷⁰ | ⛔ | ⛔ | ⛔⁸⁷ | ⛔⁸⁷ |
@@ -279,10 +279,14 @@ regardless.
 ⁶ Manual path only (combination rule C-27). Dropped on the simple path with no tracker warning —
 the field *is* read, it just reaches nothing.
 ⁷ `esp`/`swap` get their flags; `data` and `raw` silently get no filesystem.
-⁸ **The NixOS silent killer.** `role: root|boot|swap` with no explicit `fs` produces a disko
-partition with no `content` block (`lis2nixos.py:306`) while `hardware.nix` still writes
-`fileSystems."/"`. Verified: 0 warnings, 0 refusals, unbootable result. Always emit an explicit
-`fs`.
+⁸ **Was "the NixOS silent killer"; fixed.** `role: root|boot|swap` with no explicit `fs` used to
+produce a disko partition with no `content` block while `hardware.nix` still wrote
+`fileSystems."/"` — 0 warnings, 0 refusals, unbootable result. Both passes now go through one
+`role_fs()` table (`Topology.fs_of`), so `esp`→vfat, `boot`→ext4, `root`→btrfs and `swap`→swap
+are inferred identically in `disko.nix` and `hardware.nix`. Verified emitting `format = "vfat"`,
+`"ext4"` and `"btrfs"` for a document that declares none of them. `role: data|raw` implies no
+filesystem — schema.md §6.1 gives a default only for the other four — so a `mountpoint` on one
+with no `fs` now **refuses** instead of mounting an unformatted partition.
 ⁹ Absolute sizes and `rest` work; `NN%` refuses.
 ¹⁰ Percent refuses; `rest` becomes `--size=1024 --grow`.
 ¹¹ **SILENT**: `%` is treated as `rest`; two percent siblings overlap. Resolved only under
@@ -313,8 +317,13 @@ verbatim.
 ignored.
 ²⁷ The whole `existing.*` subtree refuses: dual-boot adoption is not expressible in any of these
 unattended installers.
-²⁸ **NixOS differs — it does not refuse.** Adoption is skipped at `lis2nixos.py:439` and the
-leaves are warned as unread. A dual-boot document silently becomes a fresh-install document.
+²⁸ **NixOS now refuses with the rest.** It used to skip adoption and warn the leaves as unread —
+a dual-boot document silently became a fresh-install document — and, worse, the skipped partition
+still advanced the per-disk index, so `disko.nix` created `root1` while `hardware.nix` mounted
+`disk-main-root2`: devices that were never created, exit 0. The applier runs disko with
+`destroy,format,mount`, which recreates the whole table, so an adopted partition would be
+destroyed rather than kept (schema.md §6.2). The refusal names the disko primitives an
+implementation would need (`start`/`end`/`uuid`/`label`, `preCreateHook`, `--mode format,mount`).
 ²⁹ Drives the key path and the wiring, but the mapper name stays whatever partman chooses.
 ³⁰ Must name a partition handle. `over` a RAID array or an LV refuses via
 `check_encryption_emitted`.
@@ -330,7 +339,20 @@ of legacy GRUB gets an unbootable machine.
 ³⁶ Read directly into `%pre` / the profile key placeholder.
 ³⁷ Read as a **passphrase from the seed**, not as a keyfile on the target.
 ³⁸ Unread (shadowed) whenever a `keys[]` disk_encryption entry exists.
-³⁹ The file must also exist inside the booted initrd, which the applier does not arrange.
+³⁹ **NixOS: the keyfile is format-time material, and the emission was wrong until now.** It used
+to be written straight into disko's `settings.keyFile`, which disko passes through to
+`boot.initrd.luks.devices.<n>.keyFile` (`lib/types/luks.nix:338-357`) — and it was written
+*unresolved*, so a document saying `keyfile: "seed:luks.key"` produced
+`keyFile = "seed:luks.key"` in `hardware.nix`. The container was encrypted correctly and the
+machine **would not boot**: stage 1 looked for a file by that literal name. No warning, no
+refusal. It now goes through `luks_key_path`, which resolves the reference
+(`/run/lis/seed/luks.key`) and emits it as disko's `passwordFile` — read while formatting and
+opening, never copied into the installed system, which is also the only reading compatible with
+SPEC §2.4, since anything the initrd carries is world-readable in the store. `luks_key_path` was
+itself joining `seed:…` onto the mount point unresolved; fixed in `lis_common.py`, which corrects
+the same latent bug in the five other columns that call it. The installed system therefore unlocks
+through `storage.encryption[].unlock`, and a container that declares a keyfile and no `unlock`
+is now warned about explicitly.
 ⁴⁰ Per member: `passphrase` ◐ (boot always prompts), `keyfile` ◐ — **the crypttab keyfile field is
 rewritten to `none` (`lis2autoinstall.py:814-816`) with a code comment and no `warn()`, so a
 keyfile-unlock document produces a machine that prompts at every boot** — `tpm2` ⚙ (emulated via
@@ -359,13 +381,21 @@ partitions.
 ⁵⁶ `--spares=N` is emitted but **the spare's partition is never appended to the member list**. A
 RAID1 of 2 + 1 spare becomes a 2-member array declaring 1 spare — one active mirror. Verified.
 ⁵⁷ The partition is created and then never passed to `mdadm`.
-⁵⁸ Emits a Nix comment only; spares silently become active members. No warning.
+⁵⁸ **NixOS: emulated, and no longer wrong.** Spares used to be folded in with the active members,
+so disko's `--raid-devices="$(wc -l …)"` counted them and RAID1 of 2 + 1 spare became a **3-way
+mirror**. disko's mdadm type has no spare concept (`lib/types/mdadm.nix:65-68`), so the array is
+declared with the active members only and the spares are attached from a `postCreateHook` —
+`mdadm --add /dev/md/md0 …` after `mdadm --create`. Read out of the realised disko format script,
+not inferred. Warned as an emulation. A spare that also declares `fs` or `mountpoint` refuses.
 ⁵⁹ zram *is* enabled (via `zram-config` / `zram-tools` / `zramSwap.enable` /
 `systemd-zram-service`) but at that package's own default size. The requested size never arrives.
 ⁶⁰ Alpine installs no zram package at all.
 ⁶¹ `fallocate` + `mkswap` + fstab in a late-command.
 ⁶² The `iB` suffix is stripped for `fallocate`; btrfs NOCOW is not handled.
-⁶³ Only `GiB` is parsed — `MiB` and `TiB` **silently become 4GiB**.
+⁶³ **NixOS parses all three units now.** It used to read `GiB` only, so `"8192MiB"` **silently
+became 4GiB** (the fallback), and `TiB` did the same. `size_mib()` converts MiB/GiB/TiB to the
+mebibytes `swapDevices.<n>.size` is counted in — verified `"8192MiB"` → `size = 8192` — and
+anything it cannot parse refuses rather than falling back.
 ⁶⁴ `%post`/late-command installs snapper and runs `create-config /`. btrfs-root is not checked.
 ⁶⁵ Package added always; the Agama btrfs `snapshots` flag is set only when subvolumes are
 declared.
@@ -435,6 +465,24 @@ is no other storage shape (rule C-41).
 groups, no arrays (and `sys-fs/mdadm` is not on the official binary host either, so honouring one
 would additionally mean a source build), no zram and no swapfile.
 ⁸⁷ Both call `check_snapshots(tools=frozenset(), boot_menu=False)`, so all three leaves refuse.
+⁸⁸ **NixOS, new.** Both label leaves used to be read by nothing (`warning: … never reads it`).
+They now become `content.extraArgs` on the disko filesystem — `-L` for ext2/3/4, xfs, btrfs, f2fs
+and swap, `-n` for vfat — verified as `extraArgs = [ "-L" "ROOTFS" ]` and `[ "-n" "ESP" ]` in the
+generated `disko.nix`. A label longer than the filesystem allows (vfat 11, xfs 12, ext4 16) or
+holding a character outside `[A-Za-z0-9._+:-]` **refuses**: disko interpolates btrfs `extraArgs`
+unquoted (`lib/types/btrfs.nix:155`), and an over-long label is an `mkfs` failure raised after
+disko has already partitioned the disk. Note this is the *filesystem* label; the GPT partition
+name is separate and is now stated explicitly in `disko.nix`, computed with disko's own rule —
+`substring 0 36 (hashString "sha256" …)` past 36 characters (`lib/types/gpt.nix:139-151`) —
+because the applier previously predicted `/dev/disk/by-partlabel/disk-<disk>-<id>` for a long name
+while disko created the hashed one, leaving `hardware.nix` pointing at a device node that never
+existed. Verified byte-for-byte against disko's expression.
+⁸⁹ *(unused)*
+⁹⁰ **NixOS, new.** The size used to be read by nothing, so zram came up at the module's own
+default. A `%` value becomes `zramSwap.memoryPercent` (verified `zramSwap.memoryPercent = 50`);
+an absolute size becomes `zramSwap.memoryMax` with `memoryPercent = 100`, because 24.11's module
+computes `min(percent/100 × RAM, memoryMax)` and leaving the percentage at its 50 default would
+cap an absolute request at half of RAM.
 
 ## 2.6 boot
 
@@ -481,7 +529,12 @@ instead of after.
 **`linuxPackages-rt`** — a dash, because `pkgs.linuxPackages_rt` does not exist on 24.11 and
 naming it was an evaluation error raised *after* disko had wiped the disks. Each attribute was
 confirmed by forcing `boot.kernelPackages.kernel.version` (6.6.94 / 6.6.83 / 6.15.2 / 5.15.177-rt83);
-an unmapped value still refuses.
+an unmapped value still refuses. One combination refuses: **`zen` with any `fs: zfs`** in the
+document. nixpkgs 24.11 marks the ZFS kernel module broken against that series
+(`Package 'zfs-kernel-2.2.7-6.15.2' … is marked as broken`, `pkgs/os-specific/linux/zfs/generic.nix:309`),
+so the pair translated with zero diagnostics and then failed to evaluate inside `nixos-install`,
+after the wipe. The refusal is narrow because it was measured rather than assumed: `default`,
+`lts`, `hardened` and `realtime` were each built to a real `system.build.toplevel` **with** zfs.
 ¹⁶ Only `default` and `lts`.
 ¹⁷ `sed` on `GRUB_CMDLINE_LINUX` in a late-command; warned.
 ¹⁸ `sed` on loader entries or `/etc/default/grub`; refuses for loaders other than grub /
@@ -525,8 +578,14 @@ installs one: the single in-tree consumer is the disk-image builder
 `modules/image/repart-verity-store.nix:169`. A UKI install needs the out-of-tree lanzaboote module.
 ³³ The distro's own generator (initramfs-tools / dracut / mkinitcpio / mkinitfs) is used
 regardless of the request.
-³⁴ Applied as `boot.initrd.availableKernelModules`. The contradictory "boot.initramfs is not
-applied" warning is gone (footnote 21).
+³⁴ Applied as **`boot.initrd.kernelModules`**, not `availableKernelModules` as it used to be.
+The distinction is the whole field: `availableKernelModules` is the *conditional* list — modules
+are carried into the initrd and loaded only if the hardware is detected — so a module named
+precisely because the auto-detector missed the controller was carried and never loaded, which is
+the case §7's "always embedded" wording exists for. Verified in `hardware.nix` as
+`boot.initrd.kernelModules = [ … "mpt3sas" "megaraid_sas" ]`. Note a bogus module name fails at
+**build**, not evaluation, so neither the pre-flight nor any static check catches it. The
+contradictory "boot.initramfs is not applied" warning is gone (footnote 21).
 ³⁵ The Alpine module list at `:190-200` is fixed.
 ³⁶ `grub`/`auto` only on both; `systemd-boot` refuses. VAI installs GRUB and nothing else, and
 `sys-boot/systemd-boot` is not published on Gentoo's official binary host.
@@ -604,15 +663,19 @@ systemd one via `boot.initrd.systemd.enable`.
 | `system.security.module` | ◐²⁰ | ◐²⁰ | ◐²¹ | ◐²⁰ | ◐²² | ◐²³ | ⛔²⁴ | ⛔⁵² | ◐⁵³ |
 | `system.domain` | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌²⁵ | ❌⁵⁴ | ✅⁵⁴ |
 | `system.hwclock` | ⚙²⁶ | ✅²⁷ | ✅²⁷ | ⚙²⁶ | ⚙²⁶ | ✅²⁸ | ⚙²⁶ | ✅⁵⁵ | ✅⁵⁵ |
-| `system.time.ntp` | ❌ | ✅ | ❌ | ❌ | ✅²⁹ | ◐³⁰ | ✅ | ✅⁵⁶ | ◐⁵⁷ |
+| `system.time.ntp` | ❌ | ✅ | ❌ | ❌ | ✅²⁹ | ✅³⁰ | ✅ | ✅⁵⁶ | ◐⁵⁷ |
 | `system.time.servers[]` | ❌ | ◐³¹ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅⁵⁶ | ❌⁵⁷ |
-| `system.time.provider` | ❌ | ❌ | ❌ | ❌ | ❌³² | ◐³³ | ◐³⁴ | ◐⁵⁶ | ◐⁵⁷ |
+| `system.time.provider` | ❌ | ❌ | ❌ | ❌ | ❌³² | ✅³³ | ◐³⁴ | ◐⁵⁶ | ◐⁵⁷ |
 | `system.locale_overrides.<LC_*>` | ⚙³⁵ | ◐³⁶ | ⚙³⁵ | ⚙³⁵ | ⚙³⁵ | ✅ | ⚙³⁷ | ⚙³⁵ | ✅⁵⁸ |
 | `system.kdump` | ❌ | ❌ | ❌³⁸ | ❌³⁹ | ❌ | ✅⁴⁰ | ❌ | ❌ | ⛔⁵⁹ |
 | `system.telemetry` | ❌⁴¹ | ◐⁴² | ❌ | ❌ | –⁴³ | –⁶¹ | –⁴³ | –⁴³ | –⁴³ |
 
 ¹ Defaults to `archlinux` when absent.
-² Also seeds the ZFS `hostId`.
+² Also seeds the ZFS `hostId`. **A fully-qualified name is split rather than passed through**:
+`networking.hostName` is `types.strMatching` on a *single* label, so `system.hostname:
+"box.example.com"` was an evaluation error — wipe-then-fail under `--apply`. It becomes
+`hostName = "box"` + `domain = "example.com"`, warned; it **refuses** if the document also declares
+a contradicting `system.domain`, or if a label still fails the regex.
 ³ Defaults to `alpine` when absent.
 ⁴ Defaults to UTC when absent.
 ⁵ Defaults to `en_US.UTF-8` when absent.
@@ -666,10 +729,21 @@ nothing and lean on the NixOS default, which reads the same in the generated fil
 that never mentioned the clock — and leaves the answer to whatever a later `imports =` decides. A
 value outside the enum refuses.
 ²⁹ Defaults to `true` when absent.
-³⁰ Only `false` emits; `true` is silently the default.
+³⁰ **NixOS emits both directions now.** `false` already did; `true` was left to the default and so
+was indistinguishable from a document that never mentioned NTP, which meant a later module could
+turn the client off without contradicting anything. `services.timesyncd.enable = true` is stated.
+`ntp: false` together with a named `provider` emits that provider's own option `= false` and warns
+the contradiction, rather than acting on one and ignoring the other. Ubuntu/Fedora/SUSE unchanged:
+only `false` emits there; `true` is silently the default.
 ³¹ Only `servers[0]` reaches the target; the rest are silently dropped.
 ³² archinstall uses systemd-timesyncd regardless.
-³³ `chrony`/`openntpd` emitted; `timesyncd`/`auto` emit nothing.
+³³ **NixOS emits all four values.** `chrony` and `openntpd` already did; `systemd-timesyncd` and
+`auto` emitted **nothing at all**, and since both `updateMicrocode`-style defaults are off, an
+`auto` document got whatever the base closure happened to run. `auto` now resolves to
+`services.timesyncd.enable` — the client a NixOS system runs by default — and says so. Verified
+per value: `auto`/`systemd-timesyncd` → `services.timesyncd.enable = true`, `chrony` →
+`services.chrony.enable`, `openntpd` → `services.openntpd.enable`, each alongside
+`networking.timeServers`. The other columns are unchanged.
 ³⁴ `systemd-timesyncd` refuses; `auto` silently means chrony.
 ³⁵ `/etc/locale.conf` written by a post-install script.
 ³⁶ Writes `/etc/locale.conf`, but **Debian reads `/etc/default/locale`** — the file lands in the
@@ -765,21 +839,21 @@ from "nobody looked". A value outside SPEC §8's enum refuses.
 | `users[].dotfiles.repo` | ⚙³⁶ | ⚙ | ⚙³⁷ | ⚙ | ⚙³⁷ | ⚙³⁸ | ⚙ | ⚙ | ⚙ |
 | `users[].dotfiles.method` | ❌³⁹ | ◐³⁹ | ◐³⁹ | ◐³⁹ | ◐³⁹ | ⚙⁶⁷ | ❌³⁹ | ◐³⁹ | ◐³⁹ |
 | `users[].sudo` | ⚙⁴⁰ | ⚙ | ⚙ | ⚙ | ⚙ | ✅⁴¹ | ◐⁴² | ⚙ | ⚙ |
-| `users[].scripts.post[].interpreter` | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ |
+| `users[].scripts.post[].interpreter` | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ | ✅⁷⁰ | ❌⁴³ | ❌⁴³ | ❌⁴³ |
 | `users[].scripts.post[].chroot` | ❌⁴⁴ | ❌⁴⁴ | ❌⁴⁴ | ❌⁴⁴ | ◐⁴⁴ | ◐⁶⁸ | ❌⁴⁴ | ❌⁴⁴ | ❌⁴⁴ |
 | `users[].scripts.post[].content` | ❌⁴⁵ | ❌⁴⁵ | ❌⁴⁵ | ❌⁴⁵ | ❌⁴⁵ | ⚙⁶⁹ | ❌⁴⁵ | ❌⁴⁵ | ⚙⁶⁴ |
-| `users[].scripts.post[].source.from` | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ |
-| `users[].scripts.post[].on_failure` | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ |
-| `users[].scripts.post_install[].interpreter` | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ |
+| `users[].scripts.post[].source.from` | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ◐⁷⁰ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ |
+| `users[].scripts.post[].on_failure` | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ✅⁷⁰ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ |
+| `users[].scripts.post_install[].interpreter` | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ | ✅⁷⁰ | ❌⁴³ | ❌⁴³ | ❌⁴³ |
 | `users[].scripts.post_install[].chroot` | ❌⁴⁸ | ❌⁴⁸ | ❌⁴⁸ | ❌⁴⁸ | ◐⁴⁸ | ◐⁶⁸ | ◐⁴⁸ | ❌⁴⁸ | ❌⁴⁸ |
 | `users[].scripts.post_install[].content` | ⚙⁴⁹ | ⚙⁴⁹ | ✅⁵⁰ | ⚙⁴⁹ | ⚙⁵¹ | ⚙⁵² | ⚙⁵³ | ⚙⁶⁵ | ⚙⁶⁵ |
-| `users[].scripts.post_install[].source.from` | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ |
-| `users[].scripts.post_install[].on_failure` | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ |
-| `users[].scripts.firstboot[].interpreter` | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ |
+| `users[].scripts.post_install[].source.from` | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ◐⁷⁰ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ |
+| `users[].scripts.post_install[].on_failure` | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ✅⁷⁰ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ |
+| `users[].scripts.firstboot[].interpreter` | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ | ❌⁴³ | ✅⁷⁰ | ❌⁴³ | ❌⁴³ | ❌⁴³ |
 | `users[].scripts.firstboot[].chroot` | ❌⁴⁸ | ❌⁴⁸ | ❌⁴⁸ | ❌⁴⁸ | ◐⁴⁸ | ◐⁶⁸ | ◐⁴⁸ | ❌⁴⁸ | ❌⁴⁸ |
 | `users[].scripts.firstboot[].content` | ⚙⁵⁴ | ⚙⁵⁵ | ⚙⁵⁵ | ⚙⁵⁶ | ⚙⁵⁵ | ⚙⁵⁵ | ⚙⁵⁷ | ⚙⁶⁶ | ⚙⁶⁶ |
-| `users[].scripts.firstboot[].source.from` | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ |
-| `users[].scripts.firstboot[].on_failure` | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ |
+| `users[].scripts.firstboot[].source.from` | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ | ◐⁷⁰ | ⛔⁴⁶ | ⛔⁴⁶ | ⛔⁴⁶ |
+| `users[].scripts.firstboot[].on_failure` | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ | ✅⁷⁰ | ❌⁴⁷ | ❌⁴⁷ | ❌⁴⁷ |
 
 ¹ **A `users[]` entry named `root` is filtered out entirely** (`lis2autoinstall.py:576`) whenever
 another user exists — every field on it is dropped, SILENTLY. If `root` is the only user, the
@@ -808,7 +882,17 @@ imported).
 ¹⁹ For root, only the package is installed — no `chsh`.
 ²⁰ AutoYaST `<shell>` only; the Agama profile has no shell field.
 ²¹ `chsh` + package; `chsh` SILENTLY skipped for root.
-²² Resolved to `pkgs.<shell>`; an unknown name or a non-store path refuses.
+²² Resolved to `pkgs.<shell>`; an unknown name or a non-store path refuses. The accepted set grew
+from four to ten: `dash`, `ksh`, `tcsh`, `nushell`/`nu`, `elvish` and `xonsh` were being refused as
+having "no pkgs attribute" when all six exist on 24.11 and all six carry the `shellPath` that
+`users.users.<n>.shell`'s `shellPackage` type checks for. `sh`/`/bin/sh` now emit the literal
+`/bin/sh` NixOS builds (`shells-environment.nix:242`) instead of being substituted with bash, and
+`nologin`/`/sbin/nologin`/`/bin/false` map to `/run/current-system/sw/bin/nologin`. **A shell whose
+NixOS module must also be enabled is a wipe-then-fail if it is missed**:
+`config/users-groups.nix:1113-1136` asserts `programs.<shell>.enable` for exactly
+`["fish" "xonsh" "zsh"]`, and `xonsh` was absent from the applier's table — `shell: xonsh` produced
+a file that parsed, then died inside `nixos-install` with `Failed assertions`, after disko had
+wiped the disks. All three are in the table now.
 ²³ `sed` on passwd / `adduser -s`, plus the package.
 ²⁴ Primary user's groups go through a late-command `usermod -aG`.
 ²⁵ The Agama primary user's groups are dropped.
@@ -917,7 +1001,20 @@ flag can never *move* a stage on this applier, so a value that contradicts the s
 the only thing it can meaningfully say.
 ⁶⁹ The user-level `post` phase is now collected — into the activation script, immediately after the
 `post_install` bodies, per SPEC §13's ordering. NixOS joins Gentoo as the second applier to
-implement it (footnote 45). Same `$HOME`-quoting and re-runs-on-activation caveats as footnote 52.
+implement it (footnote 45). Same `$HOME`-quoting caveat as footnote 52; the re-runs-on-activation
+one no longer applies (footnote 70).
+⁷⁰ `interpreter`, `on_failure` and `source.from` on the per-user stages are the same
+implementation as the document-level ones — see §2.13 footnotes 61, 62 and 63 — with the body run
+under `setpriv --reuid=<user> --init-groups`. Verified in the generated file as
+`lis_hook "users['a'].scripts.post_install[0]" "python3" "a" continue …`. Two fixes came with
+them. The `post_install`/`post` bodies used to live in the **same** activation snippet as `files[]`
+and the birth certificate, so they re-ran on every boot and every `nixos-rebuild switch`; they now
+have their own `system.activationScripts.lis-post-install`, ordered after `lis-hooks` and `binsh`
+and guarded by `/var/lib/lis/.post-install-done`. And the hook temp file used to be `mktemp
+/tmp/…`, which inside `nixos-enter … activate` on a freshly formatted root is ENOENT — every hook
+was skipped while the done-marker was still written. Found by the VM suite, not by reading
+(`/tmp/lis-e2e/nixos/serial.log`, 17/19). Hook files now live under `/var/lib/lis/hooks` and a
+setup failure goes through the same policy check, so the marker is withheld.
 
 ## 2.9 network
 
@@ -935,7 +1032,7 @@ implement it (footnote 45). Same `$HOME`-quoting and re-runs-on-activation cavea
 | `network.wifi[].psk_hash` | ⛔²⁴ | ⛔²⁵ | ⛔²⁵ | ⛔²⁵ | ⛔²⁵ | ◐⁶³ | ⛔²⁷ | ⛔⁵⁰ | ⛔⁵⁰ |
 | `network.wifi[].hidden` | ⛔²⁴ | ⛔²⁵ | ⛔²⁵ | ⛔²⁵ | ⛔²⁵ | ✅²⁶ | ⛔²⁷ | ⛔⁵⁰ | ⛔⁵⁰ |
 | `network.firewall.enabled` | ❌²⁸ | ❌²⁸ | ◐²⁹ | ❌²⁸ | ❌²⁸ | ✅³⁰ | ❌³¹ | ❌⁵¹ | ❌⁵¹ |
-| `network.firewall.allow_services[]` | ⚙³² | ⚙³³ | ✅³⁴ | ⚙³⁵ | ⚙³² | ⛔⁶⁴ | ❌³¹ | ❌⁵¹ | ❌⁵¹ |
+| `network.firewall.allow_services[]` | ⚙³² | ⚙³³ | ✅³⁴ | ⚙³⁵ | ⚙³² | ◐⁶⁴ | ❌³¹ | ❌⁵¹ | ❌⁵¹ |
 | `network.firewall.allow_ports[]` | ⚙³² | ⚙³³ | ✅³⁴ | ⚙³⁵ | ⚙³⁷ | ✅³⁸ | ❌³¹ | ❌⁵¹ | ❌⁵¹ |
 | `network.ssh.enabled` | ✅ | ◐³⁹ | ◐³⁹ | ❌ | ❌⁴⁰ | ✅⁶⁵ | ✅ | ✅⁵² | ✅⁵² |
 | `network.ssh.password_auth` | ✅ | ⚙⁴¹ | ❌ | ❌ | ❌ | ✅⁴² | ❌ | ◐⁵³ | ❌⁵⁵ |
@@ -951,11 +1048,17 @@ package installed (rule C-14).
 enable systemd-networkd`, so `--lenient` gives a half-configured result.
 ⁴ `networkmanager`/`auto` only; `systemd-networkd` and `iwd` refuse.
 ⁵ `systemd-networkd` copies the ISO's config with no `.network` units; `iwd` refuses.
-⁶ `auto` means NetworkManager, even for a `server` role. All four schema values map:
-`networkmanager`/`auto` → `networking.networkmanager.enable`, `systemd-networkd` →
-`networking.useNetworkd`, `iwd` → `networking.wireless.iwd.enable`. The value also **decides the
-wireless back-end**, because `networkmanager.nix:551` asserts that `networking.wireless` and
-NetworkManager cannot both drive the radio (footnote 26).
+⁶ All four schema values map: `networkmanager` → `networking.networkmanager.enable`,
+`systemd-networkd` → `networking.useNetworkd`, `iwd` → `networking.wireless.iwd.enable`. **`auto`
+is now resolved before a line is emitted rather than always meaning NetworkManager**: an interface
+matched by *pattern* resolves it to systemd-networkd, since `networking.interfaces` is keyed by
+literal name and NetworkManager would leave the pattern unmatched; everything else still resolves
+to NetworkManager. Either resolution is reported. A value outside the enum now refuses instead of
+falling through. The choice also **decides the wireless back-end**, because `networkmanager.nix:551`
+asserts that `networking.wireless` and NetworkManager cannot both drive the radio (footnote 26),
+and it now **claims the other managers' switches** so that `software.services.enable` naming a
+different one is a refusal rather than two managers fighting over the same devices
+(§2.10 footnote 21).
 ⁷ Non-`auto`/`networkmanager` refuse; NetworkManager is installed on top of
 `/etc/network/interfaces`.
 ⁸ Becomes the netplan `ethernets` key — **a glob such as `en*` is emitted literally and matches
@@ -969,7 +1072,17 @@ nothing**.
 and every statically-configured interface is added to `networking.networkmanager.unmanaged`
 (`networkmanager.nix:211`) so NM cannot start a second, contradictory DHCP on the interface the
 document pinned. An entry whose `match` names neither a name nor a MAC refuses — there is nothing
-to key the option on.
+to key the option on. **A `match.name` glob is now honoured rather than emitted as a dead
+attribute**: `networking.interfaces."en*"` matched no device and printed no diagnostic. A pattern
+now renders a `systemd.network.networks."80-lis<i>"` unit with `matchConfig.Name`, which is the
+only NixOS mechanism that matches by pattern; `80-` sorts after the `40-<name>` units NixOS
+generates and before its `99-*` fallback (`network-interfaces-systemd.nix:59,80,106`). Combining a
+glob with an explicit `networkmanager` or `iwd` refuses, naming the reason. Two entries with the
+same `match.name` also refuse — `networking.interfaces` is an attribute set, so that was
+`error: attribute already defined` raised after the wipe. `dhcp4`/`dhcp6`, `addresses[]`,
+`gateway` and `hosts[].ip` are now shape-checked too: a non-boolean used to become a bare Nix
+token (`useDHCP = yes;`) that does not even parse, and a port outside 0–65535 violates
+`types.port`. All refuse at translate time.
 ¹⁴ Any `interfaces[]` entry refuses.
 ¹⁵ Dropped when `match.name` is also present; **refused** when it is the only selector
 (`lis2autoinstall.py:898`).
@@ -988,8 +1101,19 @@ LIS document can contain. Effectively unreachable.
 `networking.networkmanager.ensureProfiles.profiles` keyfile (`networkmanager.nix:427`); under
 `systemd-networkd` it becomes `networking.wireless.networks.<ssid>` with `pskRaw`, `hidden` and
 `auth` (`wpa_supplicant.nix:250,307,406`). Which back-end is not a preference but a consequence of
-`network.manager` (footnote 6). **`iwd` refuses**: `services/networking/iwd.nix:36` exposes only
-`settings` for `main.conf` and has no declarative network list.
+`network.manager` (footnote 6). **`iwd` is now emulated rather than refused**:
+`services/networking/iwd.nix:36` does expose only `settings` for `main.conf` and has no
+declarative network list, but the networks live in `/var/lib/iwd`, which a boot-time unit
+(`lis-iwd-networks`) can write — and outside the store is where the PSK has to be anyway
+(SPEC §2.4). The unit reads the key material from a 0600 `/var/lib/lis/wireless.env` and writes
+`[Security] PreSharedKey=`; **zero occurrences of the PSK in `configuration.nix`**, verified. The
+emulation is warned: the profiles are rewritten on every boot, so local edits do not survive. iwd's
+own filename rule is implemented — a name outside ASCII-printable, or containing `/`, or starting
+with `=`, is stored as `=<hex>` (iwd's reader hex-decodes any `=` prefix). That test is on ASCII
+deliberately: Python's `str.isalnum()` is Unicode-aware, so an accented SSID passed it and the
+profile was written under a literal name while iwd looked for the hex one — written, never found.
+Two entries with the same SSID refuse on both back-ends, and a `psk_hash` that is not 64 hex
+characters refuses, since `PreSharedKey=` is the pairwise master key and not a passphrase.
 ²⁷ Refused; `WIFIOPTS` exists in the answerfile and is unused.
 ²⁸ **Worse than dropped.** `lis_common.py:1118` tests the truthiness of the `firewall` *object*,
 not the flag — a document explicitly setting `enabled: false` still installs and enables
@@ -1081,9 +1205,14 @@ credential in its own right — the PMK *is* the network — so it is never writ
 `/var/lib/lis/wireless.env` (mode 0600), staged at apply time; the generated files carry only the
 variable name. A translate-only run therefore produces a configuration that references a file that
 does not exist yet. The same value is redacted from the birth certificate, per `delivery.md:144`.
-⁶⁴ **NixOS refuses the service-name form.** `networking.firewall.allowed*Ports` takes numbers
-only and NixOS ships no service-name → port table, so the list cannot be honoured; naming ports
-numerically in `allow_ports[]` is the way through.
+⁶⁴ **NixOS now resolves 66 service names; the blanket refusal was too broad.**
+`networking.firewall.allowed*Ports` does take numbers only and NixOS ships no service database —
+but the applier does not need one from NixOS: `lis_common.py:1215` and `lis2kickstart.py:389`
+already hand these same names to `firewall-cmd`, so the table is firewalld's own service
+definitions, resolved here instead of on the target. `["ssh","http"]` plus `["8080/tcp"]` becomes
+`allowedTCPPorts = [ 22 80 8080 ]`; `dns` correctly opens 53 on both TCP and UDP. A name outside
+the 66 still **refuses**, now with `difflib` near-misses — hence PARTIAL rather than YES, and why
+`allow_ports[]` remains the way through for anything unusual.
 ⁶⁵ `true` and `false` both reach `services.openssh.enable`. `false` is now *stated* rather than
 left to the default, so a role or a later module turning sshd on loses to it instead of silently
 winning — and `password_auth`/`permit_root` are warned moot in that case. This is also the switch
@@ -1139,16 +1268,42 @@ added**, so the install fails.
 ¹⁴ AppImages are never fetched by any applier.
 ¹⁵ Source arbitration is hardcoded (native-first) everywhere. Note also that `schema.md` §2.3's
 `"preference": true` producer flag has no schema representation at all.
-¹⁶ Unresolvable names break Nix evaluation rather than failing gracefully.
+¹⁶ **The `packages[]` / `apps[]` split is now honoured, and the failure mode is no longer
+post-wipe.** SPEC §11 makes an unresolvable `apps[]` entry non-fatal and a `packages[]` entry
+fatal; both used to be spliced into `with pkgs; [ … ]`, so either one was `error: undefined
+variable` raised inside `nixos-install`, after disko. `apps[]` now goes through
+`(pkgs.<name> or null)` behind a `builtins.filter`, so an unknown application drops as the spec
+says (warned, since the install cannot report which). `packages[]` stays fatal, and three separate
+things made it fatal *late* rather than at translate time: a name that is not a bare Nix
+identifier was a **syntax** error (`with pkgs; [ 1password ]`), so names are now emitted as
+`pkgs.htop` / `pkgs."odd.name"` with `with pkgs;` dropped — inside a `with` list a quoted name is
+a string, and `systemPackages` is `listOf package`, which is a *type* error, a trap worth knowing
+about. A **leading digit** cannot begin a Nix attribute at all, and nixpkgs itself carries these
+as `_1password-cli`, so the applier renames and reports the substitution rather than emitting a
+quoted name that parses and does not resolve. And an **unfree** package still cannot be caught by
+`or null`, because the license gate `throw`s. That last one, and anything else of its shape, is
+now caught by the `--apply` pre-flight evaluation (§5) before disko runs, carrying nixpkgs' own
+message; the applier deliberately does not set `nixpkgs.config.allowUnfree` on the strength of a
+package list, since that is a policy the document did not state.
 ¹⁷ No emitter anywhere, even though the applier emits `systemctl enable` for other purposes.
 ¹⁸ In-target `systemctl enable`/`disable`.
 ¹⁹ Native kickstart `services --enabled=`/`--disabled=`.
 ²⁰ Never read; no `systemctl` line is emitted for these.
-²¹ A thirteen-name table now maps unit names to the option that owns them — including **`sshd`**,
-which was a silent no-op (`services.openssh.enable`), plus `ssh`, `tailscaled`, `docker`, `podman`,
-`libvirtd`, `fail2ban`, `avahi-daemon`, `cups`, `cronie`/`cron`, `bluetooth` and `nfs-server`.
-Anything else still refuses, and now carries the reason: NixOS builds its unit set from modules, so
-enabling a unit no module declares is a no-op, not an enablement.
+²¹ A **69-name** table maps unit names to the option that owns them (grown from thirteen) — every
+one of the 63 distinct option paths behind it re-verified as `=> OPTION` on `channel:nixos-24.11`,
+which matters here because a wrong option name is an evaluation error after the wipe, not a drop.
+Lookup is case-insensitive and unit-suffix-tolerant, so `NetworkManager.service` resolves.
+Anything outside the table still refuses, and now carries the reason: NixOS builds its unit set
+from modules, so enabling a unit no module declares is a no-op, not an enablement. **Two
+cross-section contradictions are refused here rather than left to collide in the generated file.**
+`software.services.enable: ["systemd-timesyncd"]` against `system.time.ntp: false` used to be
+`error: attribute already defined`, raised by `nixos-install` with the disks wiped; the plain-line
+sections now register what they wrote with the same collector, so it is a refusal at translate
+time. And naming a **network manager** other than the one `network.manager` resolved to is now
+refused too: a glob interface resolves the manager to systemd-networkd, but
+`enable: ["NetworkManager"]` reached a different option name, so no collision was seen, both were
+emitted, and NetworkManager took the devices while the generated `.network` units sat unused —
+the whole `network.interfaces[]` section silently dropped.
 ²² `rc-update add`. **systemd unit names are not translated**, and the command is unguarded under
 `set -e`.
 ²³ The channel exists (archinstall `services`) but no `systemctl disable` is emitted.
@@ -1235,7 +1390,7 @@ defined`, an evaluation failure raised after disko has wiped the disks.
 | Field | Ubuntu | Debian | Fedora | SUSE | Arch | NixOS | Alpine | Void | Gentoo |
 |---|---|---|---|---|---|---|---|---|---|
 | `drivers.gpu` | ◐¹ | ◐² | ◐³ | ◐⁴ | ◐⁵ | ✅⁶ | ◐⁷ | ◐¹¹ | ✅¹² |
-| `drivers.microcode` | ✅ | ✅ | ◐⁸ | ✅ | ✅ | ✅ | ✅ | ◐¹¹ | ✅¹² |
+| `drivers.microcode` | ✅ | ✅ | ◐⁸ | ✅ | ✅ | ✅¹⁴ | ✅ | ◐¹¹ | ✅¹² |
 | `drivers.firmware` | ◐⁹ | ◐⁹ | ◐⁹ | ◐⁹ | ◐⁹ | ✅¹⁰ | ✅⁹ | ◐⁹ | ◐¹³ |
 
 ¹ `nvidia*` sets `drivers.install: true`; `amdgpu`/`intel` add an xserver package. **Setting
@@ -1248,8 +1403,10 @@ exits.
 ⁶ `amdgpu`/`intel` set `services.xserver.videoDrivers`; `nvidia`/`nvidia-open` set it to
 `nvidia` plus `hardware.nvidia.open`, **and now emit `nixpkgs.config.allowUnfree = true`** —
 without it the configuration stops with "Package 'nvidia-x11' has an unfree license", which
-under `--apply` lands after disko has wiped the disks. `none`/`auto` are the no-ops they ask for;
-an unmapped value refuses.
+under `--apply` lands after disko has wiped the disks. `none`/`auto` are recorded in the generated
+file as a §19 substitution, naming the default they resolve to
+(`services.xserver.videoDrivers` keeps `[ "modesetting" "fbdev" ]` and the kernel's own DRM driver
+binds the card) rather than being read and dropped. An unmapped value refuses.
 ⁷ `amdgpu`/`intel` → `mesa-dri-gallium`; `nvidia*` refuse.
 ⁸ Both `intel` and `amd` map to the same `microcode_ctl` package.
 ⁹ Only `"all"` installs firmware; `auto` and `none` emit nothing.
@@ -1270,13 +1427,21 @@ document asks for nvidia. All four GPU values map, and `microcode: amd` resolves
 ¹³ Gentoo: only `"all"` installs `sys-kernel/linux-firmware`, together with the
 `@BINARY-REDISTRIBUTABLE` entry in `package.license` that the generated
 `ACCEPT_LICENSE="-* @FREE"` would otherwise block. `auto` and `none` emit nothing.
+¹⁴ **NixOS: `auto` and `none` used to be read by nothing.** That mattered more than it looks —
+both `hardware.cpu.{intel,amd}.updateMicrocode` default to **false** on 24.11
+(`hardware/cpu/intel-microcode.nix:13`, verified, and *not* implied by
+`hardware.enableRedistributableFirmware`), so an `auto` document installed **no microcode at
+all**. `auto` now enables both vendors, with a warning that a CPU applies only its own image and
+that naming the vendor carries one; `none` states both `= false` explicitly. Verified in the
+built config as `prepend = [ "intel-ucode.img" "amd-ucode.img" ]`. The explicit `intel`/`amd`
+branches are emitted from `hardware.nix` and are disjoint from these.
 
 ## 2.12 files
 
 | Field | Ubuntu | Debian | Fedora | SUSE | Arch | NixOS | Alpine | Void | Gentoo |
 |---|---|---|---|---|---|---|---|---|---|
 | `files[].path` | ⚙¹ | ⚙² | ⚙² | ⚙³ | ⚙² | ◐⁴ | ⚙³ | ⚙² | ⚙² |
-| `files[].mode` | ⚙ | ⚙ | ⚙ | ⚙³ | ⚙ | ✅ | ⚙³ | ⚙ | ⚙ |
+| `files[].mode` | ⚙ | ⚙ | ⚙ | ⚙³ | ⚙ | ✅⁸ | ⚙³ | ⚙ | ⚙ |
 | `files[].owner` | ⚙ | ⚙ | ⚙ | ⚙³ | ⚙ | ✅ | ⚙³ | ⚙ | ⚙ |
 | `files[].content` | ⚙⁵ | ⚙² | ⚙² | ⚙³ | ⚙² | ✅⁶ | ⚙³ | ⚙² | ⚙² |
 | `files[].encoding` | ⚙⁷ | ⚙⁷ | ⚙⁷ | ⚙⁷ | ⚙⁷ | ✅ | ⚙⁷ | ⚙⁷ | ⚙⁷ |
@@ -1309,6 +1474,13 @@ Binary and non-UTF-8 content is also handled now, by routing it to the activatio
 ⁷ `base64` is passed through un-re-encoded; `plain` is encoded on the way in. Newline-safe. On
 Debian this is the **only** content field exempt from the one-line preseed restriction (rule
 C-11).
+⁸ **NixOS: the mode is applied, and a mode that denies world read is now warned on both paths.**
+It is honoured either way, but on this distro that is not the whole story — the bytes come from a
+world-readable `/nix/store` path (`environment.etc.<n>.text` for `/etc`, a store-resident
+activation script elsewhere), so `0600` produces a file with `0600` on it whose content anyone on
+the machine can still read out of the store. Neither path said so before. SPEC §2.4's answer is
+unchanged: secrets belong on the seed, not in `files[]`. A mode that is not an octal string now
+refuses at translate time instead of being handed to `install(1)` on the installed machine.
 
 ## 2.13 scripts
 
@@ -1320,51 +1492,51 @@ single most common script hazard.
 
 | Field | Ubuntu | Debian | Fedora | SUSE | Arch | NixOS | Alpine | Void | Gentoo |
 |---|---|---|---|---|---|---|---|---|---|
-| `scripts.pre[].interpreter` | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ |
+| `scripts.pre[].interpreter` | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ✅⁶¹ | ❌¹ | ❌¹ | ❌¹ |
 | `scripts.pre[].chroot` | ❌² | ❌³ | ❌⁴ | ❌² | ◐⁵ | ◐⁵⁸ | ❌⁷ | ❌⁵⁰ | ❌⁵⁰ |
 | `scripts.pre[].content` | ✅⁸ | ✅⁹ | ✅¹⁰ | ✅¹¹ | ⚙¹² | ◐¹³ | ◐¹⁴ | ✅⁴⁹ | ◐⁵¹ |
-| `scripts.pre[].source.from` | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ |
-| `scripts.pre[].on_failure` | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ |
-| `scripts.pre_install[].interpreter` | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ |
+| `scripts.pre[].source.from` | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ◐⁶³ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ |
+| `scripts.pre[].on_failure` | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ✅⁶² | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ |
+| `scripts.pre_install[].interpreter` | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ✅⁶¹ | ❌¹ | ❌¹ | ❌¹ |
 | `scripts.pre_install[].chroot` | ❌² | ❌³ | ❌⁴ | ❌² | ◐⁵ | ◐⁵⁸ | ❌⁷ | ❌⁵⁰ | ❌⁵⁰ |
 | `scripts.pre_install[].content` | ✅¹⁷ | ✅¹⁷ | ✅¹⁷ | ✅¹⁷ | ⚙¹² | ◐¹³ | ◐¹⁴ | ✅⁴⁹ | ◐⁵¹ |
-| `scripts.pre_install[].source.from` | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ |
-| `scripts.pre_install[].on_failure` | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ |
-| `scripts.post_storage[].interpreter` | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ |
+| `scripts.pre_install[].source.from` | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ◐⁶³ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ |
+| `scripts.pre_install[].on_failure` | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ✅⁶² | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ |
+| `scripts.post_storage[].interpreter` | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ✅⁶¹ | ❌¹ | ❌¹ | ❌¹ |
 | `scripts.post_storage[].chroot` | ❌¹⁸ | ❌¹⁹ | ❌¹⁹ | ❌¹⁹ | ◐⁵ | ◐⁵⁸ | ◐¹⁹ | ❌⁵⁰ | ❌⁵⁰ |
 | `scripts.post_storage[].content` | ◐²⁰ | ◐²⁰ | ◐²⁰ | ◐²⁰ | ⚙²¹ | ⚙²² | ◐²⁰ | ◐⁵² | ◐⁵² |
-| `scripts.post_storage[].source.from` | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ |
-| `scripts.post_storage[].on_failure` | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ |
-| `scripts.post[].interpreter` | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ |
+| `scripts.post_storage[].source.from` | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ◐⁶³ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ |
+| `scripts.post_storage[].on_failure` | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ✅⁶² | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ |
+| `scripts.post[].interpreter` | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ✅⁶¹ | ❌¹ | ❌¹ | ❌¹ |
 | `scripts.post[].chroot` | ✅²³ | ❌¹⁹ | ❌¹⁹ | ❌¹⁹ | ◐⁵ | ◐⁵⁸ | ◐¹⁹ | ❌⁵⁰ | ❌⁵⁰ |
 | `scripts.post[].content` | ◐²⁴ | ✅²⁵ | ✅²⁶ | ✅²⁷ | ⚙²⁸ | ⚙²⁹ | ⚙³⁰ | ⚙⁵³ | ⚙⁵³ |
-| `scripts.post[].source.from` | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ |
-| `scripts.post[].on_failure` | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌³¹ | ❌¹⁶ | ❌¹⁶ |
-| `scripts.post_install[].interpreter` | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ |
+| `scripts.post[].source.from` | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ◐⁶³ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ |
+| `scripts.post[].on_failure` | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ✅⁶² | ❌³¹ | ❌¹⁶ | ❌¹⁶ |
+| `scripts.post_install[].interpreter` | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ✅⁶¹ | ❌¹ | ❌¹ | ❌¹ |
 | `scripts.post_install[].chroot` | ✅²³ | ❌¹⁹ | ❌¹⁹ | ❌¹⁹ | ◐⁵ | ◐⁵⁸ | ◐¹⁹ | ❌⁵⁰ | ❌⁵⁰ |
 | `scripts.post_install[].content` | ◐²⁴ | ✅³² | ✅³² | ✅³² | ⚙²⁸ | ⚙²⁹ | ⚙³⁰ | ⚙⁵³ | ⚙⁵³ |
-| `scripts.post_install[].source.from` | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ |
-| `scripts.post_install[].on_failure` | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ |
-| `scripts.pre_reboot[].interpreter` | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ |
+| `scripts.post_install[].source.from` | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ◐⁶³ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ |
+| `scripts.post_install[].on_failure` | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ✅⁶² | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ |
+| `scripts.pre_reboot[].interpreter` | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ✅⁶¹ | ❌¹ | ❌¹ | ❌¹ |
 | `scripts.pre_reboot[].chroot` | ✅²³ | ❌¹⁹ | ❌¹⁹ | ❌¹⁹ | ◐⁵ | ◐⁵⁸ | ◐¹⁹ | ❌⁵⁰ | ❌⁵⁰ |
 | `scripts.pre_reboot[].content` | ◐³³ | ◐³⁴ | ◐³⁴ | ◐³⁴ | ⚙³⁵ | ⚙³⁶ | ◐³⁷ | ◐⁵³ | ◐⁵⁴ |
-| `scripts.pre_reboot[].source.from` | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ |
-| `scripts.pre_reboot[].on_failure` | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ |
-| `scripts.on_success[].interpreter` | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ |
+| `scripts.pre_reboot[].source.from` | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ◐⁶³ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ |
+| `scripts.pre_reboot[].on_failure` | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ✅⁶² | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ |
+| `scripts.on_success[].interpreter` | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ✅⁶¹ | ❌¹ | ❌¹ | ❌¹ |
 | `scripts.on_success[].chroot` | ✅²³ | ❌¹⁹ | ❌¹⁹ | ❌¹⁹ | ◐⁵ | ◐⁵⁸ | ◐¹⁹ | ❌⁵⁰ | ❌⁵⁰ |
 | `scripts.on_success[].content` | ◐³⁸ | ◐³⁸ | ◐³⁸ | ◐³⁸ | ⚙³⁸ | ⚙⁵⁹ | ◐³⁸ | ◐³⁸ | ◐⁵⁴ |
-| `scripts.on_success[].source.from` | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ |
-| `scripts.on_success[].on_failure` | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ |
-| `scripts.on_error[].interpreter` | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ❌¹ | ❌⁴⁰ | ⛔⁵⁶ | ❌¹ |
+| `scripts.on_success[].source.from` | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ◐⁶³ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ |
+| `scripts.on_success[].on_failure` | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ✅⁶² | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ |
+| `scripts.on_error[].interpreter` | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ✅⁶¹ | ❌⁴⁰ | ⛔⁵⁶ | ❌¹ |
 | `scripts.on_error[].chroot` | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ◐⁵⁸ | ❌⁴⁰ | ⛔⁵⁶ | ❌⁵⁰ |
 | `scripts.on_error[].content` | ⛔⁴¹ | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ⚙⁶⁰ | ⛔³⁹ | ⛔⁵⁶ | ✅⁵⁵ |
-| `scripts.on_error[].source.from` | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ⛔¹⁵ | ⛔¹⁵ | ⛔⁵⁶ | ⛔¹⁵ |
-| `scripts.on_error[].on_failure` | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ❌¹⁶ | ❌⁴⁰ | ⛔⁵⁶ | ❌¹⁶ |
-| `scripts.firstboot[].interpreter` | ❌⁴² | ❌⁴² | ❌⁴² | ❌⁴³ | ❌⁴² | ❌⁴² | ❌⁴² | ❌⁴² | ❌⁴² |
+| `scripts.on_error[].source.from` | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ◐⁶³ | ⛔¹⁵ | ⛔⁵⁶ | ⛔¹⁵ |
+| `scripts.on_error[].on_failure` | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ⛔³⁹ | ✅⁶² | ❌⁴⁰ | ⛔⁵⁶ | ❌¹⁶ |
+| `scripts.firstboot[].interpreter` | ❌⁴² | ❌⁴² | ❌⁴² | ❌⁴³ | ❌⁴² | ✅⁶¹ | ❌⁴² | ❌⁴² | ❌⁴² |
 | `scripts.firstboot[].chroot` | ❌⁴⁴ | ❌⁴⁴ | ❌⁴⁴ | ❌⁴⁴ | ◐⁴⁴ | ◐⁵⁸ | ◐⁴⁴ | ❌⁴⁴ | ❌⁴⁴ |
 | `scripts.firstboot[].content` | ⚙⁴⁵ | ⚙⁴⁶ | ⚙⁴⁶ | ✅⁴⁷ | ⚙⁴⁶ | ⚙⁴⁶ | ⚙⁴⁸ | ⚙⁵⁷ | ⚙⁵⁷ |
-| `scripts.firstboot[].source.from` | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ |
-| `scripts.firstboot[].on_failure` | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ |
+| `scripts.firstboot[].source.from` | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ◐⁶³ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ |
+| `scripts.firstboot[].on_failure` | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ✅⁶² | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ |
 
 ¹ No applier honours `interpreter` for any phase; the body runs under the stage's own shell
 (`lis_common.py:1291` warns).
@@ -1498,6 +1670,35 @@ longer holds here.
 this column: on NixOS `--apply` *is* the installer, so a failed step does have somewhere to report
 from. The bodies run on the installer host when either `disko` or `nixos-install` fails. A
 translate-only run emits nothing and warns.
+⁶¹ **NixOS is the first applier to honour `interpreter`, on every stage** — it was ❌ on all nine.
+The body is written to a file and run under the named interpreter rather than being pasted into a
+shell. `/bin/sh` is literal; `bash`, `dash`, `zsh`, `fish`, `python3` and `perl` are resolved by
+name through the hook `PATH`, with the package appended to it. An interpreter the table does not
+know **refuses** instead of silently becoming `sh`. Target-side stages carry the name through
+`lis_hook` in the activation script and the first-boot unit; installer-host stages
+(`pre`, `pre_install`, `post_storage`, `pre_reboot`, `on_success`, `on_error`) resolve it with
+`shutil.which` in `run_host_stage` and fail the stage when it is not on the ISO's PATH. Verified
+by execution, not by reading: a `python3` body wrote its marker, and the generated units carry
+`lis_hook "…" "python3" …` / `"perl"` / `"zsh"`.
+⁶² **NixOS is the first applier to honour `on_failure`, on every stage** — also ❌ on all nine.
+`continue` returns 0 so the run proceeds; `fail` returns non-zero, which is what SPEC §13's
+default means. Verified by execution on the installer host: `fail` on a hook exiting 4 aborted
+the stage with status 4 and the following hook did **not** run, while `continue` on the same body
+let it proceed. Inside the target the shape is `if cmd; then :; else _rc=$?; fi` on purpose —
+`activation-script.nix:66` installs `trap … ERR` and `systemd-lib.nix:548` runs under `set -e`, so
+a bare failing command would mark the run failed before the policy was consulted. Note the one
+place the policy cannot abort: `nixos-install` reaches the activation script through
+`nixos-enter … activate`, which upstream wraps in `|| true`, so a `fail` hook there marks the
+activation failed and is retried on next boot rather than aborting the install. The applier says
+so in a warning.
+⁶³ **NixOS resolves `seed:` and `file:` references.** It was ⛔ on all nine, on the reasoning that
+the target has no seed volume when the hook runs — true, and the reason the body is read *at
+translate time* and base64-embedded in the generated configuration rather than referenced. The
+installer mounts the seed at `/run/lis/seed` and runs the applier from
+`/run/lis/seed/appliers/` (`tools/e2e/installer.py:415-436`), so the file is on the filesystem
+when the translation happens. `env:`, `key:` and `https:` still refuse; a path that cannot be read
+refuses **naming the path**; `content` and `source` together refuses; and an entry with neither
+now refuses instead of vanishing. PARTIAL for the schemes that remain refused.
 
 ## 2.14 desktop
 
@@ -1533,14 +1734,18 @@ also emits `sddm.wayland.enable`, because `sddm.nix` asserts one of that and
 ⁹ **Always writes a GDM config** (`/etc/gdm/custom.conf`) regardless of `display_manager` —
 verified emitting both `dnf install sddm` and a GDM autologin file.
 ¹⁰ No autologin drop-in is written.
-¹¹ Now gated on a greeter actually being resolved. `greetd` uses its own
-`settings.initial_session.{command,user}`, since it ignores `services.displayManager.autoLogin`
-entirely; the others use `autoLogin.{enable,user}` plus `defaultSession`, named explicitly because
-gdm and sddm otherwise pick the autologin session out of a list that is ambiguous the moment a
-second one is installed. Three refusals rather than a broken emission: an account the document
-does not declare (schema.md §12), no greeter resolved, and **`ly`** — whose module asserts
-`!autoLogin.enable`, so the combination cannot be evaluated at all. PARTIAL because ly genuinely
-has no autologin of its own.
+¹¹ `greetd` uses its own `settings.initial_session.{command,user}`, since it ignores
+`services.displayManager.autoLogin` entirely; `gdm`, `sddm`, `lightdm` and `auto` use
+`autoLogin.{enable,user}` plus `defaultSession`, named explicitly because gdm and sddm otherwise
+pick the autologin session out of a list that is ambiguous the moment a second one is installed.
+**`display_manager: none` is now honoured rather than refused** — that refusal ("needs a greeter")
+turned down a capability that exists: the request becomes `services.getty.autologinUser`, so tty1
+comes up logged in, warned that no graphical session starts. Two refusals remain, both real: **`ly`**,
+whose module asserts `!autoLogin.enable` so the combination cannot be evaluated at all, and an
+account the document does not declare (schema.md §12). A third was added — autologin naming a user
+whose `password.locked` is true, which schema.md §12 calls a validation error and for which NixOS
+has no assertion; it used to be accepted, producing a machine that boots trying to start a session
+for an account that cannot authenticate. PARTIAL because ly genuinely has no autologin of its own.
 ¹² `pipewire`/`auto` emit nothing at all (SILENT); anything else refuses. No audio package is
 added.
 ¹³ `auto`/`pipewire` emit nothing; `none` refuses.
@@ -1753,7 +1958,7 @@ Each rule below is stated so a generator can implement it as a pre-flight check.
 | C-21 | SUSE emits **two mutually exclusive profiles**. `storage.lvm.*`, `storage.raid.*`, `users[].shell`, `users[].groups`, `users[].admin` reach only `autoyast.xml`; `users[].ssh_authorized_keys` and `system.keymap.variant` reach only `profile.json`. | Choosing the wrong output silently loses those fields. The applier warns for lvm/raid but **not** for the user fields. |
 | C-22 | Alpine "simple path": with no `subvolumes`, `raid`, `lvm` or `encryption`, the entire storage layout collapses to `DISKOPTS="-m sys <disk>"`. `target.firmware`, `boot.loader`, `boot.timeout` and every `partitions[]` leaf are read (so no tracker warning) and reach nothing. | For Alpine, either accept `setup-alpine`'s default layout or force the manual path by declaring one of those four features. |
 | C-23 | Alpine: an ESP plus a separate `/boot` collapse — the first partition mounted at `/boot` *or* `/boot/efi` becomes the boot device and the other is formatted and abandoned. | Declare one or the other. |
-| C-24 | NixOS: `role: root|boot|swap` with **no explicit `fs`** produces a disko partition with no content while `hardware.nix` still declares the filesystem. Zero warnings, unbootable result. | Always emit an explicit `fs` for NixOS. |
+| C-24 | ~~NixOS: `role: root\|boot\|swap` with **no explicit `fs`** produces a disko partition with no content while `hardware.nix` still declares the filesystem. Zero warnings, unbootable result.~~ **FIXED** — both passes now infer through one `role_fs()` table (§2.5 fn 8). | No longer a rule. `role: data\|raw` with a `mountpoint` and no `fs` refuses, since those two roles imply no filesystem. |
 | C-41 | **Void: `storage` must be exactly VAI's own scheme, or the document refuses.** One disk with a `match.path`, `wipe: true`, and exactly three partitions in the order `[role: boot` at `/boot`, `role: swap`, `role: root` at `/` sized `rest]`. `storage.encryption`, `lvm`, `raid`, `swap` and `snapshots` are refused **as a group** by one loop (`lis2void.py:161-166`) — they are not five independent gaps but one: VAI's `sfdisk` heredoc is three lines and this applier writes no partition table of its own. 8 of the 9 bundled recipes refuse on Void. | Encryption is not a feature to work around here; there is no other storage shape. |
 | C-42 | Void: `target.firmware` must be `bios`. `uefi` **and `auto`** refuse. | Void is the only one of the nine that cannot install a UEFI system. |
 | C-43 | **Gentoo: `target.firmware: "auto"` is not UEFI.** Only the literal `"uefi"` selects a GPT label, the ESP flag, `sys-boot/efibootmgr` and `grub-install --target=x86_64-efi`; `auto` silently takes the BIOS branch (`lis2gentoo.py:319-320`). An absent key defaults to `uefi`, so `auto` is strictly worse than omitting the field. | Write `uefi` or `bios` explicitly for Gentoo; never `auto`. |
@@ -1797,7 +2002,7 @@ succeeds. **Warnings never fail a run, not even under `--strict`.**
 | # | Field / condition | Distros | Diag | What actually happens |
 |---|---|---|---|---|
 | 1 | Whole partition layout when no subvolumes/raid/lvm/encryption | Alpine | silent | Layout, firmware and bootloader all collapse to `setup-alpine`'s default (C-22). |
-| 2 | `storage.partitions[].role` without `fs` | NixOS | silent | Partition gets no content; `fileSystems` still declared. Unbootable (C-24). |
+| 2 | ~~`storage.partitions[].role` without `fs`~~ | ~~NixOS~~ | **FIXED** | One `role_fs()` table now feeds both `disko.nix` and `hardware.nix`; `data`/`raw` with a mountpoint and no `fs` refuses (§2.5 fn 8). |
 | 3 | `keys[].source.from` with no explicit container key | Alpine | silent | `--key-file None`; install dies at LUKS format (C-30). |
 | 4 | `storage.encryption[].over` naming a RAID array | Alpine | silent | No `luksFormat` emitted; `pvcreate` on a mapper node nothing opened (C-10). |
 | 5 | Any `users[]` entry named `root` | Ubuntu | silent | Entire entry discarded when another user exists (C-27). |
@@ -1805,7 +2010,7 @@ succeeds. **Warnings never fail a run, not even under `--strict`.**
 | 7 | `storage.encryption[].unlock: ["keyfile"]` | Ubuntu | silent | Crypttab rewritten to prompt at every boot (C-28). |
 | 8 | `software.role: desktop:gnome` | Arch | silent | Emits `"Gnome"`, archinstall expects `GNOME` — no desktop installed. |
 | 9 | ~~`software.exclude[]`~~ | ~~NixOS~~ | **FIXED** | The bare `pass` is gone: `perl`/`rsync`/`strace` subtract from `environment.defaultPackages`, anything else refuses (§2.10 fn 30). |
-| 10 | `storage.raid[].spares[]` | NixOS | **silent** | Spares silently become active members. |
+| 10 | ~~`storage.raid[].spares[]`~~ | ~~NixOS~~ | **FIXED** | Active members only in the array; spares attached by `mdadm --add` from a disko `postCreateHook`, and the emulation is warned (§2.5 fn 58). |
 | 11 | `storage.partitions[].label` + `subvolumes` | Fedora | silent | Label dropped from the rebuilt `part` line (C-18). |
 | 12 | `storage.encryption[].type: luks1` | Debian, Fedora, Arch, Alpine | warned (Alpine/Arch silent-ish) | LUKS2 created instead — a legacy-GRUB machine will not boot. |
 | 13 | `storage.partitions[].size: "NN%"` | Arch, Alpine | silent | Means `rest` (Arch) or 0MiB (Alpine) (C-40). |
@@ -1847,7 +2052,7 @@ succeeds. **Warnings never fail a run, not even under `--strict`.**
 | `software.apps[].snap` / `.appimage` / `.preference[]` | all nine | Source arbitration is hardcoded native-first. Silent on Gentoo (Tier 1 #19). |
 | `installer.on_error` / `.answers` / `.unattended` | all nine | **`unattended` is never enforced — do not treat it as a consent gate.** |
 | `installer.on_finish` | all nine except Ubuntu/Debian/Fedora/SUSE | **Void powers off unconditionally**, whatever the field says. |
-| `users[].scripts.post[].*` | all but Gentoo | The user-level `post` phase is implemented only by Gentoo. Use `post_install`. |
+| `users[].scripts.post[].*` | all but Gentoo and NixOS | The user-level `post` phase is implemented only by those two. Use `post_install` elsewhere. |
 | `scripts.*[].interpreter` / `.on_failure` | all nine, all phases | Body runs under the stage's shell; failure policy ignored. |
 | `scripts.on_error[].*` | refused on eight; **Gentoo implements it** as a `bash` EXIT trap | |
 | `keys[].id` / `.match` / `.pin_required` | seven, plus Gentoo; **Void refuses the whole section** | The `keys` ↔ `encryption` cross-reference of §17.2 is unimplementable in schema v0.1. |
@@ -1876,7 +2081,7 @@ higher ❌ means more of it is quietly discarded.
 
 | Distro | ✅ YES | ◐ PARTIAL | ⚙ POST | ⛔ REFUSE | ❌ DROPS | – N/A | ? UNK | **✅+⚙ arrives** | **❌ share** |
 |---|---|---|---|---|---|---|---|---|---|
-| **NixOS** | 97 | 48 | 15 | 28 | 40 | 5 | 0 | **112** | 17% |
+| **NixOS** | 128 | 57 | 16 | 21 | 6 | 5 | 0 | **144** | 3% |
 | **Ubuntu** | 52 | 41 | 33 | 29 | 74 | 4 | 0 | **85** | 32% |
 | **Debian** | 41 | 46 | 34 | 40 | 68 | 4 | 0 | **75** | 29% |
 | **Fedora** | 56 | 40 | 16 | 30 | 86 | 4 | 1 | **72** | 37% |
@@ -1889,21 +2094,29 @@ higher ❌ means more of it is quietly discarded.
 Each row sums to 233. Sorted by ✅+⚙ — the count of leaves whose intent reaches the installed
 machine by any route.
 
-- **NixOS leads on every measure in this table** (97 ✅, 112 arriving, 17% dropped — all three the
+- **NixOS leads on every measure in this table** (128 ✅, 144 arriving, 3% dropped — all three the
   best of the nine), which is what the applier's shape predicts: almost anything a LIS document can
   say is expressible as a NixOS option, so most of what used to be `❌` here was never a limit of
-  the distro, only a line nobody had written. The 40 remaining drops are concentrated in
-  `scripts.*[].interpreter` and `.on_failure` (18 leaves between them, warned, and blocked on
-  `lis_common.check_script_fields` keywords that do not exist yet) and the `installer.*` and
-  `existing.*` subtrees. **The wipe-then-fail class is the thing to keep watching**: this applier is
-  the one where a bad option name is an *evaluation* error rather than a silent drop, and under
-  `--apply` evaluation happens after disko has already wiped the disks. Seven such paths were found
-  and closed in one pass (C-35/C-36 plus grub+UEFI, flatpak-without-portal, pulseaudio-on-a-desktop-
-  role, sddm-on-Wayland, and the `''` escape), every one of which a plain `nix-instantiate` on the
-  generated file passes. The gate that catches them is filtering `config.assertions` for
-  `!a.assertion` and forcing `system.build.toplevel.drvPath`; `builtins.seq (attrNames
-  system.build)` forces neither assertions nor option values and is not sufficient.
-  It still silently ignores the entire `existing.*` adoption subtree instead of refusing it.
+  the distro, only a line nobody had written. **Only 6 drops remain**, and they are the two places
+  where nothing *can* arrive: `installer.*` (5 leaves — the applier is the installer, so there is no
+  separate installer to answer to; `on_finish` in particular means `--apply` does not reboot the
+  machine itself) and `mirror.country`, where NixOS has a single geo-routed substituter and no
+  per-country mirror to pick. Everything else that cannot be honoured now **refuses** rather than
+  dropping: the whole `existing.*` adoption subtree, `snap[]`, hardware-token `match`/`pin_required`,
+  `registration.*`, and `secure_boot: true` / `uki: true` / a non-`auto` initramfs generator.
+- **The wipe-then-fail class is the thing to keep watching**, and it is now closed structurally
+  rather than case by case. This applier is the one where a bad option name is an *evaluation*
+  error rather than a silent drop, and under `--apply` evaluation happens after disko has already
+  wiped the disks. Individual instances keep being found — a shell whose `programs.<name>` module
+  NixOS asserts on (`xonsh`), a `packages[]` name nixpkgs spells with a leading underscore
+  (`1password-cli` → `_1password-cli`), an unfree package, `linuxPackages_zen` with `fs: zfs` — and
+  enumerating them will never be complete. So `--apply` now runs a **pre-flight evaluation of the
+  generated `configuration.nix` before disko is allowed to run**, forcing the same
+  `system.build.toplevel` that `nixos-install` will realise. Anything that would fail later fails
+  here, with the partition table intact; a host with no `<nixpkgs>` is reported as unverified
+  rather than passed. `builtins.seq (attrNames system.build)` is *not* sufficient — it forces
+  neither assertions nor `environment.systemPackages`, and that is exactly how the `1password-cli`
+  case survived review.
 - **Ubuntu covers the most ground of the non-NixOS columns** (85 arriving), but a third of that is `⚙` emulation
   and it carries the largest cluster of *silent* Tier-1 drops (root users, LSM-vs-nvidia,
   keyfile unlock).
@@ -1924,7 +2137,7 @@ machine by any route.
   bundled recipes never translate. What does translate translates well: Void is the **only**
   applier besides NixOS where `boot.console.serial` reaches the installed system, and one of only three where
   `boot.kernel.modules[]`, `blacklist[]` and `system.time.servers[]` do.
-- **Gentoo has the second-lowest ❌ share (27%, behind NixOS's 17%)** while sitting mid-table on
+- **Gentoo has the second-lowest ❌ share (27%, behind NixOS's 3%)** while sitting mid-table on
   arrival, which is the profile you want: it refuses 66 leaves loudly rather than dropping them. It
   was the first applier to implement `boot.password_hash`, `scripts.on_error` and the user-level
   `scripts.post` phase — NixOS has since joined it on all three — it is the only one where
@@ -1937,9 +2150,13 @@ machine by any route.
 
 **Reading these numbers.** ⛔ is not a defect — a refusal is the honest outcome for a feature the
 installer cannot express, and it is strictly safer than ❌. The number to worry about is **❌**,
-and within it the silent subset listed in §4 Tier 1. Note that NixOS's refusal count *fell* (36 →
-28) while its drop count fell much further (68 → 40): converting a ❌ to a ⛔ is a legitimate
-improvement, but most of the movement here was ❌ → ✅, i.e. options that existed all along.
+and within it the silent subset listed in §4 Tier 1. Note that NixOS's refusal count *fell* again
+(28 → 21) while its drop count fell much further (40 → 6): converting a ❌ to a ⛔ is a legitimate
+improvement — the whole `existing.*` subtree made that move — but most of the movement here was
+❌ → ✅, i.e. options that existed all along and that nobody had written a line for. The 12
+`source.from` leaves moved the other way, ⛔ → ◐, because the premise of that refusal turned out to
+be false: the seed *is* mounted when the applier runs, so the body can be read at translate time
+and embedded.
 
 **Also note the ✅/⚙ split is not comparable across columns without §1's convention.** Void's 19 ⚙
 and Gentoo's 17 ⚙ are drawn by the rule stated in the preamble; a different but equally defensible
