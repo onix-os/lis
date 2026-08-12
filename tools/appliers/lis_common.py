@@ -1369,21 +1369,30 @@ SCRIPT_STAGES = ("pre", "pre_install", "post_storage", "post", "post_install",
 
 
 def check_script_fields(doc: dict, *, honors_chroot: bool = False,
-                        chroots_by_default: bool = True) -> None:
+                        chroots_by_default: bool = True,
+                        honors_interpreter: bool = False,
+                        honors_source: bool = False,
+                        honors_on_failure: bool = False) -> None:
     """Report per-script metadata the applier cannot act on.
 
     Deliberately does not touch `content`: reading it here would mark it as
     consulted and hide an applier that drops the script body entirely.
+
+    The three `honors_*` switches default to False, which is the behaviour
+    every applier had before they existed: an applier that answers one of
+    these leaves itself passes the matching flag so this helper does not
+    report a field the applier in fact applied.
     """
     def inspect(items, label):
         for item in items or []:
-            if interp := item.get("interpreter"):
+            if (interp := item.get("interpreter")) and not honors_interpreter:
                 warn(f"{label}.interpreter {interp!r} is not applied — the "
                      "script runs under the applier's own shell")
-            if item.get("source"):
+            if item.get("source") and not honors_source:
                 refuse(f"{label}.source names an external script body this "
                        "applier does not fetch; inline it as content")
-            if (policy := item.get("on_failure")) is not None:
+            if (policy := item.get("on_failure")) is not None \
+                    and not honors_on_failure:
                 warn(f"{label}.on_failure {policy!r} is not applied — the "
                      "installer's own failure handling governs")
             flag = item.get("chroot")

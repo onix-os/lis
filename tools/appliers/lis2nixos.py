@@ -18,6 +18,7 @@ import argparse
 import base64
 import difflib
 import hashlib
+import os
 import json
 import pathlib
 import re
@@ -844,8 +845,28 @@ def render_disko(doc: dict) -> str:
         out.append("    };")
 
     render_zpools(topology, doc, out)
+    check_root_filesystem(doc)
     out += ["  };", "}"]
     return "\n".join(out) + "\n"
+
+
+def check_root_filesystem(doc: dict) -> None:
+    """Refuse a layout that never resolves a filesystem to /.
+
+    schema.md §6.1: "Exactly one filesystem in the document must resolve to
+    mountpoint / … otherwise the document is invalid." Nothing checked it, and
+    the way NixOS finds out is `Failed assertions: The 'fileSystems' option
+    does not specify your root file system.` — raised while `nixos-install`
+    evaluates the configuration, which is after disko has destroyed the disks.
+    """
+    mounts, _ = mount_table(doc)
+    if any(mountpoint == "/" for mountpoint, _, _, _ in mounts):
+        return
+    refuse("no filesystem in this document resolves to mountpoint '/' — "
+           "schema.md §6.1 requires exactly one, and NixOS raises 'the "
+           "fileSystems option does not specify your root file system' while "
+           "nixos-install evaluates the configuration, by which time disko has "
+           "already partitioned the disks")
 
 
 # ── hardware.nix ─────────────────────────────────────────────────
@@ -2764,6 +2785,38 @@ def resolve_manager(network: dict, interfaces: list) -> str:
     return "networkmanager"
 
 
+def proxy_env(doc: dict) -> dict[str, str]:
+    """proxy.* → the environment variables the install run needs.
+
+    SPEC §14 makes `proxy` two obligations, not one: it "applies to the
+    installation *and* is persisted into the installed system". Only the second
+    half reaches configuration.nix, so the first half is set on this process
+    before disko and nixos-install are started — behind a filtering network an
+    install that goes direct does not go at all.
+    """
+    proxy = doc.get("proxy", {}) or {}
+    env: dict[str, str] = {}
+    if http := proxy.get("http"):
+        env["http_proxy"] = http
+        env["all_proxy"] = http
+    if https := (proxy.get("https") or proxy.get("http")):
+        env["https_proxy"] = https
+    if no_proxy := proxy.get("no_proxy"):
+        env["no_proxy"] = ",".join(no_proxy)
+    return env
+
+
+def apply_proxy_env(doc: dict) -> None:
+    """Put proxy_env() on this process, and say what it does not reach."""
+    env = proxy_env(doc)
+    if not env:
+        return
+    for name, value in env.items():
+        os.environ[name] = value
+        os.environ[name.upper()] = value
+    print(f"proxy for the install run: {', '.join(sorted(env))}")
+
+
 def render_network(doc: dict) -> list[str]:
     network = doc.get("network", {}) or {}
     out: list[str] = []
@@ -3132,8 +3185,14 @@ def flatpak_unit(apps: list[str]) -> list[str]:
     and a running system, so it cannot be declarative — it is emulated here,
     once, at first boot.
     """
-    body = [f"flatpak remote-add --if-not-exists flathub {FLATHUB_REPO}"]
-    body += [f"flatpak install -y --noninteractive flathub {app}" for app in apps]
+    import shlex
+
+    # Quoted: an application ID is document-supplied text on a shell command
+    # line, so an unquoted one is arbitrary code running as root on the first
+    # boot of the installed machine.
+    body = [f"flatpak remote-add --if-not-exists flathub {shlex.quote(FLATHUB_REPO)}"]
+    body += [f"flatpak install -y --noninteractive flathub {shlex.quote(app)}"
+             for app in apps]
     body += ["install -d -m755 /var/lib/lis",
              "touch /var/lib/lis/.flatpak-done"]
     return ["  systemd.services.lis-flatpak = {",
@@ -3211,7 +3270,10 @@ def render_software(doc: dict, opts: NixOptions) -> None:
              "— nothing to remove, which SPEC §11 calls not an error")
     if role == "minimal":
         opts.set("environment.defaultPackages", "lib.mkForce [ ]")
-    elif excluded:
+    elif any(name in DEFAULT_PACKAGES for name in excluded):
+        # Only when a name actually names one of them: rewriting the option to
+        # a mkForce of its own default said "the document asked for this" about
+        # a list the document never touched.
         keep = [p for p in DEFAULT_PACKAGES if p not in excluded]
         keep_expr = f"(with pkgs; [ {' '.join(keep)} ])" if keep else "[ ]"
         opts.set("environment.defaultPackages", f"lib.mkForce {keep_expr}")
@@ -3996,8 +4058,16 @@ def render_configuration(doc: dict) -> str:
         # and saying both would read as a contradiction rather than a fallback.
         out.append("  console.useXkbConfig = true;")
     out += render_time(system.get("time", {}) or {})
-    if system.get("init") not in (None, "systemd", "auto"):
-        refuse("system.init: NixOS is systemd-only")
+    init = system.get("init")
+    if init not in (None, "systemd", "auto"):
+        refuse(f"system.init {init!r}: NixOS is systemd-only — the whole module "
+               "system is built on systemd units, and nixpkgs packages no "
+               "alternative PID 1 for it (SPEC §8, subject to §2.3)")
+    elif init == "auto":
+        # SPEC §19 wants an `auto` recorded as the choice it resolved to, not
+        # left looking like a field nobody read.
+        out.append("  # system.init: auto — resolved to systemd, the only init "
+                   "a NixOS system runs.")
     telemetry = system.get("telemetry")
     if telemetry in ("off", "default"):
         # Not a drop: SPEC §8 asks the applier to disable any telemetry it
@@ -4088,6 +4158,17 @@ def render_configuration(doc: dict) -> str:
         out.append(f"  networking.proxy.httpsProxy = {nix_str(proxy['https'])};")
     if proxy.get("no_proxy"):
         out.append(f"  networking.proxy.noProxy = {nix_str(','.join(proxy['no_proxy']))};")
+    if proxy:
+        # The other half of SPEC §14 — see proxy_env(). Said here rather than at
+        # apply time so --strict sees it and a translate-only run knows what the
+        # installer host still has to be told.
+        warn("proxy.*: --apply exports http_proxy/https_proxy/no_proxy for the "
+             "install run, which covers the flake and channel fetches. "
+             "nix-daemon is a separate systemd service and inherits none of "
+             "them, so substituter downloads during nixos-install go direct "
+             "unless the installer host's nix-daemon.service carries the same "
+             "environment (systemctl edit nix-daemon, "
+             "Environment=\"https_proxy=…\")")
     out.append("")
 
     out += render_users(doc)
@@ -4241,6 +4322,10 @@ def main() -> int:
 
     if args.apply:
         import subprocess
+
+        # SPEC §14: proxy.* is an install-time obligation as well as a
+        # persisted one. Set before the first subprocess, which inherits it.
+        apply_proxy_env(doc)
 
         def run_stage(stage: str) -> None:
             """Run one live-installer-environment stage on this host.
