@@ -1004,13 +1004,14 @@ def mount_table(doc: dict) -> tuple[list[tuple[str, str, str, list[str]]], list[
         if mountpoint:
             mounts.append((mountpoint, device, fs, options))
 
-    index: dict[str, int] = {}
     for part in storage.get("partitions", []) or []:
-        disk_id = disk_of.get(id(part), "main")
-        index[disk_id] = index.get(disk_id, 0) + 1
-        name = part.get("id") or f"{part.get('role', 'part')}{index[disk_id]}"
+        if part.get("existing"):
+            continue   # refused in render_disko; nothing here would exist to mount
+        disk_id, name = names[id(part)]
         handle = part.get("id") or name
-        device = f"/dev/disk/by-partlabel/disk-{disk_id}-{name}"
+        if handle in topology.spare_handles:
+            continue   # a hot spare carries no filesystem of its own
+        device = partition_device(disk_id, name)
         if crypt := topology.luks_over.get(handle):
             device = f"/dev/mapper/{crypt['id']}"
             handle = crypt["id"]
@@ -1085,6 +1086,68 @@ AS_USER_FN = """lis_as_user() {
 }"""
 
 
+# SPEC §13 gives every script entry an `interpreter` (default /bin/sh) and an
+# `on_failure` policy (default `fail`); both used to be warn-and-drop, so a
+# Python hook ran under sh and a hook marked `continue` still aborted the
+# activation. Running the body from a file is what makes the interpreter real,
+# and base64 is what makes the body survive the trip: it travels through a Nix
+# indented string, an activation script and a systemd unit without a single
+# character of it being re-read as syntax.
+#
+# The two `if cmd; then :; else _rc=$?; fi` shapes are not style. The
+# activation script installs `trap ... ERR` (activation-script.nix:66) and the
+# first-boot unit runs under `set -e` (systemd-lib.nix:548); a bare failing
+# command in either would mark the whole run failed before `on_failure` was
+# ever consulted. A command in an `if` condition triggers neither.
+LIS_HOOK_FN = AS_USER_FN + """
+lis_hook() {
+  # $1 label  $2 interpreter  $3 user ('' = root)  $4 on_failure  $5 body(base64)
+  _lbl=$1; _int=$2; _usr=$3; _pol=$4; _rc=0
+  _f=$(mktemp /tmp/lis-hook-XXXXXX) || return 1
+  printf '%s' "$5" | base64 -d > "$_f"
+  chmod 0700 "$_f"
+  if [ -n "$_usr" ]; then
+    chown "$_usr" "$_f"
+    _h=$(getent passwd "$_usr" | cut -d: -f6)
+    if setpriv --reuid="$_usr" --regid="$(id -gn "$_usr")" --init-groups \\
+         env HOME="$_h" USER="$_usr" LOGNAME="$_usr" "$_int" "$_f"; then :;
+    else _rc=$?; fi
+  else
+    if "$_int" "$_f"; then :; else _rc=$?; fi
+  fi
+  rm -f "$_f"
+  if [ "$_rc" -ne 0 ]; then
+    echo "lis: $_lbl exited $_rc" >&2
+    if [ "$_pol" != continue ]; then return "$_rc"; fi
+  fi
+  return 0
+}"""
+
+
+# What an `interpreter` path can mean on a NixOS target. /bin/sh is the one
+# absolute path NixOS builds itself (system/build.binsh), so it is honored
+# literally; everything else outside the store does not exist there, and the
+# only way to run the body under the interpreter the document named is the
+# store's copy of it — reached by name through the hook PATH. The second
+# element is the package that has to be on that PATH for the name to resolve.
+INTERPRETERS = {
+    "/bin/sh": ("/bin/sh", None), "sh": ("/bin/sh", None),
+    "/bin/bash": ("bash", "pkgs.bash"), "/usr/bin/bash": ("bash", "pkgs.bash"),
+    "bash": ("bash", "pkgs.bash"),
+    "/bin/dash": ("dash", "pkgs.dash"), "/usr/bin/dash": ("dash", "pkgs.dash"),
+    "dash": ("dash", "pkgs.dash"),
+    "/bin/zsh": ("zsh", "pkgs.zsh"), "/usr/bin/zsh": ("zsh", "pkgs.zsh"),
+    "zsh": ("zsh", "pkgs.zsh"),
+    "/bin/fish": ("fish", "pkgs.fish"), "/usr/bin/fish": ("fish", "pkgs.fish"),
+    "fish": ("fish", "pkgs.fish"),
+    "/bin/python3": ("python3", "pkgs.python3"),
+    "/usr/bin/python3": ("python3", "pkgs.python3"),
+    "python3": ("python3", "pkgs.python3"),
+    "/bin/perl": ("perl", "pkgs.perl"), "/usr/bin/perl": ("perl", "pkgs.perl"),
+    "perl": ("perl", "pkgs.perl"),
+}
+
+
 # Absolute shell paths a document may name, mapped to the package NixOS needs.
 SHELL_PATHS = {
     "/bin/bash": "bashInteractive", "/usr/bin/bash": "bashInteractive",
@@ -1145,18 +1208,19 @@ DOTFILES_TOOLS = {"raw": ["pkgs.git"],
                   "chezmoi": ["pkgs.git", "pkgs.chezmoi"]}
 
 
-def hook_path(doc: dict) -> str:
+def hook_path(doc: dict, extra: list[str] | None = None) -> str:
     """HOOK_PATH plus whatever this document's own first-boot work needs."""
-    extra = []
+    extra = list(extra or [])
     if snapshots_wanted(doc):
         extra.append("pkgs.btrfs-progs")
     for user in doc.get("users", []) or []:
         method = (user.get("dotfiles") or {}).get("method") or "raw"
         if (user.get("dotfiles") or {}).get("repo"):
             extra += [p for p in DOTFILES_TOOLS.get(method, []) if p not in extra]
-    if not extra:
+    ordered = list(dict.fromkeys(p for p in extra if p not in HOOK_PATH))
+    if not ordered:
         return HOOK_PATH
-    return HOOK_PATH[:-1] + " ".join(extra) + " ]"
+    return HOOK_PATH[:-1] + " ".join(ordered) + " ]"
 
 
 def as_user(name: str, body: str) -> str:
@@ -1171,6 +1235,101 @@ def as_user(name: str, body: str) -> str:
     """
     import shlex
     return f"lis_as_user {name} {shlex.quote(body)}"
+
+
+def script_payload(item: dict, label: str) -> bytes | None:
+    """The bytes of one script entry, from `content` or from `source`.
+
+    `source` used to be refused for every applier in the repository, on the
+    grounds that none of them fetch an external body. That is true of `https:`
+    and it is true of `env:`/`key:`, which name material rather than a file —
+    but it is not true of `seed:` or `file:` here. `--apply` runs from
+    /run/lis/seed/appliers with the seed already mounted read-only
+    (tools/e2e/installer.py:415-436), so the referenced file is on this
+    machine's filesystem while the translation is happening, and the body can
+    be read and embedded rather than turned away.
+
+    Read now, not at apply time: `post_install` and `firstboot` bodies are
+    baked into the generated configuration, which is evaluated inside the
+    target where /run/lis/seed does not exist. A file this run cannot read is
+    refused with the path in the message (SPEC §2.3), never emitted as an
+    empty hook.
+    """
+    ref = item.get("source")
+    content = item.get("content")
+    if ref is None:
+        return None if content is None else content.encode()
+    if content is not None:
+        refuse(f"{label}: content and source both name the script body — "
+               "SPEC §13 gives an entry one body, and there is no rule that "
+               "says which of the two would run")
+        return None
+    path = secret_ref(ref)
+    if path is None:
+        refuse(f"{label}.source {ref!r}: this applier resolves seed: and file: "
+               "references against the running installer's filesystem; https: "
+               "is not fetched and env:/key: name secret material rather than "
+               "a script (SPEC §2.4)")
+        return None
+    try:
+        return pathlib.Path(path).read_bytes()
+    except OSError as err:
+        refuse(f"{label}.source resolves to {path}, which this run cannot read "
+               f"({err.strerror}) — the body has to be embedded in the "
+               "generated configuration now, because the target has no "
+               "/run/lis/seed when the activation script runs")
+        return None
+
+
+def script_policy(item: dict, label: str) -> str:
+    """SPEC §13's `on_failure`, validated. Default `fail`."""
+    policy = item.get("on_failure")
+    if policy is None:
+        return "fail"
+    if policy in ("fail", "continue"):
+        return policy
+    refuse(f"{label}.on_failure {policy!r} is not one of SPEC §13's values "
+           "(fail | continue)")
+    return "fail"
+
+
+def script_interpreter(item: dict, label: str) -> tuple[str, str | None] | None:
+    """SPEC §13's `interpreter`, as (command, package needed on PATH)."""
+    interpreter = item.get("interpreter")
+    if interpreter is None:
+        return ("/bin/sh", None)
+    if interpreter in INTERPRETERS:
+        command, package = INTERPRETERS[interpreter]
+        if interpreter.startswith("/") and command != interpreter:
+            warn(f"{label}.interpreter {interpreter!r} does not exist on a "
+                 f"NixOS target; the body runs under the store's {command} "
+                 "instead, which is put on the hook PATH for it")
+        return (command, package)
+    if interpreter.startswith("/nix/store/"):
+        return (interpreter, None)
+    refuse(f"{label}.interpreter {interpreter!r} is neither a store path nor "
+           "one this applier can resolve to a package on the hook PATH "
+           f"({' | '.join(sorted(set(c for c, _ in INTERPRETERS.values())))}) "
+           "— on NixOS an unresolved interpreter is 'no such file', not a "
+           "fallback to sh")
+    return None
+
+
+def hook_call(item: dict, label: str, user: str = "") -> tuple[str, str | None] | None:
+    """One script entry → the `lis_hook` line that runs it, and its package."""
+    body = script_payload(item, label)
+    resolved = script_interpreter(item, label)
+    policy = script_policy(item, label)
+    if body is None or resolved is None:
+        return None
+    command, package = resolved
+    blob = base64.b64encode(body).decode()
+    # Double quotes, not nix_str and not shlex: the line lands inside a Nix
+    # indented string, where a backslash is literal and a bare `''` is the
+    # terminator. All four words are ours — a generated label, a table entry
+    # or a store path, and a name the schema constrains to [a-z0-9_-] — so a
+    # plain quote is exact for them and needs no escaping to survive Nix.
+    return (f'lis_hook "{label}" "{command}" "{user}" {policy} {blob}', package)
 
 
 def dotfiles_commands(doc: dict) -> list[str]:
@@ -1328,13 +1487,18 @@ def snapshot_commands(doc: dict) -> list[str]:
     .snapshots" (services/misc/snapper.nix:50-52) and the module never creates
     it. Without it snapper exits non-zero on every timeline tick, so the
     generated configuration described snapshots the system would never take.
-    disko cannot make it either — it is a subvolume of the root subvolume, which
-    does not exist until the root filesystem is mounted.
+
+    disko now creates it at format time as `<root subvolume>/.snapshots`
+    (Topology.extra_subvolumes) — it can, because it mounts the filesystem's
+    top level and can nest a subvolume under another. This stays as the
+    fallback for a root that disko did not lay out (an adopted or pre-existing
+    filesystem), and it owns the mode either way: `btrfs subvolume create`
+    leaves 0755, and snapper's history is not world-readable.
     """
     if not snapshots_wanted(doc):
         return []
-    return ["if [ ! -d /.snapshots ]; then "
-            "btrfs subvolume create /.snapshots && chmod 750 /.snapshots; fi"]
+    return ["if [ ! -d /.snapshots ]; then btrfs subvolume create /.snapshots; fi",
+            "chmod 750 /.snapshots"]
 
 
 def host_stage_bodies(doc: dict, stage: str) -> list[str]:
@@ -2198,6 +2362,15 @@ def render_interfaces(interfaces: list, manager: str, out: list[str]) -> list[st
                     dns_sources += 1
                     nameservers += [d for d in dns if d not in nameservers]
             continue
+        if name and name in names:
+            # configuration.nix is one attribute set, so a second
+            # networking.interfaces."eth0" is `error: attribute already
+            # defined` — raised by nixos-install, after disko has wiped.
+            refuse(f"network.interfaces[{index}].match.name {name!r} is already "
+                   "configured by an earlier entry; networking.interfaces is an "
+                   "attribute set and cannot hold the same interface twice")
+            consume(iface)
+            continue
         if not name:
             # networking.interfaces is keyed by name, so a MAC-only match needs a
             # name to exist first. A .link file gives it one; udev honours those
@@ -2309,8 +2482,18 @@ def render_wifi(wifi: list, manager: str, out: list[str]) -> None:
         if secrets:
             out.append("  networking.wireless.secretsFile = "
                        f"{nix_str(WIRELESS_SECRETS)};")
+        seen: set[str] = set()
         for index, net in enumerate(wifi):
             ssid = net["ssid"]
+            if ssid in seen:
+                # networking.wireless.networks is keyed by SSID, so a repeat is
+                # `error: attribute already defined` at nixos-install time.
+                refuse(f"network.wifi[{index}].ssid {ssid!r} is declared twice; "
+                       "networking.wireless.networks is an attribute set keyed "
+                       "by SSID and cannot hold the same network twice")
+                consume(net)
+                continue
+            seen.add(ssid)
             psk = net.get("psk_hash")
             if psk is None:
                 out.append(f"  networking.wireless.networks.{nix_str(ssid)}.auth = "
@@ -2481,8 +2664,16 @@ def render_network(doc: dict) -> list[str]:
     if wifi:
         render_wifi(wifi, manager, out)
 
+    # Merged by address rather than emitted per entry: networking.hosts is an
+    # attribute set keyed by the address, so two hosts[] entries naming the same
+    # IP are `error: attribute already defined` — which under --apply is raised
+    # by nixos-install, with the disks already wiped.
+    host_names: dict[str, list[str]] = {}
     for entry in network.get("hosts", []) or []:
-        out.append(f"  networking.hosts.{nix_str(entry['ip'])} = {nix_list(entry['names'])};")
+        names_for = host_names.setdefault(entry["ip"], [])
+        names_for += [n for n in entry["names"] if n not in names_for]
+    for ip, host_list in host_names.items():
+        out.append(f"  networking.hosts.{nix_str(ip)} = {nix_list(host_list)};")
 
     if firewall := network.get("firewall"):
         render_firewall(firewall, out)
@@ -3726,12 +3917,27 @@ def render_configuration(doc: dict) -> str:
                        "FSTYPE = \"btrfs\"; TIMELINE_CREATE = true; "
                        "TIMELINE_CLEANUP = true; };")
     swap = storage.get("swap", {}) or {}
-    if swap.get("zram"):
+    if zram := swap.get("zram"):
         out.append("  zramSwap.enable = true;")
+        # storage.swap.zram.size is sizeOrPercent (schema.json $defs), and the
+        # module has one option per shape: memoryPercent is a share of RAM,
+        # memoryMax a hard byte ceiling. Neither was read at all, so a document
+        # asking for 50% got whatever the module defaults to.
+        size = zram.get("size")
+        if isinstance(size, str) and size.endswith("%"):
+            out.append(f"  zramSwap.memoryPercent = {int(size[:-1])};")
+        elif size is not None:
+            if (mib := size_mib(size, "storage.swap.zram.size")) is not None:
+                out.append(f"  zramSwap.memoryMax = {mib * 1024 * 1024};")
+                out.append("  zramSwap.memoryPercent = 100;")
     if swap.get("file"):
-        size = swap["file"]["size"]
-        gib = int(size[:-3]) if size.endswith("GiB") else 4
-        out.append(f"  swapDevices = [ {{ device = {nix_str(swap['file']['path'])}; size = {gib * 1024}; }} ];")
+        # swapDevices[].size is MiB (nixos/modules/config/swap.nix). The reader
+        # here was `int(size[:-3]) if size.endswith("GiB") else 4`, so every
+        # MiB and TiB spelling silently became a 4 GiB file.
+        mib = size_mib(swap["file"]["size"], "storage.swap.file.size")
+        if mib is not None:
+            out.append(f"  swapDevices = [ {{ device = "
+                       f"{nix_str(swap['file']['path'])}; size = {mib}; }} ];")
 
     out += ["", "  # Pin to the release the generator targeted; do not blindly bump.",
             "  system.stateVersion = \"25.05\";", "}"]
