@@ -163,6 +163,17 @@ ALL_SECTIONS = frozenset({
 })
 
 
+def is_extension(key: str) -> bool:
+    """True for an `x-` namespace key.
+
+    SPEC §2.2: keys beginning with `x-` "MUST be ignored by appliers that do not
+    recognize them"; §18 makes them additive and forbids them changing the
+    meaning of core sections. They are therefore neither unhandled intent to
+    refuse nor unread intent to warn about.
+    """
+    return isinstance(key, str) and key.startswith("x-")
+
+
 def check_unhandled(doc: dict, handled: set[str] | frozenset) -> None:
     """Refuse any declared section this applier does not translate.
 
@@ -175,10 +186,37 @@ def check_unhandled(doc: dict, handled: set[str] | frozenset) -> None:
     for key in sorted(doc):
         if key in NON_INTENT_SECTIONS or key in handled:
             continue
+        if is_extension(key):
+            continue  # SPEC §2.2/§18: not core intent, ignored by design
         if doc[key] in (None, {}, []):
             continue  # declared but empty asks for nothing
         refuse(f"section '{key}' is declared but this applier does not "
                f"translate it — nothing about it would reach the target")
+
+
+def check_extensions(doc: dict, own: str, recognized: set[str] | frozenset) -> None:
+    """Report the applier's own `x-` namespace when it implements none of it.
+
+    SPEC §2.2 and §18 make every `x-` namespace ignorable, so a foreign one
+    (`x-arch` seen by the NixOS applier) is silent by design. The applier's own
+    namespace is different: the author wrote it expecting *this* applier to read
+    it, and §2.1's rule for unknown optional fields is "ignored with a warning".
+    Extensions add and never override, so this is never a refusal.
+    """
+    extension = doc.get(own) or {}
+    if not extension:
+        return
+    if not isinstance(extension, dict):
+        warn(f"{own} is declared but this applier implements no '{own}' "
+             "extension keys — SPEC §18 makes extensions additive and "
+             "ignorable, so it is ignored and no core intent changes")
+        return
+    unknown = sorted(key for key in dict.keys(extension) if key not in recognized)
+    if not unknown:
+        return
+    warn(f"{own} declares {', '.join(unknown)} but this applier implements no "
+         f"'{own}' extension keys — SPEC §18 makes extensions additive and "
+         "ignorable, so they are ignored and no core intent changes")
 
 
 # drivers.* named per distro family. A value mapped to None is not in that
@@ -625,7 +663,8 @@ def check_unread(doc: dict, *, ignore: set[str] | frozenset = frozenset()) -> No
     unread = set()
     for path in declared:
         flat = path.replace("[]", "")
-        if flat.split(".")[0] in NON_INTENT_SECTIONS:
+        section = flat.split(".")[0]
+        if section in NON_INTENT_SECTIONS or is_extension(section):
             continue
         if path in ignore or flat in ignore:
             continue
@@ -1085,6 +1124,16 @@ REGISTRATION = {
     "ubuntu": "pro attach $TOKEN",
 }
 
+# Why a family has no subscription to attach to, in that distro's own terms.
+# The generic sentence names no distro and no clause, which reads as "the
+# applier has not got round to it yet" rather than "the service does not exist".
+REGISTRATION_ABSENT = {
+    "nixos": "NixOS has no vendor subscription service to attach to: "
+             "nixos-24.11 carries no subscription-manager, SUSEConnect, "
+             "rhsm or ubuntu-advantage module, and packages are fetched from "
+             "cache.nixos.org, which is unauthenticated and entitles nothing",
+}
+
 
 def registration_commands(doc: dict, family: str) -> list[str]:
     """Shell that attaches the subscription a document declares.
@@ -1098,8 +1147,12 @@ def registration_commands(doc: dict, family: str) -> list[str]:
         return []
     template = REGISTRATION.get(family)
     if template is None:
-        refuse("registration has no meaning on this distro — it has no "
-               "subscription service to attach to")
+        declared = ", ".join(f"registration.{key}" for key in sorted(registration))
+        reason = REGISTRATION_ABSENT.get(
+            family, "this distro has no subscription service to attach to")
+        refuse(f"{declared or 'registration'}: {reason}. SPEC §15 requires an "
+               "applier for an unregistered distro to fail on this section — "
+               "skipping a subscription silently is drift (§2.3)")
         return []
     token_path = secret_ref(registration.get("token"))
     if not token_path:
