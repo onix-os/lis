@@ -3710,6 +3710,46 @@ KEY_TYPES_HONORED = {"keyfile", "tpm2", "fido2"}
 KEY_PURPOSES = {"payload_decryption", "disk_encryption", "secret_decryption",
                 "user_ssh_key", "user_pam_auth", "remote_auth"}
 
+# The PAM module each token type authenticates through on 24.11. Both are real
+# options — security.pam.u2f.enable and security.pam.yubico.enable — so
+# `purpose: user_pam_auth` is a line nobody wrote rather than a capability
+# NixOS lacks; it used to be refused with the same sentence as the four roles
+# that genuinely have nowhere to go.
+PAM_KEY_MODULES = {"yubikey_fido2": "u2f", "yubikey_challenge": "yubico"}
+
+
+def render_keys_pam(doc: dict) -> list[str]:
+    """keys[].purpose: user_pam_auth → the PAM module for that token type.
+
+    `control = "sufficient"` and nothing stronger. pam_u2f consults a mapping
+    file that only an operator with the token in hand can write (pamu2fcfg
+    prompts for a touch), so a `required` stack would lock every account out of
+    the machine this applier just installed. `sufficient` adds the token as an
+    additional way in and leaves the password path intact, which is the only
+    setting that is safe to reach unattended — check_keys() warns that the
+    enrollment half is the operator's.
+    """
+    out: list[str] = []
+    for module in dict.fromkeys(
+            PAM_KEY_MODULES[entry["type"]]
+            for entry in doc.get("keys", []) or []
+            if "user_pam_auth" in (entry.get("purpose", []) or [])
+            and entry.get("type") in PAM_KEY_MODULES):
+        out.append(f"  security.pam.{module}.enable = true;")
+        out.append(f"  security.pam.{module}.control = \"sufficient\";")
+        if module == "u2f":
+            # cue makes pam_u2f print "touch your token" instead of appearing
+            # to hang; without it a sufficient module that is waiting looks
+            # like a dead login prompt.
+            out.append("  security.pam.u2f.settings.cue = true;")
+        else:
+            # The default mode is `client`, which sends the OTP to Yubico's
+            # validation service over the network. A key declared for local
+            # PAM authentication is challenge-response, and choosing the
+            # default would make every login depend on an internet round trip.
+            out.append("  security.pam.yubico.mode = \"challenge-response\";")
+    return out
+
 
 def check_keys(doc: dict) -> None:
     """keys[] — honor what reaches the target, refuse the rest by name.
@@ -4199,6 +4239,7 @@ def render_configuration(doc: dict) -> str:
 
     out += render_network(doc)
     out += render_security(doc)
+    out += render_keys_pam(doc)
 
     # hwclock and locale_overrides are emitted where the rest of the i18n and
     # time settings are; duplicating them here defined the same Nix option
