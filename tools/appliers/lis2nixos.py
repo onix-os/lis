@@ -1885,7 +1885,12 @@ def render_script_hooks(doc: dict, file_cmds: list[str] | None = None) -> list[s
                 + "\nif [ \"$LIS_HOOK_FAILED\" -eq 0 ]; then"
                 " touch /var/lib/lis/.post-install-done; fi\nfi")
         out += ["  system.activationScripts.lis-post-install = {",
-                "    deps = [ \"lis-hooks\" ];",
+                # binsh, because SPEC §13's default interpreter is /bin/sh and
+                # on NixOS that symlink is itself made by an activation snippet
+                # (config/shells-environment.nix:242). Alphabetical order
+                # happens to put it first today; naming it is what keeps a hook
+                # from being "no such file or directory" if that ever changes.
+                "    deps = [ \"lis-hooks\" \"binsh\" ];",
                 "    text ="
                 f"      \"export PATH=\\\"${{lib.makeBinPath {path_expr}}}:$PATH\\\"\\n\" +",
                 "      " + nix_script(LIS_HOOK_FN + "\n" + body) + ";",
