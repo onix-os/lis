@@ -4735,9 +4735,7 @@ def preflight_evaluation(config_file: pathlib.Path) -> int:
     """
     import subprocess
 
-    # Absolute: the expression interpolates this as a Nix *path* literal, and a
-    # relative one there is parsed as a variable selection — `out/…` became
-    # `error: undefined variable 'out'` and refused every install.
+    # A Nix *path* literal: a relative one is parsed as a variable selection.
     config_file = config_file.resolve()
     print(f"pre-flight: evaluating {config_file} before touching the disks")
     try:
