@@ -911,6 +911,10 @@ def luks_key_path(doc: dict, cid: str) -> str | None:
                       if c.get("id") == cid), {})
     if (container.get("key") or {}).get("keyfile"):
         keyfile = container["key"]["keyfile"]
+        # A scheme first: `seed:luks.key` is a reference, and joining it to the
+        # mount point unresolved asks for a file literally called "seed:…".
+        if path := secret_ref(keyfile):
+            return path
         return keyfile if keyfile.startswith("/") else f"{SEED_MOUNT}/{keyfile.lstrip('/')}"
     if (container.get("key") or {}).get("passphrase"):
         # `passphrase: true` declares *how* it unlocks, not the secret itself.

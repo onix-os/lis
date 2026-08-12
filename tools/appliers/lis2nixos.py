@@ -563,9 +563,7 @@ class Topology:
                       f"{pad}  settings.allowDiscards = true;"]
             fmt = (crypt.get("type") or "luks2").lower()
             lines.append(f"{pad}  extraFormatArgs = [ \"--type\" {nix_str(fmt)} ];")
-            if keyfile := (crypt.get("key", {}) or {}).get("keyfile"):
-                lines.append(f"{pad}  settings.keyFile = {nix_str(keyfile)};")
-            elif key_path := luks_key_path(self.doc, crypt["id"]):
+            if key_path := luks_key_path(self.doc, crypt["id"]):
                 # Without one of keyFile/passwordFile/settings.keyFile, disko's
                 # askPassword defaults to true and the create script blocks on a
                 # console prompt (disko lib/types/luks.nix:118-127, :202-231) —
@@ -989,12 +987,9 @@ def render_hardware(doc: dict) -> str:
     if swaps:
         joined = " ".join(f"{{ device = {nix_str(d)}; }}" for d in swaps)
         out.append(f"  swapDevices = [ {joined} ];")
-    for name, backing, keyfile in luks_initrd_devices(doc):
-        entry = (f"  boot.initrd.luks.devices.{nix_str(name)} = "
-                 f"{{ device = {nix_str(backing)}; allowDiscards = true;")
-        if keyfile:
-            entry += f" keyFile = {nix_str(keyfile)};"
-        out.append(entry + " };")
+    for name, backing in luks_initrd_devices(doc):
+        out.append(f"  boot.initrd.luks.devices.{nix_str(name)} = "
+                   f"{{ device = {nix_str(backing)}; allowDiscards = true; }};")
     if any(fstype == "zfs" for _, _, fstype, _ in mounts):
         out.append("  boot.supportedFilesystems = [ \"zfs\" ];")
         out.append(f"  networking.hostId = {nix_str(host_id(doc))};")
@@ -1005,7 +1000,7 @@ def render_hardware(doc: dict) -> str:
     return "\n".join(out) + "\n"
 
 
-def luks_initrd_devices(doc: dict) -> list[tuple[str, str, str | None]]:
+def luks_initrd_devices(doc: dict) -> list[tuple[str, str]]:
     """Each LUKS container, paired with the device disko will have put it on.
 
     Stage 1 opens only the containers it was told about: luksroot.nix builds its
@@ -1016,8 +1011,13 @@ def luks_initrd_devices(doc: dict) -> list[tuple[str, str, str | None]]:
     its own NixOS module, but this translator generates plain NixOS options
     only, so it states them itself.
 
-    The passphrase is not named here: `unlock: passphrase` means the operator
-    types it at boot, and the seed that holds it is not attached by then.
+    No key material is named here, for either kind. `unlock: passphrase` means
+    the operator types it at boot, and the seed that holds it is not attached
+    by then; `key.keyfile` is a seed reference for the same reason. Emitting it
+    as boot.initrd.luks.devices.<n>.keyFile pointed stage 1 at a path that does
+    not exist on the installed machine — the disk was encrypted correctly and
+    the system would not boot — and, had the file been copied in to make that
+    work, it would have put the key in the world-readable store (SPEC §2.4).
     """
     storage = doc.get("storage", {}) or {}
     topology = topology_for(doc)
@@ -1036,8 +1036,14 @@ def luks_initrd_devices(doc: dict) -> list[tuple[str, str, str | None]]:
                    "this document — the installed system would have no device to "
                    "unlock and stage 1 would stall waiting for it")
             continue
-        devices.append((crypt["id"], device,
-                        (crypt.get("key", {}) or {}).get("keyfile")))
+        if ((crypt.get("key", {}) or {}).get("keyfile")
+                and not (crypt.get("unlock") or [])):
+            warn(f"encryption '{crypt['id']}': key.keyfile is seed material, read "
+                 "once while disko formats the container. The installed system "
+                 "unlocks it through storage.encryption[].unlock, which this "
+                 "container does not declare — stage 1 will prompt for a "
+                 "passphrase, and only the one the keyfile holds will open it")
+        devices.append((crypt["id"], device))
     return devices
 
 
@@ -1287,8 +1293,11 @@ SHELL_INTENT = {
 }
 
 # Shells whose package is not enough: their NixOS module is what writes the
-# system-wide rc file the login shell sources.
-PROGRAMS_MODULE = {"zsh": "zsh", "fish": "fish"}
+# system-wide rc file the login shell sources. config/users-groups.nix:1113-1136
+# asserts programs.<shell>.enable for exactly ["fish" "xonsh" "zsh"] on 24.11,
+# so a name missing here is an evaluation error raised inside nixos-install,
+# after disko has wiped the disks.
+PROGRAMS_MODULE = {"zsh": "zsh", "fish": "fish", "xonsh": "xonsh"}
 
 # "give this account no shell". shadow is in every NixOS system's default
 # profile (config/system-path.nix), so the path resolves on the installed
@@ -2818,10 +2827,16 @@ def iwd_profile_name(ssid: str, extension: str) -> str:
     """iwd's own file name for one SSID (iwd src/storage.c).
 
     iwd stores a network as /var/lib/iwd/<ssid>.<security>, and falls back to
-    `=<hex>` whenever the SSID holds anything outside the printable set it is
-    willing to put in a file name.
+    `=<hex>` whenever the SSID holds a byte outside ASCII printable, or a '/'.
+    Its reader hex-decodes any name starting with '=', so an SSID that starts
+    with one is encoded here too or it would be read back as hex.
+
+    The test is on ASCII, not str.isalnum(): Python's is Unicode-aware, so an
+    accented SSID passed it and was written under its literal name while iwd
+    looked for the hex form — the profile was written and never found.
     """
-    if ssid and all(c.isalnum() or c in " -_" for c in ssid):
+    printable = ssid and all(0x20 <= ord(c) <= 0x7E and c != "/" for c in ssid)
+    if printable and not ssid.startswith("="):
         return f"{ssid}.{extension}"
     return f"={ssid.encode().hex()}.{extension}"
 
@@ -3075,13 +3090,43 @@ def apply_proxy_env(doc: dict) -> None:
     print(f"proxy for the install run: {', '.join(sorted(env))}")
 
 
+# The back-end render_network settled on, for the collector to register the
+# switches that choice rules out.
+_RESOLVED_MANAGER: str | None = None
+
+# Every manager's own on/off switch. The one that was chosen is already in the
+# emitted lines; the rest are off, and software.services.enable naming one of
+# them is the document contradicting its own network.manager.
+MANAGER_OPTION = {"networkmanager": "networking.networkmanager.enable",
+                  "systemd-networkd": "networking.useNetworkd",
+                  "iwd": "networking.wireless.iwd.enable"}
+
+
+def claim_network_managers(opts: "NixOptions") -> None:
+    """Register the managers network.manager ruled out as switched off.
+
+    A glob interface resolves the manager to systemd-networkd, but
+    `software.services.enable: ["NetworkManager"]` reaches a different option
+    name, so the collector saw no collision and both were emitted: the .network
+    units were written and NetworkManager took the devices anyway, which drops
+    the interface section without a word.
+    """
+    if _RESOLVED_MANAGER is None:
+        return
+    for manager, option in MANAGER_OPTION.items():
+        if manager != _RESOLVED_MANAGER:
+            opts.taken(option, "false")
+
+
 def render_network(doc: dict) -> list[str]:
+    global _RESOLVED_MANAGER
     network = doc.get("network", {}) or {}
     out: list[str] = []
 
     interfaces = network.get("interfaces", []) or []
     wifi = network.get("wifi", []) or []
     manager = resolve_manager(network, interfaces)
+    _RESOLVED_MANAGER = manager
     if manager == "networkmanager":
         out += manager_note(network)
         out.append("  networking.networkmanager.enable = true;")
@@ -3399,9 +3444,20 @@ def nix_pkg_path(name: str) -> str:
     generated file, raised by nixos-install after disko has wiped the disks.
     Dots stay attribute separators (`python3.11` selects `11` out of `python3`);
     everything else is quoted.
+
+    A leading digit is renamed rather than quoted: a Nix attribute cannot start
+    with one, so nixpkgs itself carries `1password-cli` as `_1password-cli`.
+    Quoting it produced a file that parsed and then failed to evaluate —
+    inside nixos-install, after disko had wiped the disks.
     """
     parts = []
-    for part in name.split("."):
+    for index, part in enumerate(name.split(".")):
+        if index == 0 and re.fullmatch(r"[0-9][A-Za-z0-9_'-]*", part):
+            warn(f"software package {name!r}: a nixpkgs attribute cannot begin "
+                 f"with a digit, so the package is taken as '_{part}' — the "
+                 "name nixpkgs itself uses (SPEC §2.3 substitution)")
+            parts.append("_" + part)
+            continue
         parts.append(part if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_'-]*", part)
                      else nix_str(part))
     return ".".join(parts)
@@ -4586,6 +4642,7 @@ def render_configuration(doc: dict) -> str:
     # already been written turns "the same attribute twice", an evaluation
     # error raised inside nixos-install, into a refusal raised here.
     opts.claim(out)
+    claim_network_managers(opts)
     render_software(doc, opts)
     render_desktop(doc, opts)
     render_drivers(doc, opts)
@@ -4640,6 +4697,65 @@ def render_configuration(doc: dict) -> str:
     out += ["", "  # Pin to the release the generator targeted; do not blindly bump.",
             "  system.stateVersion = \"25.05\";", "}"]
     return "\n".join(out) + "\n"
+
+
+# Forces system.build.toplevel, the same attribute nixos-install realises. The
+# weaker `attrNames sys.config.system.build` form does not force
+# environment.systemPackages, so a package name nixpkgs has no attribute for
+# survives it and fails later.
+PREFLIGHT_EXPR = """
+let sys = import <nixpkgs/nixos> {
+      configuration = { imports = [ %s ]; };
+    };
+in builtins.seq (builtins.toString sys.config.system.build.toplevel) "ok"
+"""
+
+
+def preflight_evaluation(config_file: pathlib.Path) -> int:
+    """Evaluate the generated configuration before disko is allowed to run.
+
+    nixos-install evaluates this file anyway — but it does so *after* disko has
+    destroyed the partition table, which makes every evaluation error a
+    wipe-then-fail. An option name nixpkgs 24.11 spells differently, a
+    `software.packages[]` entry with no attribute, an unfree package, a module
+    assertion: all of them are found here, with the disks still intact.
+
+    A skipped check is reported rather than treated as a pass: an installer
+    host with no <nixpkgs> can still install from a flake, and silently
+    claiming the configuration was verified would be the drift SPEC §2.3
+    forbids.
+    """
+    import subprocess
+
+    # Absolute: the expression interpolates this as a Nix *path* literal, and a
+    # relative one there is parsed as a variable selection — `out/…` became
+    # `error: undefined variable 'out'` and refused every install.
+    config_file = config_file.resolve()
+    print(f"pre-flight: evaluating {config_file} before touching the disks")
+    try:
+        res = subprocess.run(
+            ["nix-instantiate", "--eval", "--strict", "-E",
+             PREFLIGHT_EXPR % str(config_file)],
+            capture_output=True, text=True, timeout=1800)
+    except (OSError, subprocess.SubprocessError) as err:
+        print(f"warning: pre-flight evaluation could not run ({err}) — the "
+              "configuration is unverified and any error in it will be raised "
+              "by nixos-install, after disko has wiped the disks",
+              file=sys.stderr)
+        return 0
+    if res.returncode == 0:
+        print("pre-flight: the configuration evaluates")
+        return 0
+    if "file 'nixpkgs' was not found" in res.stderr or "attribute 'nixos'" in res.stderr:
+        print("warning: pre-flight evaluation found no <nixpkgs> to evaluate "
+              "against — the configuration is unverified", file=sys.stderr)
+        return 0
+    sys.stderr.write(res.stderr)
+    print("refused: the generated configuration does not evaluate against this "
+          "host's nixpkgs (see above). Refusing to run disko: nixos-install "
+          "would raise the same error with the disks already wiped.",
+          file=sys.stderr)
+    return 1
 
 
 def main() -> int:
@@ -4738,6 +4854,10 @@ def main() -> int:
             """
             if status := run_host_stage(doc, stage):
                 raise SystemExit(status)
+
+        if status := preflight_evaluation(config_file):
+            run_stage("on_error")
+            return status
 
         for stage in ("pre_install", "pre"):
             run_stage(stage)
