@@ -2233,6 +2233,14 @@ def render_boot(doc: dict) -> list[str]:
         refuse(f"boot.initramfs.generator {generator!r}: NixOS builds its own initrd "
                "(optionally the systemd one via boot.initrd.systemd.enable); dracut, "
                "mkinitcpio and booster appear nowhere in nixos/modules")
+
+    # check_boot_extras() names unread keys directly under `boot` and under
+    # `boot.kernel`; these two objects are the ones it does not descend into, so
+    # a key inside either would otherwise be dropped without a word.
+    for group, known in (("console", {"serial"}),
+                         ("initramfs", {"generator", "include_modules"})):
+        for key in sorted(set(boot.get(group, {}) or {}) - known):
+            warn(f"boot.{group}.{key} is not applied by this applier")
     return out
 
 
