@@ -1254,6 +1254,15 @@ def adopted_format_hook(part: dict, probed: dict, topology: Topology) -> str:
              f"filesystem on {probed['device']} is replaced with a fresh {fs}. "
              "The partition itself, its GPT name and its partition GUID are kept")
         return 'wipefs --all "$device"'
+    # The `label` reaches mkfs and nothing else — disko passes it as
+    # `extraArgs`, and the mkfs those arguments belong to is the one the guard
+    # below declines to run. So a kept filesystem keeps the name it already has.
+    if part.get("label") is not None and probed.get("fs"):
+        warn(f"{where}: label {part['label']!r} is not applied to an adopted "
+             f"filesystem — it is an argument to mkfs, and the {probed['fs']} on "
+             f"{probed['device']} is kept rather than re-made, so it keeps the "
+             f"name it has ({probed.get('fslabel') or 'none'!r}). "
+             "existing.format: true would apply it, by replacing the filesystem")
     if fs in (None, "none"):
         return ""
     if not probed.get("fs"):
