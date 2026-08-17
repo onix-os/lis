@@ -850,6 +850,12 @@ PROBE_RAN = False
 # Set by adoption_plan(): this run has to keep something, so main() must not
 # hand disko a mode whose first stage clears the partition table.
 PRESERVING = False
+# Set wherever a live partition table is left standing while the layout over it
+# was rendered the create-everything way. Counting resolved matches does not
+# find this: a match resolves, and the plan around it still fails — a numbering
+# gap, an MS-DOS table, no free space, a layer over the adopted partition, or a
+# second declared disk that carries a table of its own.
+UNPLANNED = False
 
 # GPT partitions are aligned to 1 MiB by every tool that writes one, and sgdisk
 # defaults to it; new partitions placed into free space follow the same rule so
@@ -1096,6 +1102,12 @@ def refuse_adoption(part: dict, where: str) -> None:
     block, a translation with no machine to read, and `resize` — which no amount
     of probing makes safe.
     """
+    global UNPLANNED
+
+    # Reached only for an entry that did not make it into an adoption_plan, so
+    # the disk it names is rendered the create-everything way while the run's
+    # mode still skips the destroy stage. check_adoptions_resolved() stops it.
+    UNPLANNED = True
     existing = part.get("existing") or {}
     if not isinstance(existing, dict):
         # schema.json types `existing` as an object; a scalar or a list is a
@@ -1462,9 +1474,12 @@ def check_unadopted_disk(disk_id: str) -> None:
     `sgdisk --clear`, so what it holds has to be accounted for as well
     (schema.md §6.1: *any* owned disk).
     """
+    global UNPLANNED
+
     probe = PROBED.get(disk_id)
     if probe is None or not probe["parts"]:
         return
+    UNPLANNED = True
     refuse(f"disk '{disk_id}': {probe['path']} already carries "
            f"{len(probe['parts'])} partition(s) ({describe_probe(probe)}) and no "
            "`existing` entry on this disk adopts any of them. Because another "
@@ -5869,24 +5884,35 @@ def check_adoptions_resolved(doc: dict) -> int:
     Checked outside enforce() for the same reason check_consent() is: --lenient
     turns refusals into warnings, and this is not one of the things it may wave
     through. Once any partition declares `existing`, the mode for the whole run
-    is format,mount — no destroy stage. If an adoption then failed to resolve,
-    its partition is left out of the layout and the remaining entries are emitted
-    the create-everything way, sized rather than pinned. disko numbers a
-    partition by its position in that list, so entry one would land on the GPT
-    index the unadopted partition occupies and rename, retype and clear the flags
+    is format,mount — no destroy stage. If a disk is then rendered the
+    create-everything way, its entries are sized rather than pinned, and disko
+    numbers a partition by its position in that list — so entry one lands on the
+    GPT index a live partition occupies and renames, retypes and clears the flags
     of the very partition the document asked to keep (lib/types/gpt.nix:315-318).
     A refusal downgraded to a warning here costs the operator the foreign table.
+
+    Two conditions, because counting resolved matches finds only the first. A
+    match can resolve and the plan around it still fail — a hole in the partition
+    numbering, an MS-DOS label, no free space, a layer built over the adopted
+    partition — and a second declared disk carrying a table of its own is not
+    counted at all. UNPLANNED is set wherever a live table is left standing under
+    a create-everything layout, whatever the reason.
     """
     partitions = (doc.get("storage") or {}).get("partitions") or []
     declared = [part for part in partitions if adopted(part)]
-    if not declared or len(ADOPTED) == len(declared):
+    if not declared or (len(ADOPTED) == len(declared) and not UNPLANNED):
         return 0
-    print("error: refusing to run disko without its destroy stage while "
-          f"{len(declared) - len(ADOPTED)} of {len(declared)} `existing` "
-          "adoption(s) are unresolved — the refusals above say why. The layout "
-          "would be laid over the live partition table by GPT index, renaming "
-          "and retyping the partitions this document asked to keep. Nothing has "
-          "been written to any disk", file=sys.stderr)
+    if unresolved := len(declared) - len(ADOPTED):
+        why = (f"{unresolved} of {len(declared)} `existing` adoption(s) are "
+               "unresolved")
+    else:
+        why = ("a declared disk carrying a live partition table is described by "
+               "a layout that was not built from it")
+    print(f"error: refusing to run disko without its destroy stage while {why} "
+          "— the refusals above say why. The layout would be laid over the live "
+          "partition table by GPT index, renaming and retyping the partitions "
+          "this document asked to keep. Nothing has been written to any disk",
+          file=sys.stderr)
     return 1
 
 
