@@ -1015,9 +1015,12 @@ rather than silently falling back to `raw`.
 ⁶⁸ **NixOS answers `chroot` per stage** rather than dropping it. `users[].scripts.post` and
 `.post_install` run in `system.activationScripts`, which `nixos-install` executes inside the
 target, and `.firstboot` runs in the booted machine — so `chroot: true` is honoured on all three
-and `chroot: false` **refuses**, naming the stage. See scripts footnote 58 for the mechanism; the
-flag can never *move* a stage on this applier, so a value that contradicts the stage's real side is
-the only thing it can meaningfully say.
+and `chroot: false` **refuses**, naming the account: a per-user body runs as an account this
+document creates *inside* the target, and the installer host has no such user to run it as. A
+non-boolean flag refuses here too, for the reason footnote 58 gives. This
+is the one place the document-level ✅ of scripts footnote 64 does not extend to — `scripts.post`
+and `scripts.post_install` do get a genuine host-side form there, because root exists on both
+sides of the boundary and a per-user hook does not.
 ⁶⁹ The user-level `post` phase is now collected — into the activation script, immediately after the
 `post_install` bodies, per SPEC §13's ordering. NixOS joins Gentoo as the second applier to
 implement it (footnote 45). Same `$HOME`-quoting caveat as footnote 52; the re-runs-on-activation
@@ -1248,7 +1251,7 @@ both places is one attribute and asking for **opposite** values refuses (softwar
 | `software.apps[].package` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `software.apps[].flatpak` | ⚙¹¹ | ⚙¹¹ | ⚙¹¹ | ◐¹² | ◐¹² | ⚙⁴³ | ❌ | ❌⁴² | ❌³⁶ |
 | `software.apps[].snap` | ❌¹³ | ❌¹³ | ❌¹³ | ❌¹³ | ❌¹³ | ⛔⁴⁴ | ❌¹³ | ❌¹³ | ❌³⁶ |
-| `software.apps[].appimage` | ❌¹⁴ | ❌¹⁴ | ❌¹⁴ | ❌¹⁴ | ❌¹⁴ | ⛔⁴⁴ | ❌¹⁴ | ❌¹⁴ | ❌³⁶ |
+| `software.apps[].appimage` | ❌¹⁴ | ❌¹⁴ | ❌¹⁴ | ❌¹⁴ | ❌¹⁴ | ⚙⁴⁷ | ❌¹⁴ | ❌¹⁴ | ❌³⁶ |
 | `software.apps[].preference[]` | ❌¹⁵ | ❌¹⁵ | ❌¹⁵ | ❌¹⁵ | ❌¹⁵ | ✅⁴⁵ | ❌¹⁵ | ❌¹⁵ | ❌³⁶ |
 | `software.packages[]` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅¹⁶ | ✅ | ✅³⁷ | ✅³⁷ |
 | `software.services.enable[]` | ❌¹⁷ | ⚙¹⁸ | ✅¹⁹ | ❌²⁰ | ✅ | ◐²¹ | ⚙²² | ⚙³⁸ | ⚙³⁸ |
@@ -1336,7 +1339,11 @@ non-empty `xdg.portal.extraPortals`, so every document using this field was an e
 under `--apply` — after disko. Both are now emitted, and a first-boot unit (`lis-flatpak`) runs
 `flatpak remote-add --if-not-exists flathub …` and then `flatpak install`, which closes the
 missing-remote gap (audit X11): a flatpak app ID resolves against a *remote*, and NixOS configures
-none. Warned as emulated, and as needing the network on first boot.
+none. Warned as emulated, and as needing the network on first boot. `xdg.portal.config.common.default
+= "*"` goes with it: xdg-desktop-portal 1.17 stopped choosing a backend on its own, so without it
+nixpkgs warns during evaluation and a flatpak app's file chooser resolves to nothing on a machine
+with no desktop module of its own. It is the *fallback* file, so a desktop that ships its own
+`configPackages` still wins under its own session.
 ²⁸ `apt-get remove --purge` / `dnf remove` / `zypper rm` / `pacman -Rns` / `apk del` /
 `xbps-remove -Ry` / `emerge --unmerge`, all with `|| true` so failures are swallowed.
 ²⁹ `-pkg` in `%packages` **plus** a `dnf remove`.
@@ -1385,16 +1392,10 @@ not" (`lis2void.py:727-729`). Because that test short-circuits on `flatpak`, `sn
 and picked up by the tracker instead — two channels, same outcome.
 ⁴³ The per-app `flatpak` field now feeds the same `lis-flatpak` first-boot unit as
 `software.flatpak[]` (footnote 27), so an app declared only as a flatpak still arrives.
-⁴⁴ **NixOS refuses these two rather than dropping them**, and only when they are the *sole*
-surviving source for an app; when `preference[]` names an alternative this applier can provide, the
-unusable source is skipped with a warning naming it (footnote 45). snapd needs a writable `/snap`
-and FHS mount namespaces the store does not provide, and nixpkgs ships no snapd service module; an
-AppImage is fetched from the network at install time, which contradicts the seed/offline model
-every LIS applier installs under. 24.11 *does* carry `programs.appimage`
-(`nixos/modules/programs/appimage.nix`), but it only installs the `appimage-run` wrapper and its
-two binfmt registrations — it runs an AppImage that is already on disk and fetches none, so it is
-not a route by which a *named* app could arrive. The refusal now says so rather than implying the
-channel has nothing.
+⁴⁴ **NixOS refuses rather than dropping**, and only when snap is the *sole* surviving source for an
+app; when `preference[]` names an alternative this applier can provide, the unusable source is
+skipped with a warning naming it (footnote 45). snapd needs a writable `/snap` and FHS mount
+namespaces the store does not provide, and nixpkgs ships no snapd service module.
 ⁴⁵ **NixOS is the first applier to arbitrate on `preference[]` instead of hardcoding native-first.**
 The list is walked in order; a source this applier cannot provide is skipped **with a warning** as
 long as a later one works, and refuses only when nothing in the list survives. A declared source
@@ -1407,6 +1408,21 @@ generated system — the only mechanism that works on a unit the configuration n
 route through one collector with `network.ssh`, so the same option asked for twice is one attribute
 and a contradiction **refuses** instead of emitting a duplicate — which in Nix is `attribute already
 defined`, an evaluation failure raised after disko has wiped the disks.
+⁴⁷ **NixOS is the only applier that installs an AppImage at all.** It used to refuse, on the
+grounds that fetching one needs the network at install time — a reason this applier's own
+`software.flatpak[]` (footnote 27) contradicts, since that fetches from Flathub on first boot and
+only warns. Neither spec text carries the offline claim: schema.md §11 asks an unresolvable
+`apps[]` item to warn rather than abort, and delivery.md §7 has the live installer bring up
+networking by default. So the two are now the same mechanism. `programs.appimage.enable` +
+`.binfmt` (both verified on `nixos-24.11`, `nixos/modules/programs/appimage.nix`) bring in
+`appimage-run` and register the two AppImage magics; a first-boot unit `lis-appimage` fetches each
+URL into `/opt/appimages/<name>.AppImage` with `curl`, marker-guarded like the flatpak one; and a
+declarative `pkgs.writeShellScriptBin "<name>"` wrapper puts the app on `PATH` — without it the
+unit would leave a file nothing reaches, and `apps[]` asked for an application, not a download.
+Two shapes still **refuse** (never drop): a value that is not an `http(s)` URL — an AppImage
+resolves against no remote, so the field has to be the file itself — and a name unusable as a file
+name or command. The fetched file is outside the store, so it is neither rolled back nor rebuilt by
+`nixos-rebuild`; the warning says so.
 
 ## 2.11 drivers
 
@@ -1531,12 +1547,12 @@ single most common script hazard.
 | `scripts.post_storage[].source.from` | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ◐⁶³ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ |
 | `scripts.post_storage[].on_failure` | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ✅⁶² | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ |
 | `scripts.post[].interpreter` | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ✅⁶¹ | ❌¹ | ❌¹ | ❌¹ |
-| `scripts.post[].chroot` | ✅²³ | ❌¹⁹ | ❌¹⁹ | ❌¹⁹ | ◐⁵ | ◐⁵⁸ | ◐¹⁹ | ❌⁵⁰ | ❌⁵⁰ |
+| `scripts.post[].chroot` | ✅²³ | ❌¹⁹ | ❌¹⁹ | ❌¹⁹ | ◐⁵ | ✅⁶⁴ | ◐¹⁹ | ❌⁵⁰ | ❌⁵⁰ |
 | `scripts.post[].content` | ◐²⁴ | ✅²⁵ | ✅²⁶ | ✅²⁷ | ⚙²⁸ | ⚙²⁹ | ⚙³⁰ | ⚙⁵³ | ⚙⁵³ |
 | `scripts.post[].source.from` | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ◐⁶³ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ |
 | `scripts.post[].on_failure` | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ✅⁶² | ❌³¹ | ❌¹⁶ | ❌¹⁶ |
 | `scripts.post_install[].interpreter` | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ❌¹ | ✅⁶¹ | ❌¹ | ❌¹ | ❌¹ |
-| `scripts.post_install[].chroot` | ✅²³ | ❌¹⁹ | ❌¹⁹ | ❌¹⁹ | ◐⁵ | ◐⁵⁸ | ◐¹⁹ | ❌⁵⁰ | ❌⁵⁰ |
+| `scripts.post_install[].chroot` | ✅²³ | ❌¹⁹ | ❌¹⁹ | ❌¹⁹ | ◐⁵ | ✅⁶⁴ | ◐¹⁹ | ❌⁵⁰ | ❌⁵⁰ |
 | `scripts.post_install[].content` | ◐²⁴ | ✅³² | ✅³² | ✅³² | ⚙²⁸ | ⚙²⁹ | ⚙³⁰ | ⚙⁵³ | ⚙⁵³ |
 | `scripts.post_install[].source.from` | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ | ◐⁶³ | ⛔¹⁵ | ⛔¹⁵ | ⛔¹⁵ |
 | `scripts.post_install[].on_failure` | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ | ✅⁶² | ❌¹⁶ | ❌¹⁶ | ❌¹⁶ |
@@ -1625,7 +1641,11 @@ quoting).
 ³⁵ Runs in the chroot before unmount, not after.
 ³⁶ Now run on the installer host after `nixos-install` returns and before the machine is
 rebooted, rather than being folded into the activation script (footnote 22 for the mechanism and
-the translate-only warning).
+the translate-only warning). SPEC §13.4 puts the phase *after the unmount*, and `--apply` now
+performs it: when the document declares `pre_reboot`, `/mnt` is unmounted before the bodies run,
+and a busy mount is reported rather than swallowed. A document with no `pre_reboot` hook leaves
+the mount up, which is what `installer.on_finish: stay` means for an operator about to inspect
+the result.
 ³⁷ No reboot is issued at all; runs inline with `post`.
 ³⁸ **Runs unconditionally.** Success is never tested on these columns, Void and Gentoo included.
 A generator should treat `on_success` as an alias for `post` and warn. NixOS is now the exception
@@ -1679,13 +1699,25 @@ first and are moot.
 oneshot that removes itself on first run.
 ⁵⁸ **NixOS answers `chroot` per stage instead of dropping it.** This applier straddles the
 boundary — `pre`, `pre_install`, `post_storage`, `pre_reboot`, `on_success` and `on_error` run on
-the installer host, while `post`, `post_install` and `firstboot` run inside the target — so a
-single applier-wide default cannot be right, and `check_script_fields` is called with
-`honors_chroot=True` so a per-stage table can answer instead. A flag naming the side the stage is
-*not* on **refuses**, quoting that stage's real contract; a flag naming the correct side is
-honoured. PARTIAL rather than YES because the flag can never *move* a stage here — it can only
-agree or contradict. This also repairs the inverted warning of footnote 6, which told `pre` and
-`pre_install` the opposite of the truth.
+the installer host, while `firstboot` runs inside the booted target — so a single applier-wide
+default cannot be right, and `check_script_fields` is called with `honors_chroot=True` so a
+per-stage table can answer instead. A flag naming the side the stage is *not* on **refuses**,
+quoting that stage's real contract; a flag naming the correct side is honoured. A flag that is
+not a boolean at all also **refuses** rather than being read for truth: `schema.json:1307` types
+it boolean, the string `"false"` is truthy in Python, and guessing would have run the hook on the
+side opposite the one the document named. PARTIAL rather than YES for two reasons a generator
+has to act on. First, **SPEC §13 itself fixes these seven environments** — `pre`/`pre_install`
+run before any disk is touched, `post_storage` with the target formatted but empty, `pre_reboot`
+after the unmount, `on_success`/`on_error` in the live installer, `firstboot` when the installer
+is gone — so the one value the stage does not have is an aborted run, not a free choice: do not
+emit the flag unless it matches. Second, on the six installer-host stages nothing about the flag
+reaches the generated configuration; it is honoured by this applier's own `--apply` pipeline
+around the disko and `nixos-install` calls, so a translate-only profile shipped elsewhere carries
+none of it. (`firstboot` is the exception — its side is the first-boot unit, which is native.)
+There is no second side for the flag to select, so it can only agree or contradict —
+unlike `post`/`post_install`, which the spec defines on both sides and which are now ✅ (footnote
+64). This also repairs the inverted warning of footnote 6, which told `pre` and `pre_install` the
+opposite of the truth.
 ⁵⁹ `--apply` only, on the installer host, and — unlike every other column — **actually conditional**:
 the bodies run only when `nixos-install` exits zero. Footnote 38's "success is never tested" no
 longer holds here.
@@ -1720,8 +1752,44 @@ translate time* and base64-embedded in the generated configuration rather than r
 installer mounts the seed at `/run/lis/seed` and runs the applier from
 `/run/lis/seed/appliers/` (`tools/e2e/installer.py:415-436`), so the file is on the filesystem
 when the translation happens. `env:`, `key:` and `https:` still refuse; a path that cannot be read
-refuses **naming the path**; `content` and `source` together refuses; and an entry with neither
-now refuses instead of vanishing. PARTIAL for the schemes that remain refused.
+refuses **naming the path**; `content` and `source` together refuses, quoting the reference; and an
+entry with neither now refuses instead of vanishing. PARTIAL for the schemes that remain refused.
+
+**One thing a generator has to supply itself:** `tools/lis-make-seed` populates only `/lis.json`,
+`/recipes/`, `/appliers/` and `/secrets/` on the seed image, so a `seed:scripts/foo.sh` reference
+names a path the bundled builder does not write. The scheme resolves — `/run/lis/seed/secrets/…`
+is read at apply time on every encrypted e2e recipe — but the file has to be put on the volume. A
+reference to a path that is not there refuses by name before disko runs, never as an empty hook.
+
+**Fetching is required nowhere, and `https://` is not even a legal value.** `delivery.md` §6
+makes exactly one MUST about references — *"Appliers MUST resolve `seed:` references at apply
+time"* — which this column does; its §7 "network delivery" governs how the installer finds the
+**document**, not how a hook body is obtained, and no clause anywhere obliges an applier to
+fetch. `schema.json` settles the rest: `scriptList.items.source` is `$ref: #/$defs/secretRef`,
+whose pattern is `^(file|env|seed|key):.+$`, so the `{ "from": "https://..." }` that `schema.md`
+§13's prose shows **fails schema validation** and cannot appear in a conformant document (§20.2).
+That leaves four legal schemes: `file:` and `seed:` name a file and are resolved; `env:` and
+`key:` name secret material under §2.4 — a §17 key object is a token or a key and has no body to
+run, and an environment variable's value is not a script this applier will bake into the
+world-readable store — so both **refuse, citing that**. The refusal text now carries this whole
+chain rather than "https: is not fetched". The other eight columns' ⛔¹⁵ is therefore correct as
+a *status* but wrong in its reason: the body cannot be fetched from a URL because no document may
+ask for that, not because no applier got around to it.
+⁶⁴ **NixOS honours `chroot` per script on the two phases SPEC §13 defines on both sides.** §13.3:
+*"Runs inside target chroot when `chroot: true` (default `true`), or in host context when
+`chroot: false`."* NixOS has both places, so the array is split rather than applied wholesale:
+entries whose flag is absent or true keep going into `system.activationScripts.lis-post-install`,
+which `nixos-install` runs inside the target through `nixos-enter`'s `activate` call; entries
+whose flag is false are **not emitted into the configuration at all** and run on the installer
+host under `--apply`, immediately after `nixos-install` returns and before `on_success`, with the
+target still mounted at `/mnt`. The default is the spec's own, `true`. Both halves keep the
+entry's real array index in its label and in its diagnostics, and both are resolved at translate
+time, so an unreadable `source`, an unknown `interpreter` or an `on_failure` value §13 does not
+define refuses **before disko touches a disk** — verified: a `chroot: false` entry with
+`interpreter: /bin/nonsense` and one with `on_failure: bogus` produced two refusals and no
+output. The per-user stages stay ◐ (users footnote 68): a `users[].scripts` body runs as an
+account this document creates *inside* the target, and the installer host has no such user, so
+`chroot: false` refuses there. This closes the last of audit X7 for this column.
 
 ## 2.14 desktop
 
@@ -1997,7 +2065,7 @@ Each rule below is stated so a generator can implement it as a pre-flight check.
 | C-6 | Any `network.firewall` object at all installs and enables a firewall on Ubuntu, Debian, Fedora, SUSE and Arch — **even with `enabled: false`** (`lis_common.py:1118` tests the object, not the flag). | To leave the firewall alone, omit the whole `network.firewall` block. NixOS is the only applier that honours `false`. Alpine, Void and Gentoo warn and skip: nothing installed, nothing enabled, no rules. |
 | C-7 | `desktop.*` on a non-`desktop:*` role is accepted by every applier despite `schema.md` §12. | Arch drops `profile_config` so only the chroot commands reach the target; NixOS applies the whole block on a server **and now warns, naming §12**. |
 | C-8 | `storage.snapshots.enabled` never checks that the root filesystem is btrfs — where it is honoured at all. | Validate it yourself; §20.9 requires it and nothing enforces it. Alpine, Void and Gentoo refuse the whole block instead. |
-| C-9 | `scripts.on_success` runs unconditionally on all nine; `scripts.post_storage` runs after the install, not after storage, on all but Fedora. | Treat both as aliases of `post` and warn the user. |
+| C-9 | `scripts.on_success` runs unconditionally on eight; `scripts.post_storage` runs after the install, not after storage, on all but Fedora and NixOS. | Treat both as aliases of `post` and warn the user. **NixOS is the exception on both halves**: `--apply` runs `post_storage` between disko and `nixos-install` and runs `on_success` only when `nixos-install` exits zero, so the seven phases keep the distinct contracts §13 gives them (footnotes 58–60). A translate-only NixOS run emits nothing for either and says so. |
 | C-49 | `users[].admin: true` grants membership of `wheel`/`sudo` and, on most appliers, nothing more — **on Void and Gentoo no `%wheel` sudoers rule is written at all**. | If the account has to escalate unattended, emit `sudo: nopasswd` as well. |
 | C-50 | A `users[]` entry with neither `password.hash` nor `password.locked` refuses on SUSE, Void and Gentoo, and is accepted elsewhere. | Always emit one of the two. |
 
@@ -2114,8 +2182,9 @@ succeeds. **Warnings never fail a run, not even under `--strict`.**
 | `installer.on_error` / `.answers` / `.unattended` | eight; **NixOS answers all three** | **`unattended` is never enforced on the other eight — do not treat it as a consent gate there.** NixOS gates disko on delivery.md §5's two keys (`unattended`, ✅), and refuses rather than drops for `on_error: prompt` (◐) and every `answers` id (⛔). |
 | `installer.on_finish` | all nine except Ubuntu/Debian/Fedora/SUSE/NixOS | **Void powers off unconditionally**, whatever the field says. NixOS now carries the field out after a zero-exit `nixos-install`. |
 | `users[].scripts.post[].*` | all but Gentoo and NixOS | The user-level `post` phase is implemented only by those two. Use `post_install` elsewhere. |
-| `scripts.*[].interpreter` / `.on_failure` | all nine, all phases | Body runs under the stage's shell; failure policy ignored. |
-| `scripts.on_error[].*` | refused on eight; **Gentoo implements it** as a `bash` EXIT trap | |
+| `scripts.*[].interpreter` / `.on_failure` | eight, all phases; **NixOS honours both on every phase** | Body runs under the stage's shell; failure policy ignored. On NixOS the body is written to a file and run under the named interpreter, and `fail`/`continue` decide whether the stage aborts (footnotes 61, 62). |
+| `scripts.*[].source.from` | refused on eight | **NixOS resolves `seed:` and `file:`** at translate time and embeds the body; `env:`/`key:` refuse. No applier fetches over the network, and none has to — `schema.json`'s `secretRef` pattern makes `https://` unrepresentable (footnote 63). |
+| `scripts.on_error[].*` | refused on seven; **Gentoo implements it** as a `bash` EXIT trap, **NixOS** on the `--apply` failure path | |
 | `keys[].id` / `.match` / `.pin_required` | seven, plus Gentoo; **Void refuses the whole section** | The `keys` ↔ `encryption` cross-reference of §17.2 is unimplementable in schema v0.1. |
 
 ## Tier 3 — false warnings (the reverse problem)
@@ -2142,7 +2211,7 @@ higher ❌ means more of it is quietly discarded.
 
 | Distro | ✅ YES | ◐ PARTIAL | ⚙ POST | ⛔ REFUSE | ❌ DROPS | – N/A | ? UNK | **✅+⚙ arrives** | **❌ share** |
 |---|---|---|---|---|---|---|---|---|---|
-| **NixOS** | 130 | 58 | 16 | 23 | 0 | 6 | 0 | **146** | 0% |
+| **NixOS** | 132 | 56 | 17 | 22 | 0 | 6 | 0 | **149** | 0% |
 | **Ubuntu** | 52 | 41 | 33 | 29 | 74 | 4 | 0 | **85** | 32% |
 | **Debian** | 41 | 46 | 34 | 40 | 68 | 4 | 0 | **75** | 29% |
 | **Fedora** | 56 | 40 | 16 | 30 | 86 | 4 | 1 | **72** | 37% |
@@ -2155,7 +2224,7 @@ higher ❌ means more of it is quietly discarded.
 Each row sums to 233. Sorted by ✅+⚙ — the count of leaves whose intent reaches the installed
 machine by any route.
 
-- **NixOS leads on every measure in this table** (130 ✅, 146 arriving, nothing dropped — all three
+- **NixOS leads on every measure in this table** (132 ✅, 149 arriving, nothing dropped — all three
   the best of the nine), which is what the applier's shape predicts: almost anything a LIS document can
   say is expressible as a NixOS option, so most of what used to be `❌` here was never a limit of
   the distro, only a line nobody had written. **No drops remain.** The last six were the five
