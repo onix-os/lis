@@ -221,7 +221,7 @@ refuses (`lis2void.py:180-183`).
 
 | Field | Ubuntu | Debian | Fedora | SUSE | Arch | NixOS | Alpine | Void | Gentoo |
 |---|---|---|---|---|---|---|---|---|---|
-| `storage.wipe` | ◐¹ | ◐² | ◐³ | ✅ | ✅⁴ | ◐³ | ◐⁵ | ⛔⁷¹ | ◐⁷² |
+| `storage.wipe` | ◐¹ | ◐² | ◐³ | ✅ | ✅⁴ | ◐⁹² | ◐⁵ | ⛔⁷¹ | ◐⁷² |
 | `storage.partitions[].disk` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ◐⁶ | ❌⁷³ | ✅ |
 | `storage.partitions[].id` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ◐⁶ | ❌⁷³ | ◐⁷⁴ |
 | `storage.partitions[].role` | ◐⁷ | ✅ | ✅ | ✅ | ✅ | ✅⁸ | ◐⁶ | ✅⁷⁵ | ✅⁷⁵ |
@@ -233,12 +233,12 @@ refuses (`lis2void.py:180-183`).
 | `…partitions[].subvolumes[].name` | ⚙²² | ⚙²³ | ✅ | ◐²⁴ | ✅ | ✅ | ◐²⁵ | ✅⁸³ | ✅⁸³ |
 | `…partitions[].subvolumes[].mountpoint` | ⚙²² | ⚙²³ | ✅ | ✅ | ✅ | ✅ | ◐²⁵ | ✅⁸³ | ✅⁸³ |
 | `…partitions[].subvolumes[].mount_options[]` | ⚙²² | ◐²⁶ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅⁸² | ✅⁸² |
-| `…partitions[].existing.match.partition` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
-| `…partitions[].existing.match.label` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
-| `…partitions[].existing.match.uuid` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
-| `…partitions[].existing.match.fs` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
-| `…partitions[].existing.format` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
-| `…partitions[].existing.resize` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
+| `…partitions[].existing.match.partition` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ◐²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
+| `…partitions[].existing.match.label` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ◐²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
+| `…partitions[].existing.match.uuid` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ◐²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
+| `…partitions[].existing.match.fs` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ◐²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
+| `…partitions[].existing.format` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ◐²⁸ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
+| `…partitions[].existing.resize` | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔²⁷ | ⛔⁹¹ | ⛔²⁷ | ⛔⁸⁴ | ⛔⁸⁴ |
 | `storage.encryption[].id` | ✅ | ◐²⁹ | ✅ | ✅ | ✅ | ✅ | ✅ | ⛔⁸⁵ | ⛔⁸⁶ |
 | `storage.encryption[].over` | ✅ | ✅ | ✅ | ◐³⁰ | ✅ | ✅ | ◐³¹ | ⛔⁸⁵ | ⛔⁸⁶ |
 | `storage.encryption[].type` | ◐³² | ❌³³ | ❌³³ | ✅ | ❌³³ | ✅³⁴ | ❌³³ | ⛔⁸⁵ | ⛔⁸⁶ |
@@ -317,23 +317,45 @@ verbatim.
 ignored.
 ²⁷ The whole `existing.*` subtree refuses: dual-boot adoption is not expressible in any of these
 unattended installers.
-²⁸ **NixOS now refuses with the rest.** It used to skip adoption and warn the leaves as unread —
-a dual-boot document silently became a fresh-install document — and, worse, the skipped partition
-still advanced the per-disk index, so `disko.nix` created `root1` while `hardware.nix` mounted
-`disk-main-root2`: devices that were never created, exit 0. The refusal no longer blames disko
-for the applier's own choice of `--mode destroy,format,mount`. Read out of the **realised**
-`format,mount` script (`nix-build disko/cli.nix --argstr mode format,mount`), that mode does
-leave an existing table alone — `sgdisk --clear` runs only `if ! blkid "$device"` — but it places
-every declared partition by GPT index at start 0 (`sgdisk --new=<index>:0:+<size>`), and when the
-create fails because the index is taken it falls back to `--change-name=<index> --typecode
---partition-guid` over whatever already sits there. Adoption therefore also needs an apply-time
-probe to turn `existing.match` by label/uuid/fs into an index, which this applier does not
-perform. The three leaves now refuse under their own names: `format: true` would need the
-signature wiped from a `preCreateHook` first, because disko guards every `mkfs` with `if !
-(blkid <dev> | grep -q 'TYPE=')`; and `resize` has no disko implementation at all — `resize2fs`,
-`ntfsresize` and `xfs_growfs` occur nowhere in its `lib/` (schema.md §6.2 makes that a MUST
-fail). One more hole is closed with them: `"existing": {}` was falsy, so a malformed adoption
-was created and formatted with no diagnostic; membership decides it now.
+²⁸ **NixOS is the only applier that adopts. `--apply` only** — a match names a partition on the
+machine (schema.md §20.8 puts its resolution at apply time), so a translate-only run refuses,
+saying that the geometry it would have to pin is not in the document. Under `--apply` the applier
+reads the live table through **sysfs and `lsblk` alone** — no partitioner is run on the disk it is
+trying to preserve — resolves each `existing.match` (`partition` by number; `label` and `uuid`
+against both the GPT entry and the filesystem inside it, refusing when the two readings disagree;
+`fs` by type), and requires **exactly one** hit. It then describes **the whole disk** back to
+disko, not just the adopted partitions: an entry that lands on an index something else occupies
+renames and retypes *that* partition, because disko numbers partitions by their position in the
+priority-sorted list (`_index`, `lib/types/gpt.nix:247`) and its create step is `if ! sgdisk
+--new=<index>:<start>:<end> …; then sgdisk --change-name --typecode --partition-guid
+--attributes fi` (`:315-318`). So every partition present gets an entry with its own first and
+last sector, GPT name, partition GUID, type GUID and **attribute flags** pinned — the fallback
+rewrites all four, and `--attributes=<index>:=:0` would otherwise clear the "required"/"no drive
+letter" bits a Windows reserved or recovery partition carries. Partitions the document does not
+mention are emitted as `content = null` placeholders. New partitions are given explicit start and
+end sectors carved out of the largest free region, so nothing relies on sgdisk's "first free
+block" default. With any adoption in play the run switches to `--mode format,mount` (`disko:29-34`)
+and **never falls back** to the legacy `--mode disko`, whose destroy stage would clear the table.
+`format: true` becomes `preCreateHook = "wipefs --all \"$device\""` on the content, which is what
+lets the request reach `mkfs` at all: disko guards every `mkfs` with `if ! (blkid <dev> | grep -q
+'TYPE=')`, and that guard *is* `format: false`. Declaring an `fs` that differs from the one on the
+partition with `format: false` refuses, because the guard would skip the `mkfs` and the mount would
+then be `mount -t <declared>` over the other filesystem. An adopted partition under a LUKS
+container, a volume group, an array or a pool also refuses: those create steps are not held back by
+an existing signature (`mdadm --create … --force`, `zpool create`, `luksFormat` on anything that is
+not already LUKS). A hole in the partition *numbering*, a table with no GPT GUIDs (an MS-DOS
+label), or not enough free space for what is declared each refuse with the numbers. **Proved end to
+end in QEMU** against a Windows-like GPT (ESP + Microsoft reserved with flags `0x8000000000000001`
++ NTFS, then 17.5 GiB free): after `nixos-install` all three partitions kept their sectors, names,
+GUIDs, type codes and attribute flags byte for byte, the NTFS payload and the ESP's
+`bootmgfw.efi` kept their checksums, `systemd-boot` was installed *beside* `/EFI/Microsoft` on the
+adopted ESP, and the new btrfs root came up at index 4 — 0 warnings, 0 refusals, exit 0.
+Two older holes stay closed: `"existing": {}` was falsy, so a malformed adoption was created and
+formatted with no diagnostic (membership decides it now), and the skipped partition used to advance
+the per-disk index so `disko.nix` created `root1` while `hardware.nix` mounted `disk-main-root2`.
+`hardware.nix` names an adopted partition by `/dev/disk/by-partuuid/<its own GUID>`, which is also
+what disko resolves it to once `uuid` is set (`lib/types/gpt.nix:81-90`); the label this applier
+would have written is not on that disk.
 ²⁹ Drives the key path and the wiring, but the mapper name stays whatever partman chooses.
 ³⁰ Must name a partition handle. `over` a RAID array or an LV refuses via
 `check_encryption_emitted`.
@@ -502,6 +524,24 @@ default. A `%` value becomes `zramSwap.memoryPercent` (verified `zramSwap.memory
 an absolute size becomes `zramSwap.memoryMax` with `memoryPercent = 100`, because 24.11's module
 computes `min(percent/100 × RAM, memoryMax)` and leaving the percentage at its 50 default would
 cap an absolute request at half of RAM.
+⁹¹ **NixOS: the one `existing` leaf still refused, and the only one whose reason is a real
+limitation.** Nothing in disko resizes anything — `resize2fs`, `ntfsresize` and `xfs_growfs` occur
+nowhere in its `lib/`. It could be shelled out of a `preCreateHook`, but the filesystem has to be
+shrunk *before* the partition boundary moves, in that order, and this applier has no way to
+confirm the shrink actually reached the requested size before `sgdisk` moves the boundary; a
+partial shrink followed by a moved boundary is the one failure in this whole file that cannot be
+undone. schema.md §6.2 makes "cannot resize the filesystem" a MUST fail, so it fails. An entry
+carrying `resize` is also **not registered as an adoption**, which keeps the whole disk out of the
+emitted layout: a `--lenient` run cannot end up moving a boundary the shrink never reached.
+⁹² **NixOS: `false` is honoured exactly when an `existing` adoption accounts for the disk.**
+With no adoption declared the applier reads no disk, so it refuses as before — it would be
+guessing at what is on the platter. With an adoption resolved (footnote 28) the probe is there, and
+§6.1's other half is then enforced against it: any partition holding a filesystem that no
+`existing` entry adopts **refuses**, naming the device and the filesystem, and telling the operator
+to adopt it or set `wipe: true`. With `wipe: true` *and* an adoption, the same unaccounted
+partition only warns — and is preserved anyway, because adoption forces the non-destroying disko
+mode, so `wipe: true` no longer reaches it. Verified in QEMU: `wipe: false` plus three adopted
+partitions installed alongside a Windows-like GPT without altering it.
 
 ## 2.6 boot
 
@@ -2083,7 +2123,7 @@ Each rule below is stated so a generator can implement it as a pre-flight check.
 | C-17 | A `raid[]` array not consumed by `lvm.devices` or `encryption.over` refuses (`lis_common.py:733`) on Ubuntu, Debian, NixOS and Alpine. | Every declared array must be consumed. |
 | C-18 | Fedora: `storage.partitions[].label` is **silently discarded** when that same partition declares `subvolumes`. | Do not emit both. |
 | C-19 | Ubuntu: two partitions resolving to the same mountpoint (explicitly or via `role`) emit two curtin mount actions, SILENTLY — Ubuntu never calls `resolve_mountpoints`. | Deduplicate mountpoints yourself. §20 requires exactly one `/`. |
-| C-20 | `storage.wipe: false` — refuses on Debian, Fedora, NixOS and Void; emits the invalid `wipe: preserve` on Ubuntu; still partitions from 1MiB on Arch, still mkfs's on Alpine, and on Gentoo keeps the partition table but still creates and formats every declared partition (warned). | There is no working "preserve existing layout" path on any of the nine. |
+| C-20 | `storage.wipe: false` — refuses on Debian, Fedora and Void, and on NixOS **unless the document adopts a partition with `existing`**; emits the invalid `wipe: preserve` on Ubuntu; still partitions from 1MiB on Arch, still mkfs's on Alpine, and on Gentoo keeps the partition table but still creates and formats every declared partition (warned). | **NixOS is now the one working "preserve existing layout" path**, and only under `--apply`, where it reads the live table (footnotes 28, 92). On the other eight there is none. |
 | C-21 | SUSE emits **two mutually exclusive profiles**. `storage.lvm.*`, `storage.raid.*`, `users[].shell`, `users[].groups`, `users[].admin` reach only `autoyast.xml`; `users[].ssh_authorized_keys` and `system.keymap.variant` reach only `profile.json`. | Choosing the wrong output silently loses those fields. The applier warns for lvm/raid but **not** for the user fields. |
 | C-22 | Alpine "simple path": with no `subvolumes`, `raid`, `lvm` or `encryption`, the entire storage layout collapses to `DISKOPTS="-m sys <disk>"`. `target.firmware`, `boot.loader`, `boot.timeout` and every `partitions[]` leaf are read (so no tracker warning) and reach nothing. | For Alpine, either accept `setup-alpine`'s default layout or force the manual path by declaring one of those four features. |
 | C-23 | Alpine: an ESP plus a separate `/boot` collapse — the first partition mounted at `/boot` *or* `/boot/efi` becomes the boot device and the other is formatted and abandoned. | Declare one or the other. |
@@ -2211,7 +2251,7 @@ higher ❌ means more of it is quietly discarded.
 
 | Distro | ✅ YES | ◐ PARTIAL | ⚙ POST | ⛔ REFUSE | ❌ DROPS | – N/A | ? UNK | **✅+⚙ arrives** | **❌ share** |
 |---|---|---|---|---|---|---|---|---|---|
-| **NixOS** | 132 | 56 | 17 | 22 | 0 | 6 | 0 | **149** | 0% |
+| **NixOS** | 132 | 61 | 17 | 17 | 0 | 6 | 0 | **149** | 0% |
 | **Ubuntu** | 52 | 41 | 33 | 29 | 74 | 4 | 0 | **85** | 32% |
 | **Debian** | 41 | 46 | 34 | 40 | 68 | 4 | 0 | **75** | 29% |
 | **Fedora** | 56 | 40 | 16 | 30 | 86 | 4 | 1 | **72** | 37% |
@@ -2233,7 +2273,8 @@ machine by any route.
   its own behaviour to change — it now reboots or powers off as asked, and gates the destructive
   step on delivery.md §5's two consent keys — while `interactive[]`, `answers` and `mirror.country`
   are genuinely unhonourable and therefore refuse. Everything else that cannot be honoured
-  **refuses** rather than dropping: the whole `existing.*` adoption subtree, `snap[]`, hardware-token `match`/`pin_required`,
+  **refuses** rather than dropping: `existing.resize` (the rest of the adoption subtree now arrives,
+  footnote 28), `snap[]`, hardware-token `match`/`pin_required`,
   `registration.*`, and `secure_boot: true` / `uki: true` / a non-`auto` initramfs generator.
 - **The wipe-then-fail class is the thing to keep watching**, and it is now closed structurally
   rather than case by case. This applier is the one where a bad option name is an *evaluation*
@@ -2288,8 +2329,9 @@ machine by any route.
 **Reading these numbers.** ⛔ is not a defect — a refusal is the honest outcome for a feature the
 installer cannot express, and it is strictly safer than ❌. The number to worry about is **❌**,
 and within it the silent subset listed in §4 Tier 1. Note that NixOS's refusal count *fell* again
-(28 → 21) while its drop count fell much further (40 → 6): converting a ❌ to a ⛔ is a legitimate
-improvement — the whole `existing.*` subtree made that move — but most of the movement here was
+(28 → 17) while its drop count fell much further (40 → 0): converting a ❌ to a ⛔ is a legitimate
+improvement — the whole `existing.*` subtree made that move, and five of its six leaves have since
+moved on again, ⛔ → ◐, once the adoption was built (footnote 28) — but most of the movement here was
 ❌ → ✅, i.e. options that existed all along and that nobody had written a line for. The 12
 `source.from` leaves moved the other way, ⛔ → ◐, because the premise of that refusal turned out to
 be false: the seed *is* mounted when the applier runs, so the body can be read at translate time
