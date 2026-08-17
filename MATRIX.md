@@ -334,13 +334,23 @@ rewrites all four, and `--attributes=<index>:=:0` would otherwise clear the "req
 letter" bits a Windows reserved or recovery partition carries. Partitions the document does not
 mention are emitted as `content = null` placeholders. New partitions are given explicit start and
 end sectors carved out of the largest free region, so nothing relies on sgdisk's "first free
-block" default. With any adoption in play the run switches to `--mode format,mount` (`disko:29-34`)
+block" default, **and each one carries `preCreateHook = "wipefs --all \"$device\""`**: `sgdisk
+--new` writes a table entry, not the sectors under it, and with the destroy stage skipped a
+signature an earlier layout left in that free region would satisfy the very guard described below
+— the new root's `mkfs` skipped, the filesystem found there mounted as `/` instead, silently. The
+hook is placed on whichever content node owns the partition, including `lvm_pv` (whose `pvcreate`
+carries the same guard, `lib/types/lvm_pv.nix:42-44`) and `luks` (whose `$device` is the partition,
+not the mapper). Adopted partitions never get it unless `format: true` asks for one.
+With any adoption in play the run switches to `--mode format,mount` (`disko:29-34`)
 and **never falls back** to the legacy `--mode disko`, whose destroy stage would clear the table.
 `format: true` becomes `preCreateHook = "wipefs --all \"$device\""` on the content, which is what
 lets the request reach `mkfs` at all: disko guards every `mkfs` with `if ! (blkid <dev> | grep -q
-'TYPE=')`, and that guard *is* `format: false`. Declaring an `fs` that differs from the one on the
-partition with `format: false` refuses, because the guard would skip the `mkfs` and the mount would
-then be `mount -t <declared>` over the other filesystem. An adopted partition under a LUKS
+'TYPE=')`, and that guard *is* `format: false`. A `format` that is **not a boolean refuses**
+(`schema.json` types it so): this is the one field that decides whether the adopted filesystem is
+kept or wiped, and under a plain truthiness test the string `"false"` — true to Python — would have
+destroyed exactly the data the document asked to keep. Declaring an `fs` that differs from the one
+on the partition with `format: false` refuses, because the guard would skip the `mkfs` and the
+mount would then be `mount -t <declared>` over the other filesystem. An adopted partition under a LUKS
 container, a volume group, an array or a pool also refuses: those create steps are not held back by
 an existing signature (`mdadm --create … --force`, `zpool create`, `luksFormat` on anything that is
 not already LUKS). A hole in the partition *numbering*, a table with no GPT GUIDs (an MS-DOS
@@ -531,8 +541,14 @@ shrunk *before* the partition boundary moves, in that order, and this applier ha
 confirm the shrink actually reached the requested size before `sgdisk` moves the boundary; a
 partial shrink followed by a moved boundary is the one failure in this whole file that cannot be
 undone. schema.md §6.2 makes "cannot resize the filesystem" a MUST fail, so it fails. An entry
-carrying `resize` is also **not registered as an adoption**, which keeps the whole disk out of the
-emitted layout: a `--lenient` run cannot end up moving a boundary the shrink never reached.
+carrying `resize` is also **not registered as an adoption**, so no boundary it names is ever
+emitted. What stops a `--lenient` run there is a separate gate: once any partition declares
+`existing`, the mode for the whole run is `format,mount`, and if an adoption then fails to resolve
+— a `resize`, a match that hit nothing, an unreadable disk — the remaining entries would be
+emitted the ordinary create-everything way, sized rather than pinned, and laid over the live table
+by GPT index. So `--apply` refuses outright when the number of resolved adoptions is less than the
+number declared, **outside `enforce()`**, in the same place and for the same reason as the
+delivery.md §5 consent check: `--lenient` may not wave this one through.
 ⁹² **NixOS: `false` is honoured exactly when an `existing` adoption accounts for the disk.**
 With no adoption declared the applier reads no disk, so it refuses as before — it would be
 guessing at what is on the platter. With an adoption resolved (footnote 28) the probe is there, and
@@ -1383,7 +1399,9 @@ none. Warned as emulated, and as needing the network on first boot. `xdg.portal.
 = "*"` goes with it: xdg-desktop-portal 1.17 stopped choosing a backend on its own, so without it
 nixpkgs warns during evaluation and a flatpak app's file chooser resolves to nothing on a machine
 with no desktop module of its own. It is the *fallback* file, so a desktop that ships its own
-`configPackages` still wins under its own session.
+`configPackages` still wins under its own session. An entry that is not the ID **string**
+`schema.json` requires now refuses by name; it used to reach `shlex.quote()` and end the run in a
+Python traceback, which is neither a translation nor a diagnostic.
 ²⁸ `apt-get remove --purge` / `dnf remove` / `zypper rm` / `pacman -Rns` / `apk del` /
 `xbps-remove -Ry` / `emerge --unmerge`, all with `|| true` so failures are swallowed.
 ²⁹ `-pkg` in `%packages` **plus** a `dnf remove`.
@@ -1459,10 +1477,17 @@ networking by default. So the two are now the same mechanism. `programs.appimage
 URL into `/opt/appimages/<name>.AppImage` with `curl`, marker-guarded like the flatpak one; and a
 declarative `pkgs.writeShellScriptBin "<name>"` wrapper puts the app on `PATH` — without it the
 unit would leave a file nothing reaches, and `apps[]` asked for an application, not a download.
-Two shapes still **refuse** (never drop): a value that is not an `http(s)` URL — an AppImage
-resolves against no remote, so the field has to be the file itself — and a name unusable as a file
-name or command. The fetched file is outside the store, so it is neither rolled back nor rebuilt by
-`nixos-rebuild`; the warning says so.
+**Arbitration is still native-first, so this only fires when the document asks for it.** An item
+spelled `{name, appimage}` installs the *nixpkgs attribute* and warns that the `appimage` source was
+declared but not the one used; the AppImage machinery above appears only when `preference` puts
+`appimage` ahead of `native` (or no native name resolves). A generator that wants the AppImage must
+say `"preference": ["appimage"]`.
+Two shapes are **rejected, never dropped** — a value that is not an `http(s)` URL (an AppImage
+resolves against no remote, so the field has to be the file itself) and a name unusable as a file
+name or command — but which channel they use depends on the same arbitration: with another source
+still available the bad value is a **warning** and that source is installed instead; when
+`preference` leaves nothing else, it is a **refusal** naming the value. The fetched file is outside
+the store, so it is neither rolled back nor rebuilt by `nixos-rebuild`; the warning says so.
 
 ## 2.11 drivers
 
