@@ -229,6 +229,21 @@ def partition_device(disk_id: str, name: str) -> str:
     return f"/dev/disk/by-partlabel/{partition_label(disk_id, name)}"
 
 
+def adopted_device(part: dict) -> str | None:
+    """The device node an adopted partition answers to, or None if not adopted.
+
+    An adopted partition keeps the GPT name it already had, so the label this
+    translator would have written is not on the disk and by-partlabel would name
+    nothing. Its partition GUID is pinned instead, which is also what disko
+    itself resolves the partition to once `uuid` is set
+    (lib/types/gpt.nix:81-90).
+    """
+    info = ADOPTED.get(id(part))
+    if info and GUID.fullmatch(info.get("uuid") or ""):
+        return f"/dev/disk/by-partuuid/{info['uuid']}"
+    return None
+
+
 def partition_mountpoints(storage: dict) -> dict[int, str | None]:
     """Every declared partition's mountpoint, arbitrated, keyed by identity.
 
@@ -318,20 +333,29 @@ def label_args(fs: str, label, where: str) -> list[str]:
 
 
 def fs_content(lines, pad, fs, mountpoint, mount_options, subvolumes,
-               label=None, where="filesystem", extra_subvolumes=()):
-    """Emit the `content = { … }` block for a plain filesystem or swap area."""
+               label=None, where="filesystem", extra_subvolumes=(),
+               pre_create=""):
+    """Emit the `content = { … }` block for a plain filesystem or swap area.
+
+    `pre_create` is shell run in the same subshell immediately before this
+    content's own create step (lib/default.nix:470-473). It carries
+    `existing.format: true` and nothing else: disko will not re-make a
+    filesystem that is already there, so removing the signature first is the
+    only way the request reaches mkfs.
+    """
     if fs in (None, "none"):
         return
     extra = label_args(fs, label, where) if label is not None else []
+    hook = [f"{pad}  preCreateHook = {nix_str(pre_create)};"] if pre_create else []
     if fs == "swap":
-        lines += [f"{pad}content = {{", f"{pad}  type = \"swap\";"]
+        lines += [f"{pad}content = {{", f"{pad}  type = \"swap\";"] + hook
         if extra:
             lines.append(f"{pad}  extraArgs = {nix_list(extra)};")
         lines.append(f"{pad}}};")
         return
     if fs == "btrfs" and (subvolumes or extra_subvolumes):
         lines += [f"{pad}content = {{",
-                  f"{pad}  type = \"btrfs\";",
+                  f"{pad}  type = \"btrfs\";"] + hook + [
                   f"{pad}  extraArgs = {nix_list(['-f'] + extra)};",
                   f"{pad}  subvolumes = {{"]
         for name in extra_subvolumes:
@@ -355,7 +379,7 @@ def fs_content(lines, pad, fs, mountpoint, mount_options, subvolumes,
         lines += [f"{pad}  }};", f"{pad}}};"]
         return
     lines += [f"{pad}content = {{",
-              f"{pad}  type = \"filesystem\";",
+              f"{pad}  type = \"filesystem\";"] + hook + [
               f"{pad}  format = {nix_str('vfat' if fs == 'vfat' else fs)};"]
     if extra:
         lines.append(f"{pad}  extraArgs = {nix_list(extra)};")
@@ -459,7 +483,7 @@ class Topology:
                 continue
             if handle and self.owner_of(handle) is not None:
                 continue    # an aggregate or a pool owns it, directly or through luks
-            if adopted(part):
+            if adopted(part) and id(part) not in ADOPTED:
                 continue    # refused where the layout is rendered
             seen.append((spec_where(part), part, self.mountpoint_of(part)))
         for group in self.lvm:
@@ -483,7 +507,8 @@ class Topology:
                        "`fs` is not declared, so disko would create the partition "
                        "and format nothing while the installed system was told to "
                        "mount it; declare storage.…fs")
-            elif fs in (None, "none") and spec.get("role") not in ("raw", None):
+            elif (fs in (None, "none") and spec.get("role") not in ("raw", None)
+                    and id(spec) not in ADOPTED):
                 warn(f"{where}: role {spec.get('role')!r} with no `fs` — the "
                      "partition is created but never formatted and nothing mounts "
                      "it; declare fs: none to say so deliberately")
@@ -525,7 +550,7 @@ class Topology:
         names = partition_names(self.storage)
         for part in self.storage.get("partitions", []) or []:
             if part.get("id") == handle:
-                return partition_device(*names[id(part)])
+                return adopted_device(part) or partition_device(*names[id(part)])
         for array in self.raid:
             if array["name"] == handle:
                 return f"/dev/md/{handle}"
@@ -552,7 +577,8 @@ class Topology:
             return self.consumer.get(crypt["id"])
         return self.consumer.get(handle)
 
-    def emit_content(self, lines: list, pad: str, handle: str, spec: dict) -> None:
+    def emit_content(self, lines: list, pad: str, handle: str, spec: dict,
+                     pre_create: str = "") -> None:
         """Emit the content block for `handle`, wrapping in luks when declared."""
         crypt = self.luks_over.get(handle)
         inner_handle = crypt["id"] if crypt else handle
@@ -584,11 +610,12 @@ class Topology:
                     warn(f"encryption '{crypt['id']}': unlock method {method!r} must be "
                          "enrolled with systemd-cryptenroll after installation")
             pad += "  "
-        self.emit_layer(lines, pad, inner_handle, spec)
+        self.emit_layer(lines, pad, inner_handle, spec, pre_create=pre_create)
         if crypt:
             lines.append(f"{pad[:-2]}}};")
 
-    def emit_layer(self, lines: list, pad: str, handle: str, spec: dict) -> None:
+    def emit_layer(self, lines: list, pad: str, handle: str, spec: dict,
+                   pre_create: str = "") -> None:
         owner = self.consumer.get(handle)
         if owner and owner[0] == "lvm_pv":
             lines += [f"{pad}content = {{",
@@ -611,7 +638,8 @@ class Topology:
             fs_content(lines, pad, fs, mp, self.mount_options_of(spec),
                        spec.get("subvolumes", []), label=spec.get("label"),
                        where=spec_where(spec, handle),
-                       extra_subvolumes=self.extra_subvolumes(spec, fs, mp))
+                       extra_subvolumes=self.extra_subvolumes(spec, fs, mp),
+                       pre_create=pre_create)
 
     def extra_subvolumes(self, spec: dict, fs, mountpoint) -> tuple:
         """Subvolumes disko must create that no `subvolumes[]` entry declares.
@@ -793,12 +821,254 @@ def adopted(part: dict) -> bool:
     return "existing" in part
 
 
-def refuse_adoption(part: dict, where: str) -> None:
-    """Turn down one `existing` block, per declared sub-field (schema.md §6.2).
+# resolve_adoptions() fills these two under --apply and leaves them empty
+# everywhere else: id(partition entry) -> the live partition it adopts, and disk
+# id -> that disk's whole probed table. schema.md §20.8 puts the resolution at
+# apply time because a match names a partition on the machine; a translation
+# with no machine in front of it has no geometry to pin, which is what makes
+# adoption refuse there instead of guessing one.
+ADOPTED: dict[int, dict] = {}
+PROBED: dict[str, dict] = {}
+PROBE_RAN = False
+# Set by adoption_plan(): this run has to keep something, so main() must not
+# hand disko a mode whose first stage clears the partition table.
+PRESERVING = False
 
-    Every leaf gets its own reason because they fail for different reasons:
-    the match selectors have no disko equivalent, `format` fights disko's
-    guard, and `resize` has no implementation anywhere in disko.
+# GPT partitions are aligned to 1 MiB by every tool that writes one, and sgdisk
+# defaults to it; new partitions placed into free space follow the same rule so
+# the table this translator writes looks like the table it found.
+ALIGN_BYTES = 1024 * 1024
+
+GUID = re.compile(r"[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}")
+
+MATCH_KEYS = ("partition", "label", "uuid", "fs")
+
+
+def _sysfs_int(path: pathlib.Path) -> int | None:
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def lsblk_identity(path: str) -> dict[str, dict] | str:
+    """Each partition's GPT and filesystem identity, or why it could not be read.
+
+    lsblk only reads. That is the point: the probe that exists to preserve a
+    foreign layout must not be able to alter it, so nothing here — and nothing
+    in probe_disk() — opens the disk for writing or shells a partitioner.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["lsblk", "-P", "-o",
+             "NAME,PATH,PARTUUID,PARTLABEL,PARTTYPE,FSTYPE,LABEL,UUID", path],
+            capture_output=True, text=True, check=True).stdout
+    except Exception as err:  # noqa: BLE001 — no lsblk means no adoption
+        return f"lsblk cannot read {path}: {err}"
+    table: dict[str, dict] = {}
+    for line in out.splitlines():
+        fields = dict(re.findall(r'([A-Z]+)="([^"]*)"', line))
+        node = fields.get("PATH") or (f"/dev/{fields['NAME']}"
+                                      if fields.get("NAME") else "")
+        if not node:
+            continue
+        table[node] = {"uuid": fields.get("PARTUUID", "").lower(),
+                       "label": fields.get("PARTLABEL", ""),
+                       "typecode": fields.get("PARTTYPE", "").upper(),
+                       "fs": fields.get("FSTYPE", "").lower(),
+                       "fslabel": fields.get("LABEL", ""),
+                       "fsuuid": fields.get("UUID", "").lower(),
+                       "attributes": None}
+    # A separate call, because an lsblk too old to know PARTFLAGS fails the whole
+    # -o list: asked on its own, its absence costs the attribute flags and a
+    # warning rather than the entire probe.
+    try:
+        flags = subprocess.run(["lsblk", "-P", "-o", "PATH,PARTFLAGS", path],
+                               capture_output=True, text=True, check=True).stdout
+    except Exception:  # noqa: BLE001 — reported by the caller as unknown flags
+        return table
+    for line in flags.splitlines():
+        fields = dict(re.findall(r'([A-Z]+)="([^"]*)"', line))
+        entry = table.get(fields.get("PATH", ""))
+        if entry is None:
+            continue
+        raw = fields.get("PARTFLAGS", "")
+        try:
+            # GPT attributes are a 64-bit field; disko takes the set bit numbers
+            # (lib/types/gpt.nix, `attributes`).
+            value = int(raw, 0) if raw else 0
+        except ValueError:
+            continue
+        entry["attributes"] = [bit for bit in range(64) if value >> bit & 1]
+    return table
+
+
+def probe_disk(path: str) -> dict | str:
+    """One disk's live partition table, read through sysfs and lsblk only."""
+    base = os.path.realpath(path).rsplit("/", 1)[-1]
+    root = pathlib.Path("/sys/class/block") / base
+    if not root.is_dir():
+        return f"{path} is not a block device on this machine ({root} is absent)"
+    logical = _sysfs_int(root / "queue" / "logical_block_size") or 512
+    span = _sysfs_int(root / "size")
+    if not span:
+        return f"{path} reports no size in sysfs"
+    identity = lsblk_identity(path)
+    if isinstance(identity, str):
+        return identity
+    sectors = span * 512 // logical
+    parts = []
+    for child in sorted(root.iterdir()):
+        number = _sysfs_int(child / "partition")
+        if not number:
+            continue
+        start, length = _sysfs_int(child / "start"), _sysfs_int(child / "size")
+        if start is None or not length:
+            return f"partition {number} of {path} reports no geometry in sysfs"
+        # sysfs counts in 512-byte units whatever the device's logical sector
+        # is, and sgdisk counts in logical sectors: on a 4Kn disk the two are a
+        # factor of eight apart, and a start passed through unconverted would
+        # place a new partition inside an existing one.
+        start, length = start * 512 // logical, length * 512 // logical
+        node = f"/dev/{child.name}"
+        parts.append(dict({"number": number, "device": node, "start": start,
+                           "end": start + length - 1, "sectors": length},
+                          **identity.get(node, {})))
+    parts.sort(key=lambda p: p["number"])
+    # The secondary GPT sits at the end of the disk — one header plus a 128-entry
+    # array — so the last sector a partition may occupy is not the last sector.
+    reserve = -(-128 * 128 // logical) + 1
+    return {"path": path, "logical": logical, "sectors": sectors,
+            "first": 1 + reserve, "last": sectors - 1 - reserve, "parts": parts}
+
+
+def describe_probe(probe: dict) -> str:
+    """The live table as a diagnostic names it back to the operator."""
+    return ", ".join(
+        f"{p['number']}:{p.get('fs') or 'no filesystem'}"
+        f":{p.get('label') or p.get('fslabel') or 'unnamed'}"
+        for p in probe["parts"]) or "no partitions"
+
+
+def match_existing(match: dict, probe: dict, where: str) -> dict | None:
+    """The one live partition an `existing.match` names, or None with a refusal.
+
+    schema.md §20.8: a match MUST resolve to exactly one partition. `label` and
+    `uuid` are compared against both the GPT entry and the filesystem inside it,
+    because the document says only "label" and both readings are in use; where
+    the two readings disagree the candidate set has more than one member and the
+    ambiguity is refused rather than resolved on the operator's behalf.
+    """
+    if unknown := sorted(set(match) - set(MATCH_KEYS)):
+        refuse(f"{where}: storage.partitions[].existing.match {unknown} — the "
+               "schema allows partition, label, uuid and fs only (schema.md §6.2)")
+        return None
+    if not match:
+        refuse(f"{where}: storage.partitions[].existing.match is empty — with no "
+               "selector every partition on the disk matches, and schema.md "
+               "§20.8 requires exactly one")
+        return None
+    candidates = list(probe["parts"])
+    if "partition" in match:
+        number = match["partition"]
+        if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+            refuse(f"{where}: existing.match.partition {number!r} is not a "
+                   "partition number (a positive integer)")
+            return None
+        candidates = [p for p in candidates if p["number"] == number]
+    if "label" in match:
+        want = match["label"]
+        candidates = [p for p in candidates
+                      if want in (p.get("label"), p.get("fslabel"))]
+    if "uuid" in match:
+        want = str(match["uuid"]).lower()
+        candidates = [p for p in candidates
+                      if want in (p.get("uuid"), p.get("fsuuid"))]
+    if "fs" in match:
+        want = str(match["fs"]).lower()
+        candidates = [p for p in candidates if (p.get("fs") or "") == want]
+    if len(candidates) == 1:
+        return candidates[0]
+    asked = ", ".join(f"{key}={match[key]!r}" for key in MATCH_KEYS if key in match)
+    refuse(f"{where}: existing.match ({asked}) resolves to {len(candidates)} "
+           f"partitions on {probe['path']}, not one (schema.md §20.8). That disk "
+           f"carries: {describe_probe(probe)}")
+    return None
+
+
+def resolve_adoptions(doc: dict) -> None:
+    """Resolve every `existing.match` against the live disks. --apply only.
+
+    Everything the layout needs — the GPT index, the exact first and last
+    sector, the partition GUID and the partition name to keep — comes from here.
+    A run that cannot read a disk adopts nothing on it and says so.
+    """
+    global PROBE_RAN, PRESERVING
+
+    PROBE_RAN = True
+    storage = doc.get("storage") or {}
+    partitions = storage.get("partitions") or []
+    if not any(adopted(part) for part in partitions):
+        return
+    # Set on the *declaration*, not on a successful resolution. Every way an
+    # adoption can fail below ends in a refusal, and a refusal is fatal unless
+    # the operator passes --lenient — but a lenient run of a document that asked
+    # to keep a partition must still not be the run that clears the table.
+    PRESERVING = True
+    disks = storage.get("disks", []) or (doc.get("target", {}) or {}).get("disks", [])
+    paths = {disk["id"]: (disk.get("match", {}) or {}).get("path")
+             for disk in disks if disk.get("id")}
+    for disk_id in sorted({part.get("disk") for part in partitions
+                           if adopted(part) and part.get("disk")}):
+        path = paths.get(disk_id)
+        if not path:
+            continue        # a disk with no match.path is refused in render_disko
+        probe = probe_disk(path)
+        if isinstance(probe, str):
+            refuse(f"disk '{disk_id}': storage.partitions[].existing needs the "
+                   f"live partition table of {path}, and this machine cannot "
+                   f"produce it: {probe}")
+            continue
+        PROBED[disk_id] = probe
+
+    for part in partitions:
+        if not adopted(part):
+            continue
+        where = f"partition {part.get('id') or part.get('role') or '?'!r}"
+        existing = part.get("existing")
+        if not isinstance(existing, dict) or not isinstance(existing.get("match"), dict):
+            continue        # a malformed block is refused in refuse_adoption()
+        probe = PROBED.get(part.get("disk"))
+        if probe is None:
+            continue
+        if "resize" in existing:
+            # Not registered as an adoption: refuse_adoption() states why a
+            # resize cannot be honoured, and leaving the entry unresolved keeps
+            # the partition out of the emitted layout entirely, so a --lenient
+            # run cannot end up moving a boundary the shrink never reached.
+            continue
+        found = match_existing(existing["match"], probe, where)
+        if found is None:
+            continue
+        clash = [other for other, taken in ADOPTED.items()
+                 if taken["device"] == found["device"]]
+        if clash:
+            refuse(f"{where}: existing.match resolves to {found['device']}, which "
+                   "another partition entry in this document already adopts — two "
+                   "entries describing one partition cannot both be honoured")
+            continue
+        ADOPTED[id(part)] = dict(found, disk=part.get("disk"))
+        consume(existing["match"])
+
+
+def refuse_adoption(part: dict, where: str) -> None:
+    """Turn down one `existing` block that adoption could not resolve.
+
+    Three cases reach here, and they fail for different reasons: a malformed
+    block, a translation with no machine to read, and `resize` — which no amount
+    of probing makes safe.
     """
     existing = part.get("existing") or {}
     if not isinstance(existing, dict):
@@ -806,47 +1076,359 @@ def refuse_adoption(part: dict, where: str) -> None:
         # schema error, and reading it as one would crash here rather than
         # name the partition the document wanted kept.
         refuse(f"{where}: storage.partitions[].existing must be an object, "
-               f"not {_shape(existing)} — this translator adopts "
-               "nothing either way, but a malformed adoption cannot even be "
-               "reported against its declared leaves (schema.md §6.2)")
+               f"not {_shape(existing)} — a malformed adoption cannot be "
+               "resolved against the disk, nor reported against its declared "
+               "leaves (schema.md §6.2)")
         return
     match = existing.get("match")
     match = match if isinstance(match, dict) else {}
     leaves = [f"match.{key}" for key in sorted(match)]
     leaves += [key for key in ("format", "resize") if key in existing]
-    refuse(f"{where}: storage.partitions[].existing "
-           f"({', '.join(leaves) or 'empty'}) — this translator adopts "
-           "nothing. It renders the whole table and runs disko in "
-           "destroy,format,mount, which clears the disk before anything "
-           "could be kept. That mode is this translator's choice, not a "
-           "disko limit — but disko places a partition by GPT index and a "
-           "start of 0, the first free sector (realised format,mount "
-           "script: `sgdisk --new=<index>:0:+<size>`, falling back to "
-           "`--change-name=<index> --typecode --partition-guid` over "
-           "whatever already sits at that index when the create fails). "
-           "existing.match by partition number, label, uuid or fs "
-           "therefore needs an apply-time probe of the live disk first, "
-           "and this translator performs none (schema.md §6.2, §20.8: a "
-           "match MUST resolve to exactly one partition)")
-    if existing.get("format"):
-        refuse(f"{where}: storage.partitions[].existing.format: true — disko "
-               "guards every mkfs with `if ! (blkid <dev> | grep -q "
-               "'TYPE=')` (lib/types/filesystem.nix _create), so it declines "
-               "to re-make a filesystem that is already there; re-formatting "
-               "an adopted partition needs the signature wiped from a "
-               "preCreateHook first (lib/default.nix:438)")
+    if not PROBE_RAN:
+        refuse(f"{where}: storage.partitions[].existing "
+               f"({', '.join(leaves) or 'empty'}) — adopting a partition means "
+               "describing it to disko exactly as it already is: its GPT index, "
+               "its first and last sector, its partition GUID and its partition "
+               "name, because disko's create step is `if ! sgdisk "
+               "--new=<index>:<start>:<end> …; then sgdisk --change-name=<index> "
+               "--typecode --partition-guid fi` (lib/types/gpt.nix:315-318) and "
+               "an entry pinned to anything else renames and retypes whatever "
+               "occupies that index. None of it is knowable from the document, "
+               "so this translator resolves an adoption only under --apply, "
+               "where it reads the live table (schema.md §6.2, §20.8: a match "
+               "MUST resolve to exactly one partition, at apply time)")
+    elif "resize" not in existing:
+        # The reason is already on the record — the match resolved to no
+        # partition or to several, the probe failed, or the disk's table could
+        # not be described with this entry in it. Saying so again here would
+        # duplicate it; saying nothing at all would drop the field, so this
+        # states the outcome and points at the reason.
+        refuse(f"{where}: storage.partitions[].existing "
+               f"({', '.join(leaves) or 'empty'}) was not adopted — the step "
+               "that declined it named the reason above, and nothing on this "
+               "disk is created while an adoption on it is unresolved")
     if existing.get("resize"):
         refuse(f"{where}: storage.partitions[].existing.resize "
-               f"{existing['resize']!r} — disko cannot resize: the whole of "
-               "its lib/ mentions no resize2fs, ntfsresize or xfs_growfs, "
-               "and nothing in this translator shells one out from a "
-               "preCreateHook, so the neighbouring partitions would be laid "
-               "over data still occupying that space (schema.md §6.2: an "
-               "applier that cannot resize the filesystem MUST fail)")
+               f"{existing['resize']!r} — nothing in disko resizes anything: its "
+               "whole lib/ mentions no resize2fs, ntfsresize or xfs_growfs, and "
+               "the filesystem must be shrunk before the partition is, in that "
+               "order, or the tail of the data is outside the partition that "
+               "holds it. A preCreateHook could shell ntfsresize out, but this "
+               "translator has no way to verify the shrink succeeded before "
+               "sgdisk moves the boundary, and a partial shrink is the one "
+               "failure that cannot be undone (schema.md §6.2: an applier that "
+               "cannot resize the filesystem MUST fail)")
     # The refusals are the answer for every leaf under `existing`; without
     # this the birth certificate also reports each one as an unnoticed field,
     # which reads as a second, softer verdict.
     consume(part["existing"])
+
+
+def size_sectors(size, logical: int, where: str) -> int | None:
+    """A LIS absolute size in logical sectors. None means "the rest"."""
+    if size in (None, "rest", "100%"):
+        return None
+    if isinstance(size, str) and re.fullmatch(r"[0-9]{1,3}%", size):
+        refuse(f"{where}: size {size!r} on a disk that keeps an existing "
+               "partition — what is available is the free space, not the disk, "
+               "so a percentage of the disk is not what the document asked for; "
+               "use an absolute size or \"rest\"")
+        return None
+    mib = size_mib(size, where)
+    return None if mib is None else mib * 1024 * 1024 // logical
+
+
+def free_regions(probe: dict, align: int) -> list[tuple[int, int]]:
+    """The gaps in a probed table, aligned, largest first."""
+    cursor = probe["first"]
+    gaps = []
+    for part in sorted(probe["parts"], key=lambda p: p["start"]):
+        if part["start"] > cursor:
+            gaps.append((cursor, part["start"] - 1))
+        cursor = max(cursor, part["end"] + 1)
+    if cursor <= probe["last"]:
+        gaps.append((cursor, probe["last"]))
+    out = []
+    for start, end in gaps:
+        start += (-start) % align
+        if start <= end:
+            out.append((start, end))
+    out.sort(key=lambda gap: gap[1] - gap[0], reverse=True)
+    return out
+
+
+def adoption_layer(part: dict, topology: Topology) -> str | None:
+    """The disko content type an adopted partition would be built into.
+
+    Only a filesystem, a swap area or nothing can be adopted. Every other
+    content type creates unconditionally or nearly so: `mdadm --create … --force`
+    runs whenever /dev/md/<name> is absent (lib/types/mdadm.nix:64-71) and
+    `zpool create` the same, while luks re-runs `luksFormat` on any device that
+    is not already LUKS and lvm_pv skips `pvcreate` on a device that has any
+    filesystem at all — which leaves the volume group with no physical volume.
+    """
+    handle = part.get("id") or ""
+    if crypt := topology.luks_over.get(handle):
+        return f"the LUKS container '{crypt['id']}' declared over it"
+    if owner := topology.consumer.get(handle):
+        kind, name = owner
+        return {"mdraid": f"the raid array '{name}'",
+                "lvm_pv": f"the volume group '{name}'",
+                "zfs": f"the zpool '{name}'"}.get(kind, f"{kind} '{name}'")
+    if handle in topology.spare_handles:
+        return "a raid hot spare, which mdadm --add writes a superblock onto"
+    return None
+
+
+def adopted_format_hook(part: dict, probed: dict, topology: Topology) -> str:
+    """Reconcile `existing.format` with what the adopted partition already holds.
+
+    disko guards every mkfs with `if ! (blkid <dev> | grep -q 'TYPE=')`
+    (lib/types/filesystem.nix _create; swap and btrfs the same shape), so a
+    filesystem that is already there is never re-made — which is precisely
+    `format: false`. `format: true` is the other half of that guard: the
+    signature is removed first, from the content's own preCreateHook, which runs
+    in the same subshell immediately before it (lib/default.nix:470-473).
+    """
+    existing = part.get("existing") or {}
+    where = f"partition {part.get('id') or part.get('role')!r}"
+    fs = topology.fs_of(part)
+    if existing.get("format"):
+        if fs in (None, "none"):
+            refuse(f"{where}: existing.format: true asks for the adopted "
+                   "partition to be re-made, and the entry declares no `fs` to "
+                   "re-make it as (schema.md §6.2)")
+            return ""
+        warn(f"{where}: existing.format: true — the {probed.get('fs') or 'empty'} "
+             f"filesystem on {probed['device']} is replaced with a fresh {fs}. "
+             "The partition itself, its GPT name and its partition GUID are kept")
+        return 'wipefs --all "$device"'
+    if fs in (None, "none"):
+        return ""
+    if not probed.get("fs"):
+        warn(f"{where}: adopted {probed['device']} holds no filesystem and the "
+             f"entry declares fs {fs!r} with existing.format false — disko's mkfs "
+             "guard passes on a partition with no signature, so one is created "
+             "there; nothing is overwritten, because there was nothing to keep")
+        return ""
+    if probed["fs"] != fs:
+        refuse(f"{where}: adopted {probed['device']} holds a {probed['fs']} "
+               f"filesystem and the entry declares fs {fs!r} with "
+               "existing.format false. disko will not re-make a filesystem that "
+               f"is already there, so the mount would be `mount -t {fs}` over "
+               f"{probed['fs']} and the install would stop at it — declare "
+               f"existing.format: true to replace it, or fs: {probed['fs']!r} to "
+               "use it as it stands")
+    return ""
+
+
+def adoption_plan(disk_id: str, disk_parts: list[dict], names: dict,
+                  topology: Topology, bios_grub: str | None,
+                  wipe: bool) -> list[dict] | None:
+    """How one disk's GPT must be described so disko keeps what is on it.
+
+    Every partition on the disk gets an entry, not only the adopted ones. disko
+    addresses a partition by its position in the priority-sorted list
+    (`_index`, lib/types/gpt.nix:247), and its create step falls back to
+    `sgdisk --change-name=<index> --typecode --partition-guid` when `--new`
+    cannot have the range — so an entry landing on an index that something else
+    occupies renames and retypes *that* partition, and the mkfs and the mount
+    that follow are then aimed at it. Declaring the untouched partitions as
+    pinned placeholders is what keeps the indices lined up.
+
+    Returns None when this disk adopts nothing, which leaves the ordinary
+    create-everything path in charge of it.
+    """
+    adoptions = {id(part): ADOPTED[id(part)]
+                 for part in disk_parts if id(part) in ADOPTED}
+    if not adoptions:
+        return None
+    if any(adopted(part) and id(part) not in adoptions for part in disk_parts):
+        # One entry on this disk asked to adopt and could not be resolved, so
+        # the indices this plan would pin are not the whole table. Hand the disk
+        # back: the ordinary path refuses every adopted entry on it by name.
+        return None
+    probe = PROBED.get(disk_id)
+    if probe is None:
+        return None             # refused in resolve_adoptions()
+    live, logical = probe["parts"], probe["logical"]
+    align = max(ALIGN_BYTES // logical, 1)
+    numbers = [p["number"] for p in live]
+    if numbers != list(range(1, len(numbers) + 1)):
+        refuse(f"disk '{disk_id}': the partition numbers on {probe['path']} are "
+               f"{numbers}, which leaves an unused slot. disko addresses a "
+               "partition by its position in the priority-sorted list, so a "
+               "table with a gap cannot be described without moving everything "
+               "after the gap into a different slot (lib/types/gpt.nix:247)")
+        return None
+    for part in disk_parts:
+        if id(part) not in adoptions:
+            continue
+        if layer := adoption_layer(part, topology):
+            refuse(f"partition {part.get('id') or part.get('role')!r}: adopted "
+                   f"through `existing`, and {layer} is built on top of it. "
+                   "That layer's create step is not held back by an existing "
+                   "signature the way a filesystem's mkfs is — `mdadm --create "
+                   "… --force` and `zpool create` run whenever the array or pool "
+                   "is absent, and luks re-runs luksFormat on any device that is "
+                   "not already LUKS — so the partition would be adopted and "
+                   "then overwritten. Adopt a partition into a filesystem, a "
+                   "swap area or nothing at all")
+            return None
+
+    claimed = {info["number"]: part for part in disk_parts
+               if (info := adoptions.get(id(part))) is not None}
+    taken_names = {names[id(part)][1] for part in disk_parts}
+    if bios_grub:
+        taken_names.add(bios_grub)
+
+    entries: list[dict] = []
+    for probed in live:
+        part = claimed.get(probed["number"])
+        if not GUID.fullmatch(probed.get("uuid") or ""):
+            refuse(f"disk '{disk_id}': partition {probed['number']} of "
+                   f"{probe['path']} has no GPT partition GUID "
+                   f"({probed.get('uuid') or 'none'!r}) — an MS-DOS table has no "
+                   "per-partition GUID and disko writes GPT, so the partition "
+                   "cannot be described back to it unchanged")
+            return None
+        if not (probed.get("typecode") or "") or not GUID.fullmatch(probed["typecode"]):
+            refuse(f"disk '{disk_id}': partition {probed['number']} of "
+                   f"{probe['path']} reports type code "
+                   f"{probed.get('typecode') or 'none'!r}, which is not a GPT "
+                   "partition type GUID")
+            return None
+        if part is None:
+            name = f"lis-keep-{probed['number']}"
+            while name in taken_names:
+                name = "lis_" + name
+            taken_names.add(name)
+            if probed.get("fs"):
+                held = (f"partition {probed['number']} of {probe['path']} holds a "
+                        f"{probed['fs']} filesystem and no `existing` entry in "
+                        "this document adopts it")
+                if wipe:
+                    warn(f"disk '{disk_id}': {held}. Because another partition on "
+                         "this disk is adopted, disko runs without its destroy "
+                         "stage, so it is preserved anyway — storage.wipe: true "
+                         "does not reach it")
+                else:
+                    refuse(f"disk '{disk_id}': {held} — schema.md §6.1 requires "
+                           "an applier to fail with storage.wipe: false when an "
+                           "owned disk holds data no adoption accounts for. Add "
+                           "an `existing` entry naming it (a match with no `fs` "
+                           "and no mountpoint keeps it untouched), or set "
+                           "storage.wipe: true")
+            hook = ""
+        else:
+            name = names[id(part)][1]
+            hook = adopted_format_hook(part, probed, topology)
+            if part.get("size"):
+                warn(f"partition {part.get('id') or part.get('role')!r}: size "
+                     f"{part['size']!r} is not applied to an adopted partition — "
+                     f"{probed['device']} keeps the "
+                     f"{probed['sectors'] * logical // 1024 ** 2} MiB it already "
+                     "has. Changing it is existing.resize, which this translator "
+                     "refuses")
+        if probed.get("attributes") is None:
+            # disko's create resets the attribute field before setting the bits
+            # it was given (`--attributes=<index>:=:0`), so a flag it was not
+            # told about is cleared: on a Windows recovery partition that is the
+            # difference between hidden and given a drive letter.
+            warn(f"disk '{disk_id}': the GPT attribute flags of partition "
+                 f"{probed['number']} on {probe['path']} could not be read "
+                 "(lsblk reported no PARTFLAGS), and disko's create resets the "
+                 "attribute field of every partition it names — any flag that "
+                 "partition carries is cleared")
+        entries.append({"name": name, "priority": probed["number"],
+                        "start": str(probed["start"]), "end": str(probed["end"]),
+                        "type": probed["typecode"], "label": probed.get("label") or "",
+                        "uuid": probed["uuid"], "part": part, "probed": probed,
+                        "attributes": probed.get("attributes") or [], "hook": hook})
+
+    new = [part for part in disk_parts if id(part) not in adoptions]
+    if bios_grub:
+        new.insert(0, None)     # the 1 MiB BIOS boot partition, synthesised
+    if new:
+        regions = free_regions(probe, align)
+        if not regions:
+            refuse(f"disk '{disk_id}': {len(new)} partition(s) to create and no "
+                   f"free space left on {probe['path']} — its "
+                   f"{len(live)} existing partitions fill it")
+            return None
+        start, limit = regions[0]
+        for spare_start, spare_end in regions[1:]:
+            if (spare_end - spare_start + 1) * logical >= 1024 ** 3:
+                warn(f"disk '{disk_id}': {(spare_end - spare_start + 1) * logical // 1024 ** 2} "
+                     f"MiB of free space between the existing partitions is left "
+                     "unused; the new partitions are laid out consecutively in "
+                     "the largest free region so their GPT indices follow the "
+                     "ones already there")
+        cursor = start
+        for position, part in enumerate(new):
+            if part is None:
+                name, want, spec_size = bios_grub, ALIGN_BYTES // logical, "1MiB"
+            else:
+                name = names[id(part)][1]
+                where = f"partition {part.get('id') or part.get('role') or '?'!r}"
+                spec_size = part.get("size")
+                want = size_sectors(spec_size, logical, where)
+            if want is None:
+                if part is not new[-1]:
+                    refuse(f"partition {part.get('id') or part.get('role')!r}: "
+                           f"size {spec_size!r} takes what is left of the free "
+                           "region, so nothing declared after it on this disk has "
+                           "anywhere to go — put it last, or give it a size")
+                    return None
+                end = limit
+            else:
+                end = cursor + want - 1
+            if end > limit or cursor > limit:
+                refuse(f"disk '{disk_id}': partition {name!r} needs "
+                       f"{(end - cursor + 1) * logical // 1024 ** 2} MiB at sector "
+                       f"{cursor}, and the free region on {probe['path']} ends at "
+                       f"{limit} — {(limit - cursor + 1) * logical // 1024 ** 2} "
+                       "MiB is left. The existing partitions cannot be moved "
+                       "aside without destroying them")
+                return None
+            entries.append({"name": name, "priority": len(live) + 1 + position,
+                            "start": str(cursor), "end": str(end),
+                            "type": "EF02" if part is None else None,
+                            "label": partition_label(disk_id, name),
+                            "uuid": None, "part": part, "probed": None,
+                            "attributes": [], "hook": ""})
+            cursor = end + 1
+            cursor += (-cursor) % align
+
+    return entries
+
+
+def emit_partition_content(out: list, pad: str, part: dict, topology: Topology,
+                           pre_create: str = "") -> None:
+    """The `content` block under one partition entry, ESP convention included.
+
+    One function for both layouts — the create-everything one and the adopting
+    one — so an ESP is described the same way whether disko is making it or
+    finding it.
+    """
+    where = f"partition {part.get('id') or part.get('role') or '?'!r}"
+    if part.get("role") == "esp":
+        out += [f"{pad}content = {{",
+                f"{pad}  type = \"filesystem\";"]
+        if pre_create:
+            out.append(f"{pad}  preCreateHook = {nix_str(pre_create)};")
+        out.append(f"{pad}  format = \"vfat\";")
+        if label := part.get("label"):
+            if args := label_args("vfat", label, where):
+                out.append(f"{pad}  extraArgs = {nix_list(args)};")
+        if mountpoint := topology.mountpoint_of(part):
+            # An ESP nothing mounts is a refusal in partition_mountpoints(), not
+            # a partial attribute set: disko's filesystem type wants a real path.
+            out.append(f"{pad}  mountpoint = {nix_str(mountpoint)};")
+        out += [f"{pad}  mountOptions = {nix_list(topology.mount_options_of(part))};",
+                f"{pad}}};"]
+        return
+    topology.emit_content(out, pad, part.get("id", ""), part, pre_create=pre_create)
 
 
 def render_disko(doc: dict) -> str:
@@ -858,17 +1440,19 @@ def render_disko(doc: dict) -> str:
     topology = topology_for(doc)
     names = partition_names(storage)
 
-    if not storage.get("wipe", False):
-        # The mode is this translator's, not disko's only one — see
-        # refuse_adoption() for what a preserving install would additionally
-        # have to resolve before the mode alone would be enough.
+    if not storage.get("wipe", False) and not ADOPTED:
+        # A document that adopts nothing tells this translator nothing about
+        # what is on the disk, so it does not read one: the probe belongs to
+        # `existing`, which is what §6.1's "accounted for by an adoption"
+        # clause describes. With an adoption resolved, the mode below is
+        # format,mount and this refusal does not apply.
         refuse("storage.wipe: false — this translator runs disko in "
                "destroy,format,mount, whose destroy stage clears the "
                "partition table of every declared disk before anything is "
                "created. §6.1 also asks the applier to fail on data not "
-               "accounted for by an `existing` adoption, and nothing here "
-               "reads the disk to find that data, so a preserving install "
-               "cannot be honoured either way")
+               "accounted for by an `existing` adoption, and with no adoption "
+               "declared nothing here reads the disk to find that data, so a "
+               "preserving install cannot be honoured either way")
 
     firmware = ((doc.get("target", {}) or {}).get("firmware") or "auto").lower()
     # A 1 MiB BIOS boot partition is only meaningful when GRUB is installed to
@@ -903,22 +1487,62 @@ def render_disko(doc: dict) -> str:
                 f"        device = {nix_str(path)};",
                 "        content = {", "          type = \"gpt\";",
                 "          partitions = {"]
+        disk_parts = [p for p in partitions if p.get("disk") == disk["id"]]
+        plan = adoption_plan(disk["id"], disk_parts, names, topology,
+                             bios_grub, storage.get("wipe", False))
+        if plan is not None:
+            # Every partition on the disk is described, not only the adopted
+            # ones: disko numbers a partition by its position in this list, and
+            # an entry landing on an occupied index renames and retypes what is
+            # already there. See adoption_plan().
+            for entry in plan:
+                out += [f"            {nix_str(entry['name'])} = {{",
+                        f"              priority = {entry['priority']};",
+                        f"              start = {nix_str(entry['start'])};",
+                        f"              end = {nix_str(entry['end'])};",
+                        f"              label = {nix_str(entry['label'])};"]
+                if entry["type"]:
+                    out.append(f"              type = {nix_str(entry['type'])};")
+                if entry["attributes"]:
+                    # Pinned for the same reason as the GUID: disko's create
+                    # writes `--attributes=<index>:=:0` before setting the bits
+                    # it knows about, so a flag not restated here is cleared.
+                    bits = " ".join(str(bit) for bit in entry["attributes"])
+                    out.append(f"              attributes = [ {bits} ];")
+                if entry["uuid"]:
+                    # Pinned so sgdisk's fallback writes back the GUID the
+                    # partition already carries: anything referring to this
+                    # partition by PARTUUID — a Windows BCD, another fstab —
+                    # goes on resolving. It also makes disko address the
+                    # partition by /dev/disk/by-partuuid/…, which is what
+                    # partition_device() emits for an adopted entry.
+                    out.append(f"              uuid = {nix_str(entry['uuid'])};")
+                if entry["part"] is None and entry["probed"] is not None:
+                    out += ["              # Not declared in the document and not "
+                            "adopted: named here only so",
+                            "              # the partitions after it keep their "
+                            "GPT index. Nothing is",
+                            "              # created on it, and nothing mounts it.",
+                            "              content = null;"]
+                elif entry["part"] is None:
+                    out.append("              content = null;")
+                else:
+                    emit_partition_content(out, "              ", entry["part"],
+                                           topology, pre_create=entry["hook"])
+                out.append("            };")
+            out += ["          };", "        };", "      };"]
+            continue
         if bios_grub:
             out += [f"            {nix_str(bios_grub)} = {{",
                     "              size = \"1M\";",
                     "              type = \"EF02\";",
                     "              priority = 1;",
                     "            };"]
-        for part in [p for p in partitions if p.get("disk") == disk["id"]]:
+        for part in disk_parts:
             where = f"partition {part.get('id') or part.get('role') or '?'!r}"
             if adopted(part):
-                # Was a warn() and a `continue`, which is the silent drop §2.3
-                # forbids twice over: the adopted partition disappeared from
-                # disko.nix while hardware.nix still mounted a device nobody
-                # created, and because the per-disk index was counted after the
-                # skip the *remaining* partitions were renamed too. Closing the
-                # gap is a job for disko's format,mount mode plus an apply-time
-                # probe; until then the honest answer is to say no.
+                # Resolved adoptions never reach here — adoption_plan() has the
+                # whole disk. What is left is a block no probe could resolve.
                 refuse_adoption(part, where)
                 continue
             disk_id, name = names[id(part)]
@@ -932,24 +1556,8 @@ def render_disko(doc: dict) -> str:
             out.append(f"              label = "
                        f"{nix_str(partition_label(disk_id, name))};")
             if part.get("role") == "esp":
-                mp = topology.mountpoint_of(part)
-                out += ["              type = \"EF00\";",
-                        "              content = {",
-                        "                type = \"filesystem\";",
-                        "                format = \"vfat\";"]
-                if label := part.get("label"):
-                    if args := label_args("vfat", label, where):
-                        out.append(f"                extraArgs = {nix_list(args)};")
-                if mp:
-                    # An ESP nothing mounts is a refusal above, not a partial
-                    # attribute set: disko's filesystem type wants a real path.
-                    out.append(f"                mountpoint = {nix_str(mp)};")
-                opts = topology.mount_options_of(part)
-                out += [f"                mountOptions = {nix_list(opts)};",
-                        "              };"]
-            else:
-                topology.emit_content(out, "              ",
-                                      part.get("id", ""), part)
+                out.append("              type = \"EF00\";")
+            emit_partition_content(out, "              ", part, topology)
             out.append("            };")
         out += ["          };", "        };", "      };"]
     out.append("    };")
@@ -1181,13 +1789,13 @@ def mount_table(doc: dict) -> tuple[list[tuple[str, str, str, list[str]]], list[
             mounts.append((mountpoint, device, fs, options))
 
     for part in storage.get("partitions", []) or []:
-        if adopted(part):
+        if adopted(part) and id(part) not in ADOPTED:
             continue   # refused in render_disko; nothing here would exist to mount
         disk_id, name = names[id(part)]
         handle = part.get("id") or name
         if handle in topology.spare_handles:
             continue   # a hot spare carries no filesystem of its own
-        device = partition_device(disk_id, name)
+        device = adopted_device(part) or partition_device(disk_id, name)
         if crypt := topology.luks_over.get(handle):
             device = f"/dev/mapper/{crypt['id']}"
             handle = crypt["id"]
@@ -5255,6 +5863,12 @@ def main() -> int:
     # the strength of a `boot.initrd.luks.devices` entry that unlocks nothing.
     # The marker is the mapper name as emit_content() writes it, so several
     # containers are checked one by one instead of as a group.
+    if args.apply:
+        # schema.md §20.8 puts the resolution of an `existing.match` at apply
+        # time, and everything the layout pins — index, first and last sector,
+        # partition GUID, partition name — is read from the live table here,
+        # before a single line of disko.nix is written.
+        resolve_adoptions(doc)
     disko_nix = render_disko(doc)
     check_encryption_emitted(doc, disko_nix,
                              marker=lambda c: f"name = {nix_str(c['id'])}",
@@ -5337,11 +5951,32 @@ def main() -> int:
         # established the two keys. The nixpkgs fallback is disko 1.9.0, whose
         # CLI accepts "format, mount or disko" and nothing else, so the alias
         # stays there — it is reached only after the same consent check.
+        mode, flags = "destroy,format,mount", " --yes-wipe-all-disks"
+        if PRESERVING:
+            # Something on a declared disk is being kept, so the destroy stage —
+            # which clears the partition table of every declared disk — must not
+            # run. `format` creates partitions and filesystems only where they
+            # are not there yet, and `mount` mounts what the layout describes
+            # (disko:29-34).
+            mode, flags = "format,mount", ""
+            print("a partition is adopted from the live disk: running disko in "
+                  f"{mode}, without its destroy stage")
         disko = ("nix --extra-experimental-features 'nix-command flakes' "
                  "run github:nix-community/disko/latest -- "
-                 f"--mode destroy,format,mount --yes-wipe-all-disks {disko_file}")
+                 f"--mode {mode}{flags} {disko_file}")
         res = subprocess.run(disko, shell=True)
         if res.returncode != 0:
+            if PRESERVING:
+                # The only fallback available is disko 1.9.0, whose CLI takes
+                # one mode word and whose combined word is `disko` — destroy
+                # included. Retrying a preserving install with it would clear
+                # the table the run exists to keep, so the failure is reported
+                # instead (SPEC §2.3).
+                print("the non-destroying disko run failed; not retrying with a "
+                      "mode whose destroy stage would clear the adopted "
+                      "partitions", file=sys.stderr)
+                run_stage("on_error")
+                return res.returncode
             res = subprocess.run(
                 f"nix-shell -p disko --run 'disko --mode disko {disko_file}'", shell=True)
             if res.returncode != 0:
