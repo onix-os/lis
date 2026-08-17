@@ -1098,11 +1098,12 @@ def refuse_adoption(part: dict, where: str) -> None:
                f"({', '.join(leaves) or 'empty'}) — adopting a partition means "
                "describing it to disko exactly as it already is: its GPT index, "
                "its first and last sector, its partition GUID and its partition "
-               "name, because disko's create step is `if ! sgdisk "
-               "--new=<index>:<start>:<end> …; then sgdisk --change-name=<index> "
-               "--typecode --partition-guid fi` (lib/types/gpt.nix:315-318) and "
-               "an entry pinned to anything else renames and retypes whatever "
-               "occupies that index. None of it is knowable from the document, "
+               "name and its attribute flags, because disko's create step is "
+               "`if ! sgdisk --new=<index>:<start>:<end> …; then sgdisk "
+               "--change-name=<index> --typecode --partition-guid --attributes "
+               "fi` (lib/types/gpt.nix:315-318) and an entry pinned to anything "
+               "else renames, retypes and clears the flags of whatever occupies "
+               "that index. None of it is knowable from the document, "
                "so this translator resolves an adoption only under --apply, "
                "where it reads the live table (schema.md §6.2, §20.8: a match "
                "MUST resolve to exactly one partition, at apply time)")
@@ -1482,9 +1483,10 @@ def render_disko(doc: dict) -> str:
                "destroy,format,mount, whose destroy stage clears the "
                "partition table of every declared disk before anything is "
                "created. §6.1 also asks the applier to fail on data not "
-               "accounted for by an `existing` adoption, and with no adoption "
-               "declared nothing here reads the disk to find that data, so a "
-               "preserving install cannot be honoured either way")
+               "accounted for by an `existing` adoption, and no adoption has "
+               "been resolved against a live disk here — a translate-only run "
+               "resolves none — so nothing has read the disk to find that data "
+               "and a preserving install cannot be honoured either way")
 
     firmware = ((doc.get("target", {}) or {}).get("firmware") or "auto").lower()
     # A 1 MiB BIOS boot partition is only meaningful when GRUB is installed to
