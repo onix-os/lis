@@ -1456,17 +1456,28 @@ def script_payload(item: dict, label: str) -> bytes | None:
                    "would run")
         return None if content is None else content.encode()
     if content is not None:
-        refuse(f"{label}: content and source both name the script body — "
-               "SPEC §13 gives an entry one body, and there is no rule that "
-               "says which of the two would run")
+        # `.from` is named here so the refusal quotes the reference, and so the
+        # field tracker records the read: bailing out before secret_ref() left
+        # it looking like a leaf this applier never consults.
+        named = ref.get("from") if isinstance(ref, dict) else ref
+        refuse(f"{label}: content and source {named!r} both name the script "
+               "body — SPEC §13 gives an entry one body, and there is no rule "
+               "that says which of the two would run")
         return None
     path = secret_ref(ref)
     if path is None:
         named = ref.get("from") if isinstance(ref, dict) else ref
-        refuse(f"{label}.source {named!r}: this applier resolves seed: and file: "
-               "references against the running installer's filesystem; https: "
-               "is not fetched and env:/key: name secret material rather than "
-               "a script (SPEC §2.4)")
+        refuse(f"{label}.source {named!r}: `seed:` and `file:` are the two "
+               "schemes that name a file on the installer, and this applier "
+               "resolves both. `env:` and `key:` name secret material rather "
+               "than a script body (SPEC §2.4; a §17 key object is a token or "
+               "a key, and has no body to run), and a fetch is required "
+               "nowhere: delivery.md §6 makes `seed:` the only MUST, its §7 "
+               "network delivery covers finding the *document*, and an "
+               "`https://` source does not even validate — schema.json's "
+               "secretRef pattern is ^(file|env|seed|key):.+$, so schema.md "
+               "§13's prose example of one cannot appear in a conformant "
+               "document (SPEC §20.2)")
         return None
     try:
         return pathlib.Path(path).read_bytes()
@@ -1610,51 +1621,108 @@ HOST_STAGE_CONTRACT = {
                   "machine is rebooted",
     "on_success": "on the installer host only when nixos-install exits zero",
     "on_error": "on the installer host only when disko or nixos-install fails",
+    "post_install": "on the installer host after nixos-install returns, with "
+                    "the target still mounted at /mnt",
+    "post": "on the installer host after nixos-install returns, with the "
+            "target still mounted at /mnt",
 }
 
-# Which side of the chroot boundary each stage genuinely runs on here. SPEC §13
-# defaults `chroot` to true for post_install and false for the host hooks; a
-# document that asks for the other side is asking for something this applier
-# cannot do, so it refuses rather than running the body on the wrong machine.
-STAGE_IN_TARGET = {
-    "pre": False, "pre_install": False, "post_storage": False,
-    "post": True, "post_install": True,
-    "pre_reboot": False, "on_success": False, "on_error": False,
-    "firstboot": True,
+# Which sides of the chroot boundary each stage has here. SPEC §13 fixes the
+# environment of seven of the nine — pre, pre_install, post_storage, pre_reboot,
+# on_success and on_error name the live installer environment, firstboot names
+# the booted target — so for those the flag can only agree with the phase or
+# contradict it. `post`/`post_install` are the two the spec defines on *both*
+# sides ("inside target chroot when chroot: true (default true), or in host
+# context when chroot: false"), and NixOS has both: the activation script
+# nixos-install runs inside the target, and the installer shell it returns to.
+# So the flag is honoured per script there, not per stage.
+STAGE_SIDES = {
+    "pre": ("host",), "pre_install": ("host",), "post_storage": ("host",),
+    "post": ("target", "host"), "post_install": ("target", "host"),
+    "pre_reboot": ("host",), "on_success": ("host",), "on_error": ("host",),
+    "firstboot": ("target",),
 }
+
+# users[].scripts run as the account the document declares, and that account is
+# created by the generated configuration — it exists inside the target and
+# nowhere else, so a per-user hook has no host-side form.
+USER_STAGE_SIDES = {"post": ("target",), "post_install": ("target",),
+                    "firstboot": ("target",)}
+
+# Why the stage has no target side, in that stage's own SPEC §13 terms.
+NO_TARGET_SIDE = {
+    "pre": "before any disk is touched, so no target root exists yet",
+    "pre_install": "before any disk is touched, so no target root exists yet",
+    "post_storage": "with the target formatted and mounted at /mnt but still "
+                    "empty",
+    "pre_reboot": "after the target is unmounted",
+    "on_success": "in the live installer environment",
+    "on_error": "in the live installer environment, where the target may be in "
+                "any state, including never formatted",
+}
+
+
+def script_side(stage: str, item: dict, sides: tuple[str, ...]) -> str:
+    """Which side of the boundary one script entry runs on (SPEC §13 `chroot`).
+
+    The first entry of `sides` is the stage's default, which is SPEC §13's own:
+    `true` for post_install, `false` for the host hooks. A flag naming a side
+    the stage does not have is refused by check_stage_chroot; it falls back to
+    the default here so that `--lenient` still produces a coherent output.
+    """
+    flag = item.get("chroot")
+    if not isinstance(flag, bool):
+        return sides[0]
+    wanted = "target" if flag else "host"
+    return wanted if wanted in sides else sides[0]
 
 
 def check_stage_chroot(doc: dict) -> None:
-    """Refuse a `chroot` flag that names the side of the boundary we are not on.
+    """Refuse a `chroot` flag naming a side the stage does not have here.
 
     `check_script_fields` is called with honors_chroot=True precisely so this
-    can answer per stage: the shared helper has one default for the whole
-    applier, and this applier straddles the boundary — `pre_install` runs on the
-    live ISO, `post_install` runs inside the target during activation.
+    can answer per stage and per entry: the shared helper has one default for
+    the whole applier, and this applier straddles the boundary.
     """
-    def inspect(stage: str, items, label: str) -> None:
-        in_target = STAGE_IN_TARGET[stage]
-        for item in items or []:
+    def inspect(stage: str, items, label: str, sides, no_host: str) -> None:
+        for index, item in enumerate(items or []):
             flag = item.get("chroot")
-            if flag is None or bool(flag) is in_target:
+            if flag is None:
                 continue
-            if in_target:
-                refuse(f"{label}.chroot false: this applier runs {stage} from "
-                       "system.activationScripts, which nixos-install executes "
-                       "inside the target — there is no host-side stage for it")
+            # A shape check, not a truthiness test: schema.json:1307 types this
+            # boolean, and the string "false" is truthy, so a document that
+            # spelled the flag wrong would run the hook on the side opposite
+            # the one it named — the silent inversion SPEC §2.3 forbids.
+            if not isinstance(flag, bool):
+                refuse(f"{label}[{index}].chroot {flag!r} is not a boolean "
+                       "(schema.json types it boolean) — this applier will not "
+                       "guess a side from it, and the default for "
+                       f"{stage} is {'true' if sides[0] == 'target' else 'false'}")
+                continue
+            if ("target" if flag else "host") in sides:
+                continue
+            if flag:
+                refuse(f"{label}[{index}].chroot true: SPEC §13 runs {stage} "
+                       f"{NO_TARGET_SIDE[stage]} — there is no target root to "
+                       "enter")
             else:
-                refuse(f"{label}.chroot true: this applier runs {stage} "
-                       f"{HOST_STAGE_CONTRACT.get(stage, 'on the installer host')}"
-                       ", where no target root is available to enter")
+                refuse(f"{label}[{index}].chroot false: {no_host}")
 
     scripts = doc.get("scripts", {}) or {}
-    for stage in STAGE_IN_TARGET:
-        inspect(stage, scripts.get(stage), f"scripts.{stage}[]")
+    for stage, sides in STAGE_SIDES.items():
+        inspect(stage, scripts.get(stage), f"scripts.{stage}", sides,
+                "SPEC §13 runs firstboot once on the installed target during "
+                "its first boot; the live installer is gone by then, so there "
+                "is no host context left to run in")
     for user in doc.get("users", []) or []:
+        name = user.get("name")
         user_scripts = user.get("scripts", {}) or {}
-        for stage in ("post", "post_install", "firstboot"):
+        for stage, sides in USER_STAGE_SIDES.items():
             inspect(stage, user_scripts.get(stage),
-                    f"users['{user.get('name')}'].scripts.{stage}[]")
+                    f"users['{name}'].scripts.{stage}", sides,
+                    f"a per-user hook runs as {name!r}, an account this "
+                    "document creates inside the target — the installer host "
+                    "has no such user to run it as")
 
 
 def _leaf_paths(node, prefix: str = "") -> list[str]:
@@ -1739,8 +1807,15 @@ def host_stage_hooks(doc: dict, stage: str) -> list[tuple[str, str, str, bytes]]
     and no failure policy at all.
     """
     scripts = doc.get("scripts", {}) or {}
+    sides = STAGE_SIDES[stage]
     out: list[tuple[str, str, str, bytes]] = []
     for index, item in enumerate(scripts.get(stage, []) or []):
+        # post/post_install have both sides, so only the entries whose `chroot`
+        # resolves to `false` belong here; the rest go into the target's
+        # activation script. Enumerated before the filter so the label keeps
+        # naming the entry's real position in the document.
+        if script_side(stage, item, sides) != "host":
+            continue
         label = f"scripts.{stage}[{index}]"
         body = script_payload(item, label)
         resolved = script_interpreter(item, label)
@@ -1921,9 +1996,12 @@ def render_script_hooks(doc: dict, file_cmds: list[str] | None = None) -> list[s
     out: list[str] = []
     packages: list[str] = []
 
-    def collect(items, stage: str, label: str, user: str = "") -> list[str]:
+    def collect(items, stage: str, label: str, user: str = "",
+                sides: tuple[str, ...] | None = None) -> list[str]:
         lines = []
         for index, item in enumerate(items or []):
+            if sides and script_side(stage, item, sides) != "target":
+                continue
             call = hook_call(item, f"{label}[{index}]", user)
             if call is None:
                 continue
@@ -1935,7 +2013,8 @@ def render_script_hooks(doc: dict, file_cmds: list[str] | None = None) -> list[s
 
     hooks: list[str] = []
     for stage in ("post_install", "post"):
-        hooks += collect(scripts.get(stage), stage, f"scripts.{stage}")
+        hooks += collect(scripts.get(stage), stage, f"scripts.{stage}",
+                         sides=STAGE_SIDES[stage])
     for user in doc.get("users", []) or []:
         # `post` after `post_install`, the ordering SPEC §13 gives the two
         # phases. The user-level `post` stage used to reach nothing at all here:
@@ -1961,8 +2040,8 @@ def render_script_hooks(doc: dict, file_cmds: list[str] | None = None) -> list[s
     # unreadable `source` or an on_failure value SPEC §13 does not define is a
     # refusal *before* disko touches a disk, not a surprise between the wipe
     # and the install.
-    for stage in ("pre_install", "pre") + HOST_STAGES:
-        host_stage_hooks(doc, stage)
+    host_side = {stage: host_stage_hooks(doc, stage) for stage
+                 in ("pre_install", "pre") + HOST_STAGES + ("post_install", "post")}
 
     for stage in ("pre_install", "pre"):
         if scripts.get(stage):
@@ -1974,6 +2053,14 @@ def render_script_hooks(doc: dict, file_cmds: list[str] | None = None) -> list[s
                  "SPEC §13 places it in the live installer environment, which no "
                  "NixOS option can describe, so nothing about it is emitted into "
                  "the generated configuration")
+    # SPEC §13.3's "host context" half. These entries are not emitted into the
+    # configuration at all — they run where the flag asks, on the installer.
+    for stage in ("post_install", "post"):
+        if host_side[stage]:
+            warn(f"scripts.{stage} entries with chroot: false run "
+                 f"{HOST_STAGE_CONTRACT[stage]} (--apply), not from an "
+                 "activation script; a translate-only run emits nothing for "
+                 "them")
     check_stage_chroot(doc)
 
     # Birth certificate (delivery.md §8) — recorded on every activation.
@@ -3530,13 +3617,43 @@ APP_SOURCES = ("native", "flatpak", "snap", "appimage")
 APP_SOURCE_REFUSALS = {
     "snap": "snapd is not part of NixOS and the store has no writable "
             "/snap; software.snap[] refuses for the same reason",
-    "appimage": "installing one would mean fetching it from the network at "
-                "install time, which contradicts the seed/offline model every "
-                "LIS applier installs under — nixos-24.11's programs.appimage "
-                "only installs the appimage-run wrapper and its binfmt "
-                "registrations (nixos/modules/programs/appimage.nix), which "
-                "run an AppImage already on disk and fetch none",
 }
+
+# `apps[].appimage` used to be refused here beside snap, on the grounds that
+# fetching one needs the network at install time. That reason does not survive
+# contact with this applier's own behaviour: `software.flatpak[]` and
+# `apps[].flatpak` fetch from Flathub on the installed machine's first boot and
+# are ⚙ POST with a warning, not a refusal. Neither spec text makes the offline
+# claim the refusal rested on — schema.md §11 asks only that an unresolvable
+# `apps[]` item warn rather than abort, and delivery.md §7 has the installer
+# bring up networking by default. So the two are made consistent the way the
+# working one already works: fetch at first boot, warn that it is emulated.
+# The one thing an AppImage does not have is flatpak's remote — there is no
+# registry to resolve a name against — so the value must be the URL itself.
+APPIMAGE_DIR = "/opt/appimages"
+
+
+def appimage_refusal(name: str, value: str) -> str | None:
+    """Why one `apps[].appimage` cannot be installed, or None if it can.
+
+    Two shapes are unusable: a value that is not an http(s) URL (nothing to
+    fetch), and an app name that is not a bare filename (it becomes both a path
+    under /opt and the wrapper's command name).
+    """
+    if not re.match(r"^https?://", str(value)):
+        return ("an AppImage resolves against no registry, so the field has to "
+                f"be the URL of the file itself and {str(value)!r} is not one")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", str(name)):
+        return (f"the app name {str(name)!r} is not usable as a file name under "
+                f"{APPIMAGE_DIR} or as the command that runs it")
+    return None
+
+
+def app_source_refusal(source: str, name: str, value: str) -> str | None:
+    """Why this applier cannot install `value` from `source`, or None."""
+    if source == "appimage":
+        return appimage_refusal(name, value)
+    return APP_SOURCE_REFUSALS.get(source)
 
 
 def nix_pkg_path(name: str) -> str:
@@ -3595,6 +3712,10 @@ def resolve_app(app: dict) -> tuple[str | None, str | None]:
 
     name = app.get("name") or app.get("package") or "?"
     order = list(app.get("preference") or []) or ["native", "flatpak"]
+    # Per value, not per source: whether an AppImage is installable depends on
+    # what the field says, so the table alone can no longer answer it.
+    refusals = {source: reason for source, value in available.items()
+                if (reason := app_source_refusal(source, name, value))}
     skipped: list[str] = []
     for source in order:
         if source not in APP_SOURCES:
@@ -3603,19 +3724,19 @@ def resolve_app(app: dict) -> tuple[str | None, str | None]:
             return None, None
         if source not in available:
             continue
-        if source in APP_SOURCE_REFUSALS:
+        if source in refusals:
             skipped.append(source)
             continue
         for dropped in skipped:
             warn(f"software.apps[] {name!r}: {dropped!r} is preferred over "
-                 f"{source!r} but {APP_SOURCE_REFUSALS[dropped]} — installing "
+                 f"{source!r} but {refusals[dropped]} — installing "
                  f"the {source} source instead")
         # An alternative the arbitration never reached is still a field the
         # document wrote and this applier did not act on. Naming it is the
         # difference between a documented choice and the silent drop the
         # spec forbids.
         for unused in sorted(set(available) - {source} - set(skipped)):
-            if reason := APP_SOURCE_REFUSALS.get(unused):
+            if reason := refusals.get(unused):
                 warn(f"software.apps[] {name!r}: the {unused!r} source is "
                      f"declared but {reason}; the {source} source is "
                      "installed instead")
@@ -3628,7 +3749,7 @@ def resolve_app(app: dict) -> tuple[str | None, str | None]:
     for dropped in skipped:
         refuse(f"software.apps[] {name!r}: preference {order} leaves no source "
                f"this applier can install — {dropped!r} is out because "
-               f"{APP_SOURCE_REFUSALS[dropped]}")
+               f"{refusals[dropped]}")
     if not skipped:
         refuse(f"software.apps[] {name!r}: none of its declared sources "
                f"({', '.join(sorted(available)) or 'none'}) appears in "
@@ -3664,6 +3785,51 @@ def flatpak_unit(apps: list[str]) -> list[str]:
             "    unitConfig.ConditionPathExists = \"!/var/lib/lis/.flatpak-done\";",
             "    serviceConfig.Type = \"oneshot\";",
             "    path = [ pkgs.flatpak pkgs.coreutils ];",
+            "    script = " + nix_script("\n".join(body)) + ";",
+            "  };"]
+
+
+def appimage_wrapper(name: str) -> str:
+    """The declarative half: a command on PATH that runs the fetched AppImage.
+
+    Without it the unit leaves a file in /opt that nothing on PATH reaches, and
+    `apps[]` asked for an application, not a download. The wrapper is built at
+    install time from a path the unit fills in at first boot, so it needs no
+    network of its own; `appimage-run` is named explicitly rather than left to
+    the binfmt registration so the command works either way.
+    """
+    return ("(pkgs.writeShellScriptBin %s ''exec ${pkgs.appimage-run}/bin/"
+            "appimage-run %s/%s.AppImage \"$@\"'')"
+            % (nix_str(name), APPIMAGE_DIR, name))
+
+
+def appimage_unit(apps: list[tuple[str, str]]) -> list[str]:
+    """A first-boot unit that fetches each AppImage into /opt.
+
+    Same shape and same reason as `lis-flatpak`: the fetch needs the network
+    and a running system, so it cannot be declarative — it is emulated once, on
+    first boot, and marker-guarded so a later boot does not re-download.
+    """
+    import shlex
+
+    # Quoted for the same reason the flatpak unit quotes its IDs: the URL is
+    # document-supplied text on a shell command line running as root.
+    body = [f"install -d -m755 {APPIMAGE_DIR}"]
+    for name, url in apps:
+        dest = f"{APPIMAGE_DIR}/{name}.AppImage"
+        body.append(f"curl -fsSL --retry 3 -o {shlex.quote(dest)} "
+                    f"{shlex.quote(str(url))}")
+        body.append(f"chmod 0755 {shlex.quote(dest)}")
+    body += ["install -d -m755 /var/lib/lis",
+             "touch /var/lib/lis/.appimage-done"]
+    return ["  systemd.services.lis-appimage = {",
+            "    description = \"LIS AppImage application fetch\";",
+            "    wantedBy = [ \"multi-user.target\" ];",
+            "    after = [ \"network-online.target\" ];",
+            "    wants = [ \"network-online.target\" ];",
+            "    unitConfig.ConditionPathExists = \"!/var/lib/lis/.appimage-done\";",
+            "    serviceConfig.Type = \"oneshot\";",
+            "    path = [ pkgs.curl pkgs.coreutils ];",
             "    script = " + nix_script("\n".join(body)) + ";",
             "  };"]
 
@@ -3749,6 +3915,7 @@ def render_software(doc: dict, opts: NixOptions) -> None:
     packages = list(software.get("packages", []) or [])
     optional: list[str] = []
     flatpaks = list(software.get("flatpak", []) or [])
+    appimages: list[tuple[str, str]] = []
     for app in software.get("apps", []) or []:
         if isinstance(app, str):
             optional.append(app)
@@ -3758,6 +3925,8 @@ def render_software(doc: dict, opts: NixOptions) -> None:
             optional.append(value)
         elif source == "flatpak":
             flatpaks.append(value)
+        elif source == "appimage":
+            appimages.append((app.get("name") or app.get("package"), value))
 
     terms = []
     if packages:
@@ -3770,6 +3939,9 @@ def render_software(doc: dict, opts: NixOptions) -> None:
                                          for p in packages))
     if optional:
         terms.append(nix_optional_pkgs(optional))
+    if appimages:
+        terms.append("[ %s ]" % " ".join(appimage_wrapper(name)
+                                         for name, _ in appimages))
     if terms:
         if packages:
             opts.raw("  # software.packages[]: names pass through verbatim, and "
@@ -3825,11 +3997,31 @@ def render_software(doc: dict, opts: NixOptions) -> None:
         # so a desktop that ships its own portal keeps it too.
         opts.set("xdg.portal.enable", "true")
         opts.set("xdg.portal.extraPortals", "[ pkgs.xdg-desktop-portal-gtk ]")
+        # xdg-desktop-portal 1.17 stopped picking a backend on its own, and
+        # nixpkgs warns during evaluation when neither config nor
+        # configPackages says which to use. Without it a flatpak app's file
+        # chooser and screenshot portals resolve to nothing on a machine with
+        # no desktop module of its own.
+        opts.set("xdg.portal.config.common.default", nix_str("*"))
     if flatpaks:
         opts.lines.extend(flatpak_unit(flatpaks))
         warn("software.flatpak[]: flatpak applications are installed by a "
              "first-boot unit (lis-flatpak), not by the configuration — the "
              "machine needs the network on its first boot")
+
+    if appimages:
+        # programs.appimage.enable brings appimage-run in; binfmt registers the
+        # two AppImage magics so the fetched file also runs when it is invoked
+        # directly (nixos/modules/programs/appimage.nix, both verified on
+        # nixos-24.11).
+        opts.set("programs.appimage.enable", "true")
+        opts.set("programs.appimage.binfmt", "true")
+        opts.lines.extend(appimage_unit(appimages))
+        warn("software.apps[].appimage: the AppImage is fetched by a first-boot "
+             "unit (lis-appimage) into " + APPIMAGE_DIR + ", not by the "
+             "configuration — the machine needs the network on its first boot, "
+             "and the file is not in the store, so it is neither rolled back "
+             "nor rebuilt by nixos-rebuild")
 
     if (snaps := software.get("snap")) is not None:
         # Consumed so the refusal is the single diagnostic: without it the
@@ -5172,7 +5364,13 @@ def main() -> int:
         if res.returncode == 0:
             write_birth_certificate(doc)
             write_wireless_secrets(doc)
+            # SPEC §13.3's host-context half: the entries whose `chroot` is
+            # false. Their chrooted siblings already ran, inside the target,
+            # from the activation script nixos-install invoked.
+            run_stage("post_install")
+            run_stage("post")
             run_stage("on_success")
+            unmount_target(doc)
             run_stage("pre_reboot")
             finish_run(on_finish)
         else:
@@ -5184,6 +5382,26 @@ def main() -> int:
             run_stage("on_error")
         return res.returncode
     return 0
+
+
+def unmount_target(doc: dict) -> None:
+    """Unmount /mnt, because SPEC §13.4 puts pre_reboot *after* the unmount.
+
+    Only when the document declares the phase: with no pre_reboot hook there is
+    nothing whose contract depends on the target being gone, and leaving the
+    mount up is what `installer.on_finish: stay` means for an operator who is
+    about to look at the result. A busy mount is reported rather than swallowed
+    — the phase then runs in a state the spec does not describe.
+    """
+    import subprocess
+
+    if not (doc.get("scripts", {}) or {}).get("pre_reboot"):
+        return
+    print("unmounting the target before scripts.pre_reboot (SPEC §13.4)")
+    if subprocess.run("umount -R /mnt", shell=True).returncode:
+        print("could not unmount /mnt; scripts.pre_reboot runs with the target "
+              "still mounted, which is not the state SPEC §13.4 names",
+              file=sys.stderr)
 
 
 def finish_run(on_finish: str) -> None:
