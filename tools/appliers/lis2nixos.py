@@ -1451,9 +1451,19 @@ def adoption_plan(disk_id: str, disk_parts: list[dict], names: dict,
             # and mounted as it was found, with nothing said about it. Clearing
             # the signature of a partition the document just declared is safe:
             # nothing on the disk is meant to be there.
+            # The type code is stated for the same two roles the
+            # create-everything path states it for. disko's default is 8300
+            # (8200 under swap content), so an ESP left to that default is
+            # written as a Linux filesystem: firmware does not enumerate it and
+            # `bootctl install` declines it — a machine that installs and does
+            # not boot (lib/types/gpt.nix:49-52).
+            if part is None:
+                code = "EF02"
+            else:
+                code = "EF00" if part.get("role") == "esp" else None
             entries.append({"name": name, "priority": len(live) + 1 + position,
                             "start": str(cursor), "end": str(end),
-                            "type": "EF02" if part is None else None,
+                            "type": code,
                             "label": partition_label(disk_id, name),
                             "uuid": None, "part": part, "probed": None,
                             "attributes": [],
