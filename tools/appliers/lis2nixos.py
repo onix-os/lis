@@ -1020,15 +1020,24 @@ def resolve_adoptions(doc: dict) -> None:
     disks = storage.get("disks", []) or (doc.get("target", {}) or {}).get("disks", [])
     paths = {disk["id"]: (disk.get("match", {}) or {}).get("path")
              for disk in disks if disk.get("id")}
-    for disk_id in sorted({part.get("disk") for part in partitions
-                           if adopted(part) and part.get("disk")}):
+    # Every declared disk, not only the adopting ones. The mode below is chosen
+    # once for the whole run, so no disk in this document gets its table cleared
+    # — which makes what is already on the *other* disks a question that has to
+    # be answered too (§6.1 is about every owned disk).
+    adopting = {part.get("disk") for part in partitions if adopted(part)}
+    for disk_id in sorted(paths):
         path = paths.get(disk_id)
         if not path:
             continue        # a disk with no match.path is refused in render_disko
         probe = probe_disk(path)
         if isinstance(probe, str):
-            refuse(f"disk '{disk_id}': storage.partitions[].existing needs the "
-                   f"live partition table of {path}, and this machine cannot "
+            need = ("storage.partitions[].existing needs the live partition table"
+                    if disk_id in adopting else
+                    "another disk in this document is adopted, so disko runs "
+                    "without its destroy stage and this disk's table cannot be "
+                    "replaced either; deciding whether that is safe needs its "
+                    "live partition table")
+            refuse(f"disk '{disk_id}': {need} of {path}, and this machine cannot "
                    f"produce it: {probe}")
             continue
         PROBED[disk_id] = probe
@@ -1403,6 +1412,29 @@ def adoption_plan(disk_id: str, disk_parts: list[dict], names: dict,
     return entries
 
 
+def check_unadopted_disk(disk_id: str) -> None:
+    """Refuse a disk this run can neither clear nor describe as it stands.
+
+    The mode is chosen once for the whole document: as soon as one partition
+    anywhere is adopted, disko runs without its destroy stage, and that applies
+    to every disk in the config. A second disk that already carries a table
+    would then meet the create step's rename fallback instead of a clean
+    `sgdisk --clear`, so what it holds has to be accounted for as well
+    (schema.md §6.1: *any* owned disk).
+    """
+    probe = PROBED.get(disk_id)
+    if probe is None or not probe["parts"]:
+        return
+    refuse(f"disk '{disk_id}': {probe['path']} already carries "
+           f"{len(probe['parts'])} partition(s) ({describe_probe(probe)}) and no "
+           "`existing` entry on this disk adopts any of them. Because another "
+           "partition in this document is adopted, disko runs in format,mount "
+           "for the whole config — its destroy stage never runs, so this table "
+           "is not replaced and the partitions declared here would be laid over "
+           "it by GPT index. Adopt what is on this disk with `existing`, or "
+           "declare it in a document that does not adopt anything")
+
+
 def emit_partition_content(out: list, pad: str, part: dict, topology: Topology,
                            pre_create: str = "") -> None:
     """The `content` block under one partition entry, ESP convention included.
@@ -1532,6 +1564,11 @@ def render_disko(doc: dict) -> str:
                 out.append("            };")
             out += ["          };", "        };", "      };"]
             continue
+        if PRESERVING and not any(adopted(part) for part in disk_parts):
+            # Only for a disk no entry even asked to adopt on. A disk whose
+            # adoption failed to resolve is refused by name in the loop below,
+            # and saying "nothing here adopts anything" about it would be false.
+            check_unadopted_disk(disk["id"])
         if bios_grub:
             out += [f"            {nix_str(bios_grub)} = {{",
                     "              size = \"1M\";",
