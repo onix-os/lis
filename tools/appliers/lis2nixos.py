@@ -2334,10 +2334,8 @@ def check_stage_chroot(doc: dict) -> None:
             flag = item.get("chroot")
             if flag is None:
                 continue
-            # A shape check, not a truthiness test: schema.json:1307 types this
-            # boolean, and the string "false" is truthy, so a document that
-            # spelled the flag wrong would run the hook on the side opposite
-            # the one it named — the silent inversion SPEC §2.3 forbids.
+            # A shape check, not a truthiness test: the string "false" is
+            # truthy, which would invert the side the document named.
             if not isinstance(flag, bool):
                 refuse(f"{label}[{index}].chroot {flag!r} is not a boolean "
                        "(schema.json types it boolean) — this applier will not "
