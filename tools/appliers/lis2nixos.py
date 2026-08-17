@@ -587,6 +587,13 @@ class Topology:
                       f"{pad}  type = \"luks\";",
                       f"{pad}  name = {nix_str(crypt['id'])};",
                       f"{pad}  settings.allowDiscards = true;"]
+            # The hook belongs to the node whose device is the partition. Passed
+            # inward it would run against /dev/mapper/<name>, which does not
+            # exist until luksFormat has already written over the signature the
+            # hook was there to clear.
+            if pre_create:
+                lines.append(f"{pad}  preCreateHook = {nix_str(pre_create)};")
+                pre_create = ""
             fmt = (crypt.get("type") or "luks2").lower()
             lines.append(f"{pad}  extraFormatArgs = [ \"--type\" {nix_str(fmt)} ];")
             if key_path := luks_key_path(self.doc, crypt["id"]):
@@ -617,20 +624,30 @@ class Topology:
     def emit_layer(self, lines: list, pad: str, handle: str, spec: dict,
                    pre_create: str = "") -> None:
         owner = self.consumer.get(handle)
+        # Every disko content node carries preCreateHook (mkSubType,
+        # lib/default.nix:436-441), so the hook is stated on whichever one wraps
+        # this partition. Dropping it on the layered types would silently lose
+        # the signature wipe that lets pvcreate run at all: lvm_pv's create is
+        # `if ! (blkid dev | grep -q TYPE=); then pvcreate; fi`
+        # (lib/types/lvm_pv.nix:42-44), the same guard the filesystem type uses.
+        hook = [f"{pad}  preCreateHook = {nix_str(pre_create)};"] if pre_create else []
         if owner and owner[0] == "lvm_pv":
             lines += [f"{pad}content = {{",
                       f"{pad}  type = \"lvm_pv\";",
                       f"{pad}  vg = {nix_str(owner[1])};",
+                      *hook,
                       f"{pad}}};"]
         elif owner and owner[0] == "mdraid":
             lines += [f"{pad}content = {{",
                       f"{pad}  type = \"mdraid\";",
                       f"{pad}  name = {nix_str(owner[1])};",
+                      *hook,
                       f"{pad}}};"]
         elif owner and owner[0] == "zfs":
             lines += [f"{pad}content = {{",
                       f"{pad}  type = \"zfs\";",
                       f"{pad}  pool = {nix_str(owner[1])};",
+                      *hook,
                       f"{pad}}};"]
         else:
             mp = self.mountpoint_of(spec)
@@ -1203,7 +1220,19 @@ def adopted_format_hook(part: dict, probed: dict, topology: Topology) -> str:
     existing = part.get("existing") or {}
     where = f"partition {part.get('id') or part.get('role')!r}"
     fs = topology.fs_of(part)
-    if existing.get("format"):
+    fmt = existing.get("format")
+    if fmt is not None and not isinstance(fmt, bool):
+        # Truthiness is the wrong test for the one field that decides whether an
+        # adopted filesystem is kept or wiped: the string "false" is true to
+        # Python, so the document that spelled it that way would have had its
+        # data destroyed by the branch below. schema.json types it boolean.
+        refuse(f"{where}: existing.format {fmt!r} is not a boolean "
+               "(schema.json types it boolean) — this field decides whether the "
+               "filesystem already on the adopted partition is kept or replaced, "
+               "and a value this translator has to guess at is the one place it "
+               "will not guess")
+        return ""
+    if fmt:
         if fs in (None, "none"):
             refuse(f"{where}: existing.format: true asks for the adopted "
                    "partition to be re-made, and the entry declares no `fs` to "
@@ -1401,12 +1430,22 @@ def adoption_plan(disk_id: str, disk_parts: list[dict], names: dict,
                        "MiB is left. The existing partitions cannot be moved "
                        "aside without destroying them")
                 return None
+            # This is a partition disko is creating, in a run whose destroy stage
+            # never executes. sgdisk --new writes a table entry, not the sectors
+            # under it, so whatever a previous layout left in this free region is
+            # still there — and every create disko guards is guarded on exactly
+            # that: `if ! (blkid dev | grep -q TYPE=)` skips the mkfs and skips
+            # pvcreate. A stale superblock would leave the new root unformatted
+            # and mounted as it was found, with nothing said about it. Clearing
+            # the signature of a partition the document just declared is safe:
+            # nothing on the disk is meant to be there.
             entries.append({"name": name, "priority": len(live) + 1 + position,
                             "start": str(cursor), "end": str(end),
                             "type": "EF02" if part is None else None,
                             "label": partition_label(disk_id, name),
                             "uuid": None, "part": part, "probed": None,
-                            "attributes": [], "hook": ""})
+                            "attributes": [],
+                            "hook": 'wipefs --all "$device"'})
             cursor = end + 1
             cursor += (-cursor) % align
 
@@ -4559,7 +4598,17 @@ def render_software(doc: dict, opts: NixOptions) -> None:
     # disko has already wiped the disks.
     packages = list(software.get("packages", []) or [])
     optional: list[str] = []
-    flatpaks = list(software.get("flatpak", []) or [])
+    # schema.json types software.flatpak[] as an array of strings. An entry of
+    # any other shape used to reach shlex.quote() and end the run in a traceback,
+    # which is neither a translation nor a refusal.
+    flatpaks = []
+    for entry in software.get("flatpak", []) or []:
+        if isinstance(entry, str):
+            flatpaks.append(entry)
+        else:
+            refuse(f"software.flatpak[] entry {entry!r} is {_shape(entry)}, not "
+                   "the application ID string schema.json requires — a flatpak "
+                   "app is named by its ID (\"org.gnome.Calculator\")")
     appimages: list[tuple[str, str]] = []
     for app in software.get("apps", []) or []:
         if isinstance(app, str):
@@ -5814,6 +5863,33 @@ def channel_consent(doc_path: pathlib.Path) -> str | None:
     return None
 
 
+def check_adoptions_resolved(doc: dict) -> int:
+    """Stop a preserving run whose adoptions did not all resolve.
+
+    Checked outside enforce() for the same reason check_consent() is: --lenient
+    turns refusals into warnings, and this is not one of the things it may wave
+    through. Once any partition declares `existing`, the mode for the whole run
+    is format,mount — no destroy stage. If an adoption then failed to resolve,
+    its partition is left out of the layout and the remaining entries are emitted
+    the create-everything way, sized rather than pinned. disko numbers a
+    partition by its position in that list, so entry one would land on the GPT
+    index the unadopted partition occupies and rename, retype and clear the flags
+    of the very partition the document asked to keep (lib/types/gpt.nix:315-318).
+    A refusal downgraded to a warning here costs the operator the foreign table.
+    """
+    partitions = (doc.get("storage") or {}).get("partitions") or []
+    declared = [part for part in partitions if adopted(part)]
+    if not declared or len(ADOPTED) == len(declared):
+        return 0
+    print("error: refusing to run disko without its destroy stage while "
+          f"{len(declared) - len(ADOPTED)} of {len(declared)} `existing` "
+          "adoption(s) are unresolved — the refusals above say why. The layout "
+          "would be laid over the live partition table by GPT index, renaming "
+          "and retyping the partitions this document asked to keep. Nothing has "
+          "been written to any disk", file=sys.stderr)
+    return 1
+
+
 def check_consent(doc: dict, doc_path: pathlib.Path, confirmed: bool) -> int:
     """Refuse a prompt-free destructive run that nobody consented to.
 
@@ -5952,6 +6028,8 @@ def main() -> int:
     # refusals to warnings, and a wipe nobody consented to must not be one of
     # the things it can wave through (delivery.md §5).
     if args.apply and check_consent(doc, args.file, args.confirm_destroy):
+        return 1
+    if args.apply and check_adoptions_resolved(doc):
         return 1
 
     if args.apply:
