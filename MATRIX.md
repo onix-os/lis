@@ -341,6 +341,11 @@ signature an earlier layout left in that free region would satisfy the very guar
 hook is placed on whichever content node owns the partition, including `lvm_pv` (whose `pvcreate`
 carries the same guard, `lib/types/lvm_pv.nix:42-44`) and `luks` (whose `$device` is the partition,
 not the mapper). Adopted partitions never get it unless `format: true` asks for one.
+A new partition also carries its **type code** where the role has one — `EF00` for an ESP, `EF02`
+for the synthesised BIOS boot partition. disko's default is `8300` (`8200` under swap content,
+`lib/types/gpt.nix:49-52`), so an ESP left to it is written as a Linux filesystem: firmware does not
+enumerate it and `bootctl install` declines it, which installs a machine that does not boot. The
+create-everything path always stated `EF00`; the adopting one did not until it was tested.
 With any adoption in play the run switches to `--mode format,mount` (`disko:29-34`)
 and **never falls back** to the legacy `--mode disko`, whose destroy stage would clear the table.
 `format: true` becomes `preCreateHook = "wipefs --all \"$device\""` on the content, which is what
@@ -519,6 +524,13 @@ name is separate and is now stated explicitly in `disko.nix`, computed with disk
 because the applier previously predicted `/dev/disk/by-partlabel/disk-<disk>-<id>` for a long name
 while disko created the hashed one, leaving `hardware.nix` pointing at a device node that never
 existed. Verified byte-for-byte against disko's expression.
+**One case where the label does not arrive, and now says so:** an adopted partition (footnote 28)
+whose filesystem is kept. `extraArgs` is an argument to `mkfs`, and the `mkfs` those arguments
+belong to is the one disko's `blkid` guard declines to run — so the filesystem keeps the name it
+already has and the `-L` is never executed. That was a silent drop; it is a **warning** now,
+naming both the requested label and the one on the disk, and pointing at `existing.format: true`
+as the only way to apply it. Verified in QEMU: the request was `NEWNAME`, the partition still reads
+`LABEL="OLDNAME"` after the install, and the warning said it would.
 ⁸⁹ **NixOS.** The refusal is correct and is now cited from the channel rather than from the
 shared helper's nine-distribution wording. `nixos-24.11` has no `grub-btrfs` as a package — the
 channel's whole btrfs attribute set is `btrfs-assistant`, `btrfs-auto-snapshot`, `btrfs-heatmap`,
@@ -543,12 +555,19 @@ partial shrink followed by a moved boundary is the one failure in this whole fil
 undone. schema.md §6.2 makes "cannot resize the filesystem" a MUST fail, so it fails. An entry
 carrying `resize` is also **not registered as an adoption**, so no boundary it names is ever
 emitted. What stops a `--lenient` run there is a separate gate: once any partition declares
-`existing`, the mode for the whole run is `format,mount`, and if an adoption then fails to resolve
-— a `resize`, a match that hit nothing, an unreadable disk — the remaining entries would be
-emitted the ordinary create-everything way, sized rather than pinned, and laid over the live table
-by GPT index. So `--apply` refuses outright when the number of resolved adoptions is less than the
-number declared, **outside `enforce()`**, in the same place and for the same reason as the
-delivery.md §5 consent check: `--lenient` may not wave this one through.
+`existing`, the mode for the whole run is `format,mount`, and if a disk is then rendered the
+ordinary create-everything way its entries are sized rather than pinned, so entry one lands on the
+GPT index a live partition occupies and `sgdisk`'s rename fallback retypes and reflags the very
+partition the document asked to keep. `--apply` therefore refuses outright, **outside `enforce()`**,
+in the same place and for the same reason as the delivery.md §5 consent check: `--lenient` may not
+wave this one through. The gate tests **two** conditions, because counting resolved matches finds
+only the first of them — a `resize`, a match that hit nothing or several, an unreadable disk — while
+these leave every match resolved and the plan around it broken anyway: a hole in the partition
+numbering, an MS-DOS label, no free space for what is declared, a LUKS container or volume group or
+array built over the adopted partition, and a *second* declared disk that carries a table of its own
+(which the count never looked at, since no entry on it adopts). Each of those cases was driven
+through the applier with a synthetic probed table and each now returns 1 from that gate, while a
+healthy adoption and a document that adopts nothing both pass it.
 ⁹² **NixOS: `false` is honoured exactly when an `existing` adoption accounts for the disk.**
 With no adoption declared the applier reads no disk, so it refuses as before — it would be
 guessing at what is on the platter. With an adoption resolved (footnote 28) the probe is there, and
